@@ -3,3 +3,4 @@
 .env.local
 .playwright-mcp/
 .claude/settings.local.json
+supabase/.temp/
