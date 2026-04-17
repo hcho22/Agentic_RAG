@@ -1,0 +1,15 @@
+# Railway deploy config for the FastAPI backend.
+# Service root must be set to `backend/` in the Railway dashboard so this
+# file and the Dockerfile resolve correctly.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Dockerfile CMD already binds uvicorn to 0.0.0.0:$PORT, so no startCommand
+# override is needed. Railway injects $PORT at runtime.
+healthcheckPath = "/healthz"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
