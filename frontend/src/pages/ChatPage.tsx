@@ -2,23 +2,26 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
 import { useToast } from '@/components/ui/toast'
-import { Button } from '@/components/ui/button'
+import { AppHeader } from '@/components/AppHeader'
 import { ThreadList } from '@/components/chat/ThreadList'
 import { MessageList } from '@/components/chat/MessageList'
 import { ChatInput } from '@/components/chat/ChatInput'
+import { ChatModeToggle } from '@/components/chat/ChatModeToggle'
 import {
   createThread,
   deriveTitle,
+  fetchBackendConfig,
   listMessages,
   listThreads,
   streamChatTurn,
   updateThreadTitle,
+  type ChatMode,
   type MessageRow,
   type ThreadRow,
 } from '@/lib/chat'
 
 export function ChatPage() {
-  const { user, signOut } = useAuth()
+  const { user } = useAuth()
   const { toast } = useToast()
   const navigate = useNavigate()
   const { threadId } = useParams<{ threadId?: string }>()
@@ -31,6 +34,23 @@ export function ChatPage() {
   const [messagesLoading, setMessagesLoading] = useState(false)
   const [streamingContent, setStreamingContent] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
+
+  const [mode, setMode] = useState<ChatMode>('responses')
+
+  useEffect(() => {
+    let cancelled = false
+    fetchBackendConfig()
+      .then((cfg) => {
+        if (!cancelled) setMode(cfg.default_chat_mode)
+      })
+      .catch(() => {
+        // Non-fatal: fall back to the UI's default. Backend still honours
+        // req.mode and its own CHAT_MODE_DEFAULT when mode is omitted.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const refreshThreads = useCallback(async () => {
     setThreadsLoading(true)
@@ -122,7 +142,7 @@ export function ChatPage() {
       let acc = ''
       setStreamingContent('')
       let gotError = false
-      for await (const evt of streamChatTurn(activeId, text)) {
+      for await (const evt of streamChatTurn(activeId, text, mode)) {
         if (evt.kind === 'delta') {
           acc += evt.text
           setStreamingContent(acc)
@@ -151,15 +171,7 @@ export function ChatPage() {
 
   return (
     <div className="flex h-screen flex-col bg-neutral-950 text-neutral-100">
-      <header className="flex items-center justify-between border-b border-neutral-800 px-6 py-3">
-        <h1 className="text-lg font-semibold">Agentic RAG</h1>
-        <div className="flex items-center gap-3 text-sm">
-          <span className="text-neutral-400">{user?.email}</span>
-          <Button variant="outline" size="sm" onClick={() => signOut()}>
-            Log out
-          </Button>
-        </div>
-      </header>
+      <AppHeader />
       <div className="flex min-h-0 flex-1">
         <ThreadList
           threads={threads}
@@ -168,6 +180,9 @@ export function ChatPage() {
           creating={creating}
         />
         <main className="flex min-w-0 flex-1 flex-col">
+          <div className="flex items-center justify-end border-b border-neutral-800 px-4 py-2">
+            <ChatModeToggle mode={mode} onChange={setMode} disabled={sending} />
+          </div>
           {messagesLoading ? (
             <div className="flex flex-1 items-center justify-center text-sm text-neutral-500">
               Loading conversation…
