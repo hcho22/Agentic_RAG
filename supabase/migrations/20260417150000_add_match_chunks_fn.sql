@@ -13,8 +13,12 @@
 -- to text-embedding-3-large (3072) requires updating both the chunks.embedding
 -- column and this function signature, then reapplying both migrations.
 
+-- pgvector is in the `extensions` schema on hosted Supabase; qualify the
+-- type in the signature/grant and include `extensions` in the function's
+-- search_path so the <=> operator resolves at runtime.
+
 create or replace function public.match_chunks(
-  query_embedding vector(1536),
+  query_embedding extensions.vector(1536),
   match_threshold float default 0.3,
   match_count int default 5
 )
@@ -29,7 +33,7 @@ returns table (
 language sql
 stable
 security invoker
-set search_path = public, pg_temp
+set search_path = public, extensions, pg_temp
 as $$
   select
     c.id,
@@ -47,5 +51,5 @@ as $$
   limit greatest(match_count, 0);
 $$;
 
-grant execute on function public.match_chunks(vector(1536), float, int)
+grant execute on function public.match_chunks(extensions.vector(1536), float, int)
   to authenticated;
