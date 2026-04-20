@@ -16,10 +16,28 @@ export type DocumentRow = {
   chunks_count: number
   uploaded_at: string
   deleted_at: string | null
+  content_hash: string | null
 }
 
 const DOCUMENT_COLUMNS =
-  'id, user_id, filename, storage_path, byte_size, content_type, status, error_message, chunks_count, uploaded_at, deleted_at'
+  'id, user_id, filename, storage_path, byte_size, content_type, status, error_message, chunks_count, uploaded_at, deleted_at, content_hash'
+
+// US-014: SHA-256 of the raw file bytes, lower-case hex. Matches hashlib.sha256
+// on the backend so the two sides can agree on a single content-addressable id.
+async function sha256Hex(file: File): Promise<string> {
+  const buf = await file.arrayBuffer()
+  const digest = await crypto.subtle.digest('SHA-256', buf)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+export type UploadResult = {
+  document: DocumentRow
+  // True when the file was already ingested under this user — no new row or
+  // blob was created; `document` is the existing one.
+  duplicate: boolean
+}
 
 export const ACCEPTED_EXTENSIONS = ['.txt', '.md'] as const
 export const ACCEPTED_MIME_TYPES = new Set([
@@ -50,9 +68,26 @@ export async function listDocuments(): Promise<DocumentRow[]> {
 // Uploads the raw file to Storage, creates a documents row, then triggers the
 // backend chunking pipeline. The backend flips status=ready and fills in
 // chunks_count once chunks are persisted (US-008).
-export async function uploadDocument(userId: string, file: File): Promise<DocumentRow> {
+//
+// US-014: dedupe by SHA-256 of file bytes. If the user already has a live
+// document with the same hash, return that row instead of re-uploading.
+export async function uploadDocument(userId: string, file: File): Promise<UploadResult> {
   if (!isAcceptedFile(file)) {
     throw new Error(`Unsupported file type: ${file.name}. Only .txt and .md are accepted.`)
+  }
+
+  const contentHash = await sha256Hex(file)
+
+  const { data: existing, error: lookupErr } = await supabase
+    .from('documents')
+    .select(DOCUMENT_COLUMNS)
+    .eq('user_id', userId)
+    .eq('content_hash', contentHash)
+    .is('deleted_at', null)
+    .maybeSingle()
+  if (lookupErr) throw lookupErr
+  if (existing) {
+    return { document: existing as DocumentRow, duplicate: true }
   }
 
   const insertRow = {
@@ -62,6 +97,7 @@ export async function uploadDocument(userId: string, file: File): Promise<Docume
     byte_size: file.size,
     content_type: file.type || null,
     status: 'processing' as DocumentStatus,
+    content_hash: contentHash,
   }
 
   const { data: created, error: insertErr } = await supabase
@@ -69,7 +105,21 @@ export async function uploadDocument(userId: string, file: File): Promise<Docume
     .insert(insertRow)
     .select(DOCUMENT_COLUMNS)
     .single()
-  if (insertErr) throw insertErr
+  if (insertErr) {
+    // Race: another concurrent upload of the same file won the unique index.
+    // Fetch and return the winner rather than erroring out.
+    if (insertErr.code === '23505') {
+      const { data: raced } = await supabase
+        .from('documents')
+        .select(DOCUMENT_COLUMNS)
+        .eq('user_id', userId)
+        .eq('content_hash', contentHash)
+        .is('deleted_at', null)
+        .maybeSingle()
+      if (raced) return { document: raced as DocumentRow, duplicate: true }
+    }
+    throw insertErr
+  }
   const doc = created as DocumentRow
 
   const storagePath = `${userId}/${doc.id}/${file.name}`
@@ -94,15 +144,8 @@ export async function uploadDocument(userId: string, file: File): Promise<Docume
     .single()
   if (pathErr) throw pathErr
 
-  try {
-    const updated = await triggerIngest(doc.id)
-    return updated ?? (pathed as DocumentRow)
-  } catch (e) {
-    // Backend marks the row status=error on failure; just surface the error
-    // to the caller so the UI can toast. Return the pathed row so the UI
-    // still lists it (status will reflect 'error' on next realtime update).
-    throw e
-  }
+  const updated = await triggerIngest(doc.id)
+  return { document: updated ?? (pathed as DocumentRow), duplicate: false }
 }
 
 async function triggerIngest(documentId: string): Promise<DocumentRow | null> {

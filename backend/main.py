@@ -19,6 +19,7 @@ messages table, and runs a manual tool-call loop that exposes the
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -692,7 +693,7 @@ async def get_config() -> dict:
 
 DOCUMENT_COLUMNS = (
     "id,user_id,filename,storage_path,byte_size,content_type,status,"
-    "error_message,chunks_count,uploaded_at,deleted_at"
+    "error_message,chunks_count,uploaded_at,deleted_at,content_hash"
 )
 
 
@@ -740,45 +741,123 @@ async def _delete_chunks(
     r.raise_for_status()
 
 
-async def _insert_chunks(
+def _hash_chunk(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def _fetch_existing_chunks(
+    http: httpx.AsyncClient, user: AuthedUser, document_id: str
+) -> list[dict]:
+    r = await http.get(
+        f"{SUPABASE_URL}/rest/v1/chunks",
+        params={
+            "document_id": f"eq.{document_id}",
+            "select": "id,chunk_index,content_hash,embedding",
+        },
+        headers=_supabase_headers(user),
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+async def _insert_chunk_rows(
+    http: httpx.AsyncClient,
+    user: AuthedUser,
+    rows: list[dict],
+) -> None:
+    if not rows:
+        return
+    BATCH = 200
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i : i + BATCH]
+        r = await http.post(
+            f"{SUPABASE_URL}/rest/v1/chunks",
+            headers={**_supabase_headers(user), "Prefer": "return=minimal"},
+            json=batch,
+        )
+        r.raise_for_status()
+
+
+async def _reconcile_chunks(
     http: httpx.AsyncClient,
     user: AuthedUser,
     document_id: str,
     chunks: list[str],
-    embeddings: list[list[float]] | None = None,
-) -> int:
-    if not chunks:
-        return 0
-    if embeddings is not None and len(embeddings) != len(chunks):
-        raise ValueError(
-            f"embeddings/chunks length mismatch: {len(embeddings)} vs {len(chunks)}"
+) -> dict[str, int]:
+    """US-015: diff `chunks` against existing rows by SHA-256 and replace.
+
+    Existing chunks whose content hash matches a new chunk have their
+    embedding reused verbatim (pgvector round-trips as a string). Only new /
+    modified chunks hit the OpenAI embeddings API. Pre-US-015 rows with a
+    NULL `content_hash` are treated as "not reusable" and get re-embedded on
+    their first post-migration ingest — one-time backfill via normal use.
+
+    We fetch existing rows first, then embed, then delete-and-reinsert so a
+    mid-pipeline failure never leaves half-written chunks behind (matches the
+    pre-US-015 safety boundary).
+
+    Returns per-position metrics: `chunks_added`, `chunks_removed`,
+    `chunks_unchanged`, `chunks_total`.
+    """
+    new_hashes = [_hash_chunk(c) for c in chunks]
+    existing = await _fetch_existing_chunks(http, user, document_id)
+
+    # First-seen-wins when the same hash appears on multiple existing rows
+    # (repeated content, or a past ingestion glitch) — the embedding is a
+    # pure function of the content, so any occurrence is interchangeable.
+    hash_to_embedding: dict[str, str] = {}
+    for row in existing:
+        h = row.get("content_hash")
+        emb = row.get("embedding")
+        if h and emb and h not in hash_to_embedding:
+            hash_to_embedding[h] = emb
+
+    to_embed_texts: list[str] = []
+    to_embed_positions: list[int] = []
+    for i, (text, h) in enumerate(zip(chunks, new_hashes)):
+        if h not in hash_to_embedding:
+            to_embed_positions.append(i)
+            to_embed_texts.append(text)
+
+    new_embeddings: list[list[float]] = (
+        await embed_texts(openai_client, to_embed_texts) if to_embed_texts else []
+    )
+    position_to_new_embedding = dict(zip(to_embed_positions, new_embeddings))
+
+    rows: list[dict] = []
+    for i, (text, h) in enumerate(zip(chunks, new_hashes)):
+        reused = hash_to_embedding.get(h)
+        embedding_value = reused if reused is not None else to_pgvector(
+            position_to_new_embedding[i]
         )
-    BATCH = 200
-    inserted = 0
-    for i in range(0, len(chunks), BATCH):
-        batch = chunks[i : i + BATCH]
-        batch_embeddings = (
-            embeddings[i : i + BATCH] if embeddings is not None else [None] * len(batch)
-        )
-        rows: list[dict] = []
-        for j, (text, emb) in enumerate(zip(batch, batch_embeddings)):
-            row: dict = {
+        rows.append(
+            {
                 "document_id": document_id,
                 "user_id": user.id,
-                "chunk_index": i + j,
+                "chunk_index": i,
                 "content": text,
+                "content_hash": h,
+                "embedding": embedding_value,
             }
-            if emb is not None:
-                row["embedding"] = to_pgvector(emb)
-            rows.append(row)
-        r = await http.post(
-            f"{SUPABASE_URL}/rest/v1/chunks",
-            headers={**_supabase_headers(user), "Prefer": "return=minimal"},
-            json=rows,
         )
-        r.raise_for_status()
-        inserted += len(rows)
-    return inserted
+
+    await _delete_chunks(http, user, document_id)
+    await _insert_chunk_rows(http, user, rows)
+
+    new_hash_set = set(new_hashes)
+    chunks_unchanged = sum(1 for h in new_hashes if h in hash_to_embedding)
+    chunks_added = len(new_hashes) - chunks_unchanged
+    chunks_removed = sum(
+        1 for row in existing
+        if not row.get("content_hash") or row["content_hash"] not in new_hash_set
+    )
+
+    return {
+        "chunks_added": chunks_added,
+        "chunks_removed": chunks_removed,
+        "chunks_unchanged": chunks_unchanged,
+        "chunks_total": len(rows),
+    }
 
 
 async def _patch_document(
@@ -820,15 +899,33 @@ async def ingest_document(
             except UnicodeDecodeError as e:
                 raise ValueError(f"file is not valid utf-8: {e}") from e
 
+            # US-014: backfill documents.content_hash on re-ingest of rows
+            # that pre-date the hashing feature or were created by a non-UI
+            # caller. The frontend already sets it on insert for new uploads.
+            if not doc.get("content_hash"):
+                await _patch_document(
+                    http,
+                    user,
+                    document_id,
+                    content_hash=hashlib.sha256(raw).hexdigest(),
+                )
+
             chunks = chunk_text(text)
-            # Embed first so a mid-pipeline failure doesn't leave half-written
-            # chunk rows behind — _delete_chunks + _insert_chunks are the
-            # atomic-ish boundary (PostgREST doesn't give us a real tx, but
-            # re-running ingest is idempotent via _delete_chunks).
-            embeddings = await embed_texts(openai_client, chunks)
-            await _delete_chunks(http, user, document_id)
-            chunk_count = await _insert_chunks(
-                http, user, document_id, chunks, embeddings
+            # US-015: reconcile by content_hash so only new/changed chunks
+            # hit the OpenAI embeddings API; unchanged chunks reuse the
+            # embedding already in the DB. _reconcile_chunks is the
+            # atomic-ish boundary (PostgREST has no real tx, but re-running
+            # ingest stays idempotent via the delete-then-insert inside).
+            metrics = await _reconcile_chunks(http, user, document_id, chunks)
+            chunk_count = metrics["chunks_total"]
+            log.info(
+                "ingest.reconcile document_id=%s chunks_added=%d "
+                "chunks_removed=%d chunks_unchanged=%d chunks_total=%d",
+                document_id,
+                metrics["chunks_added"],
+                metrics["chunks_removed"],
+                metrics["chunks_unchanged"],
+                chunk_count,
             )
             updated = await _patch_document(
                 http,
@@ -853,6 +950,9 @@ async def ingest_document(
     return {
         "document": updated,
         "chunks": chunk_count,
+        "chunks_added": metrics["chunks_added"],
+        "chunks_removed": metrics["chunks_removed"],
+        "chunks_unchanged": metrics["chunks_unchanged"],
         "chunk_size_tokens": size,
         "chunk_overlap_tokens": overlap,
         "embedding_model": get_embedding_model(),
