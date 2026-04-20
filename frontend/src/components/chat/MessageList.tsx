@@ -17,7 +17,12 @@ export function MessageList({ messages, streaming, emptyHint }: Props) {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages, streaming?.content])
 
-  const visible = messages.filter((m) => m.role === 'user' || m.role === 'assistant')
+  // US-012: persisted assistant rows that only emitted tool_calls have null /
+  // empty content — those are trace fidelity only and shouldn't render as
+  // empty bubbles. Tool rows carry raw JSON payloads and are also hidden.
+  const visible = messages.filter(
+    (m) => (m.role === 'user' || m.role === 'assistant') && (m.content ?? '').trim().length > 0,
+  )
 
   if (visible.length === 0 && !streaming) {
     return (
@@ -31,7 +36,7 @@ export function MessageList({ messages, streaming, emptyHint }: Props) {
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-3xl space-y-4 px-4 py-6">
         {visible.map((m) => (
-          <MessageBubble key={m.id} role={m.role as 'user' | 'assistant'} content={m.content} />
+          <MessageBubble key={m.id} role={m.role as 'user' | 'assistant'} content={m.content ?? ''} />
         ))}
         {streaming && <MessageBubble role="assistant" content={streaming.content} streaming />}
         <div ref={endRef} />

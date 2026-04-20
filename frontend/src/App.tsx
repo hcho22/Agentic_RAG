@@ -4,6 +4,7 @@ import { ProtectedRoute } from '@/components/ProtectedRoute'
 import { ToastProvider } from '@/components/ui/toast'
 import { LoginPage } from '@/pages/LoginPage'
 import { ChatPage } from '@/pages/ChatPage'
+import { IngestionPage } from '@/pages/IngestionPage'
 import { AuthCallback } from '@/pages/AuthCallback'
 
 export default function App() {
@@ -27,6 +28,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <ChatPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/ingestion"
+            element={
+              <ProtectedRoute>
+                <IngestionPage />
               </ProtectedRoute>
             }
           />

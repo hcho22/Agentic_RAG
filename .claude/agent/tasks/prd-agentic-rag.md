@@ -220,13 +220,13 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 
 **Acceptance Criteria:**
 
-- [ ] `/ingestion` route accessible from the main nav
-- [ ] Drop zone accepts one or more files; also supports click-to-browse
-- [ ] List of uploaded documents with columns: filename, status, chunks, uploaded_at
-- [ ] Delete button on each row (soft-deletes the document and its chunks)
-- [ ] Initial version restricts accepted types to `.txt` and `.md` (expanded in Module 5)
-- [ ] Typecheck passes
-- [ ] Verify in browser using dev-browser skill
+- [x] `/ingestion` route accessible from the main nav
+- [x] Drop zone accepts one or more files; also supports click-to-browse
+- [x] List of uploaded documents with columns: filename, status, chunks, uploaded_at
+- [x] Delete button on each row (soft-deletes the document and its chunks)
+- [x] Initial version restricts accepted types to `.txt` and `.md` (expanded in Module 5)
+- [x] Typecheck passes
+- [ ] Verify in browser using dev-browser skill *(deferred — dev-browser skill not available in this environment, same pattern as US-003/US-004/US-006)*
 
 **Validation Test:**
 
@@ -238,17 +238,28 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Step 1 creates a row with status "processing" then "ready". Step 2 shows a toast error and does not create a row. Step 3 removes the row (and underlying chunks).
 - **Failure Indicator:** Unsupported types accepted silently, status doesn't update, or delete leaves orphan chunks.
 
+**Implementation notes (US-007):**
+
+- New migration `supabase/migrations/20260417120000_init_documents.sql` creates `public.documents` (id, user_id, filename, storage_path, byte_size, content_type, status, error_message, chunks_count, uploaded_at, deleted_at) with RLS scoped to `auth.uid() = user_id`. A partial index on `(user_id, uploaded_at desc) where deleted_at is null` keeps the list query fast.
+- Same migration creates a private Supabase Storage bucket `documents` and four RLS policies (`select/insert/update/delete`) keyed on the first path segment equalling `auth.uid()`. Object paths are `<user_id>/<document_id>/<filename>`, which enforces per-user scoping at the blob layer too.
+- Frontend-only pipeline for this story (no new backend route): `frontend/src/lib/ingestion.ts` handles upload (insert `documents` row `status=processing` → upload to Storage → patch to `status=ready`), list (`listDocuments`), and soft-delete (`softDeleteDocument` sets `deleted_at`). Real parse/chunk/embed flows in via US-008+; the migration already has the status enum + `chunks_count` column so later modules can fill them in without a schema change.
+- New route `/ingestion` in `App.tsx`, protected by `ProtectedRoute`. New `components/AppHeader.tsx` renders a shared Chat / Ingestion nav and is used by both `ChatPage` and the new `IngestionPage` (ChatPage's inline header was replaced with it).
+- Drop zone (`components/ingestion/DropZone.tsx`) handles drag-and-drop and click-to-browse via a hidden `<input type="file" multiple accept=".txt,.md">`. Per-file validation runs in `handleFiles` (`isAcceptedFile` gates by extension) so unsupported types surface a toast without touching Storage.
+- `components/ingestion/DocumentsTable.tsx` renders filename, status badge (color-coded per enum), chunks count, uploaded_at, and a delete button. `chunks_count` is always 0 until US-008 wires chunking.
+- Soft-delete is `update deleted_at = now()` — row survives for audit/undo. Hard-delete + Storage blob cleanup is US-019 (cascade deletes on document removal); leaving the blob for now is intentional.
+- Verification: `npm run typecheck` in `frontend/` passes. Browser verification deferred as with earlier stories. PRD validation step 2 (dragging a `.jpg`): the DropZone's `<input accept>` narrows the picker, and `handleFiles` explicitly toasts any rejected file — dropped files still fire through `handleFiles` so unsupported drops surface the same error.
+
 #### US-008: Chunking pipeline
 
 **Description:** As a developer, I need a chunking function that splits uploaded text into overlapping chunks so they can be embedded and retrieved.
 
 **Acceptance Criteria:**
 
-- [ ] `documents` and `chunks` tables created with FK `chunks.document_id → documents.id ON DELETE CASCADE`
-- [ ] Chunking uses token-based size (default 500 tokens, 50-token overlap) configurable via env
-- [ ] Each chunk stored with `content`, `chunk_index`, `document_id`, `user_id`
-- [ ] RLS policies on both tables
-- [ ] Typecheck passes
+- [x] `documents` and `chunks` tables created with FK `chunks.document_id → documents.id ON DELETE CASCADE`
+- [x] Chunking uses token-based size (default 500 tokens, 50-token overlap) configurable via env
+- [x] Each chunk stored with `content`, `chunk_index`, `document_id`, `user_id`
+- [x] RLS policies on both tables
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -260,17 +271,28 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Chunk count ≈ 20 (±2). Consecutive chunks share ~50 tokens of text.
 - **Failure Indicator:** Single chunk (no splitting), no overlap, or chunks exceed configured size significantly.
 
+**Implementation notes (US-008):**
+
+- **Migration** `supabase/migrations/20260417130000_init_chunks.sql` adds only `public.chunks(id, document_id, user_id, chunk_index, content, created_at)` — `public.documents` already exists from US-007 (`20260417120000_init_documents.sql`), so this story does not redefine it. FK `chunks.document_id → documents.id ON DELETE CASCADE`; `unique(document_id, chunk_index)`; indexes on both `user_id` and `document_id`.
+- **RLS on chunks**: enabled; select/update/delete pivot on `auth.uid() = user_id`; insert additionally verifies the parent document belongs to the same user (defence-in-depth against a forged `document_id`). `user_id` is denormalised onto chunks so retrieval RLS stays a single-column check without a join — important once embedding similarity queries start driving the filter.
+- **Chunker** `backend/chunking.py` uses `tiktoken` (`cl100k_base`, covers `text-embedding-3-*` and `gpt-4o-*`). `chunk_text(text)` returns overlapping windows; size + overlap default to `(500, 50)` and can be overridden via `CHUNK_SIZE_TOKENS` / `CHUNK_OVERLAP_TOKENS`. Empty/whitespace input → `[]`; input ≤ size → one chunk. Smoke test: 9,425-token input → 21 chunks (PRD expects ~20±2), max chunk = 500 tokens, last-50 of chunk N equals first-50 of chunk N+1.
+- **Ingestion endpoint** `POST /api/documents/{id}/ingest` in `backend/main.py` picks up a US-007 upload once its Storage blob exists: flips `status='processing'`, downloads the blob via Supabase Storage with the user's JWT (bucket RLS still applies), UTF-8 decodes, chunks, drops any prior chunks for that document (idempotent re-ingest), bulk-inserts chunks in batches of 200 via a single PostgREST array POST, then patches the document to `status='ready'` with `chunks_count` filled in. Any failure flips to `status='error'` with the truncated error message and returns a 500. JWT is forwarded on every request so RLS governs inserts.
+- **Frontend wiring** `frontend/src/lib/ingestion.ts::uploadDocument` now: inserts the row → uploads to Storage → patches `storage_path` → calls `POST /api/documents/{id}/ingest`. The backend is the single writer for `status='ready'` + `chunks_count` now, so the frontend no longer flips the row to ready itself. This matches US-007's deferred-to-US-008 note.
+- **New deps**: `tiktoken==0.8.0` (added to `backend/requirements.txt`).
+- **Env vars added**: `CHUNK_SIZE_TOKENS=500`, `CHUNK_OVERLAP_TOKENS=50` in `backend/.env.example`.
+- Verification: `python -m py_compile main.py chunking.py` and `npm run typecheck` (frontend) both pass. Live DB + Storage round-trip is blocked on the user running the new migration — the endpoint is curl-testable once `public.documents` has a row pointing at an uploaded blob.
+
 #### US-009: Embeddings stored in pgvector
 
 **Description:** As a developer, I need each chunk embedded with OpenAI's embedding model and stored in pgvector so semantic retrieval is possible.
 
 **Acceptance Criteria:**
 
-- [ ] `chunks.embedding vector(1536)` column (text-embedding-3-small) or `vector(3072)` (text-embedding-3-large), model configurable via env
-- [ ] Embeddings generated in batches (up to 100 per API call)
-- [ ] HNSW or IVFFlat index created on the embedding column
-- [ ] Embedding failures retried with exponential backoff (3 attempts)
-- [ ] Typecheck passes
+- [x] `chunks.embedding vector(1536)` column (text-embedding-3-small) or `vector(3072)` (text-embedding-3-large), model configurable via env
+- [x] Embeddings generated in batches (up to 100 per API call)
+- [x] HNSW or IVFFlat index created on the embedding column
+- [x] Embedding failures retried with exponential backoff (3 attempts)
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -281,17 +303,25 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** All chunks have embeddings. Query plan uses the HNSW/IVFFlat index (not a sequential scan).
 - **Failure Indicator:** Null embeddings, missing index, or sequential scan on a table with >1000 rows.
 
+**Implementation notes (US-009):**
+
+- **Migration** `supabase/migrations/20260417140000_add_chunks_embedding.sql` adds `chunks.embedding vector(1536)` and a HNSW index using `vector_cosine_ops` (pairs with the `<=>` operator used in later retrieval stories). Column dim is fixed at DDL time — switching to `text-embedding-3-large` requires editing the migration to `vector(3072)` and reapplying. HNSW picked over IVFFlat per the PRD Technical Considerations note (no training step, stable recall on small corpora).
+- **Embeddings module** `backend/embeddings.py`. `embed_texts(client, texts)` batches inputs at 100 per OpenAI call (PRD ceiling — `EMBEDDING_BATCH_SIZE` lets you go smaller, not larger). `_embed_batch_with_retry` wraps each call in an exponential-backoff loop (1s → 2s → 4s, 3 attempts by default via `EMBEDDING_MAX_RETRIES`) and re-raises on final failure. API returns are sorted by `index` as defence-in-depth even though OpenAI preserves input order. `to_pgvector(values)` formats a float list as `'[...]'` text — PostgREST sends JSON, and pgvector's `vector_in` parses that text shape on the way in.
+- **Ingestion wiring** `backend/main.py::ingest_document` now embeds chunks *before* deleting the prior chunk rows, so a transient embedding failure leaves the previous ready state intact. Chunks are then re-inserted with embeddings as part of the same array POST (`_insert_chunks` grew an optional `embeddings` arg; payloads include `embedding` as a pgvector literal when present). Failure path still flips the document to `status='error'` with a truncated message — now also surfaces embedding/network errors. The reused `openai_client` is already wrapped by `langsmith.wrap_openai`, so every batched embeddings call posts its own span automatically (US-005 still satisfied).
+- **Env vars added** in `backend/.env.example`: `EMBEDDING_MODEL=text-embedding-3-small`, `EMBEDDING_BATCH_SIZE=100`, `EMBEDDING_MAX_RETRIES=3`.
+- **Verification** — `python3 -m py_compile main.py chunking.py embeddings.py` and `npm run typecheck` (frontend) both pass. Smoke-checked `embed_texts([])` short-circuit and `to_pgvector` format. Live DB validation (PRD step 2: `EXPLAIN ANALYZE` on the HNSW index) requires the user to apply the new migration and ingest a ≥5k-token document; pgvector's HNSW kicks in automatically once the table has rows and the query uses `<=>`.
+
 #### US-010: Retrieval tool exposed to the agent
 
 **Description:** As an agent, I need a `search_documents` tool that performs vector similarity search over the user's chunks so I can ground responses in retrieved context.
 
 **Acceptance Criteria:**
 
-- [ ] Tool schema (JSON Schema) defined with Pydantic: `{query: str, top_k: int = 5}`
-- [ ] Tool implementation embeds the query, runs pgvector similarity, returns top-k chunks with document filename and similarity score
-- [ ] Similarity threshold (default 0.3) filters out low-relevance matches, configurable via env
-- [ ] Results respect RLS (only the current user's chunks)
-- [ ] Typecheck passes
+- [x] Tool schema (JSON Schema) defined with Pydantic: `{query: str, top_k: int = 5}`
+- [x] Tool implementation embeds the query, runs pgvector similarity, returns top-k chunks with document filename and similarity score
+- [x] Similarity threshold (default 0.3) filters out low-relevance matches, configurable via env
+- [x] Results respect RLS (only the current user's chunks)
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -303,19 +333,30 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Step 1 returns User A's relevant chunks. Step 2 returns 0 results (or only User B's chunks if any match). Step 3 returns 0 results because all scores are below threshold.
 - **Failure Indicator:** Cross-user leakage, no threshold filtering, or tool returns results unranked.
 
+**Implementation notes (US-010):**
+
+- **Migration** `supabase/migrations/20260417150000_add_match_chunks_fn.sql` adds `public.match_chunks(query_embedding vector(1536), match_threshold float, match_count int)` returning `(id, document_id, chunk_index, content, similarity, filename)`. `SECURITY INVOKER` (default) + `grant execute ... to authenticated` — so calling the RPC through PostgREST with a user JWT still triggers the existing RLS policies on `chunks` / `documents`. No cross-user leakage path because RLS is evaluated inside the function body; the function body cannot elevate its own privileges.
+- **Similarity math** — pgvector's `<=>` is cosine *distance* (0 = identical, 2 = opposite). OpenAI embeddings are unit-normalised, so `1 - (a <=> b)` is cosine similarity in `[0, 1]` for practical inputs. The function filters rows where similarity `>= match_threshold`, then orders by `<=> asc` (equivalent to similarity desc) so the HNSW `vector_cosine_ops` index from US-009 is used directly.
+- **Soft-deletes** — the function joins `documents` and requires `d.deleted_at is null`, so chunks whose parent was soft-deleted in the UI never reach the agent.
+- **Retrieval module** `backend/retrieval.py` defines `SearchDocumentsInput` (query, top_k: int = 5, `1..50`) as the Pydantic source-of-truth for both runtime validation and the tool JSON Schema (`search_documents_tool_schema()` emits the Chat Completions `tools[]` entry for US-011). `search_documents(...)` embeds the query via the shared (LangSmith-wrapped) OpenAI client, then POSTs `/rest/v1/rpc/match_chunks` with the user's access-token headers so RLS stays in the hot path. `to_pgvector` reused from US-009 serialises the embedding into the `'[...]'` text literal pgvector's input function expects.
+- **Threshold config** — `SEARCH_SIMILARITY_THRESHOLD` env var (default `0.3`, range `[0,1]`). Enforced both server-side (the RPC's `match_threshold` argument) and re-validated by `get_similarity_threshold()`; out-of-range values raise at call time rather than silently clamping.
+- **Testable endpoint** `POST /api/search {query, top_k?}` added to `backend/main.py` — independently exercises the tool without waiting for US-011's Chat Completions loop. The endpoint re-uses the same `AuthedUser` dependency as `/api/chat`, so PRD steps 1–3 (cross-user isolation, nonsense query → empty) are verifiable with two curl calls against two JWTs.
+- **Env vars added** in `backend/.env.example`: `SEARCH_SIMILARITY_THRESHOLD=0.3`.
+- **Verification** — `python3 -m py_compile main.py chunking.py embeddings.py retrieval.py` passes; `npm run typecheck` (frontend) still passes; smoke-tested that `SearchDocumentsInput` rejects `query=""` and `top_k=0`, and that `search_documents_tool_schema()` emits valid JSON Schema with the expected `minLength`/`minimum`/`maximum` bounds. Live RLS check (PRD validation test) requires the user to apply the new migration, ingest a document as two different accounts, and hit `POST /api/search` with each JWT.
+
 #### US-011: Chat Completions API with dual-support toggle
 
 **Description:** As a user, I want to choose between OpenAI's managed Responses API and the standard Chat Completions API (with my own retrieval) on a per-request basis.
 
 **Acceptance Criteria:**
 
-- [ ] Backend endpoint accepts `{mode: "responses" | "completions", ...}` per chat request
-- [ ] "Completions" mode uses the standard Chat Completions API with `search_documents` as a registered tool
-- [ ] UI has a toggle (settings or per-thread) to pick the mode; default configurable via env
-- [ ] Both code paths share the same streaming interface to the frontend
-- [ ] Tool-call loop (request → tool call → tool result → final response) implemented for Completions mode
-- [ ] Typecheck passes
-- [ ] Verify in browser using dev-browser skill
+- [x] Backend endpoint accepts `{mode: "responses" | "completions", ...}` per chat request
+- [x] "Completions" mode uses the standard Chat Completions API with `search_documents` as a registered tool
+- [x] UI has a toggle (settings or per-thread) to pick the mode; default configurable via env
+- [x] Both code paths share the same streaming interface to the frontend
+- [x] Tool-call loop (request → tool call → tool result → final response) implemented for Completions mode
+- [x] Typecheck passes
+- [ ] Verify in browser using dev-browser skill *(deferred — dev-browser skill not available in this environment, same pattern as US-003/US-004/US-006/US-007)*
 
 **Validation Test:**
 
@@ -328,16 +369,31 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Both modes return a grounded answer. Step 4 shows Responses API trace for turn 1 and Chat Completions trace (with a `search_documents` tool span) for turn 2.
 - **Failure Indicator:** One mode fails to ground on retrieved content, toggle doesn't switch behavior, or traces don't distinguish the two paths.
 
+**Implementation notes (US-011):**
+
+- **Request shape** — `ChatRequest` grew an optional `mode: 'responses' | 'completions'` field in `backend/main.py`. Omitted → server falls back to `CHAT_MODE_DEFAULT` (default `responses`). `POST /api/chat` picks one of two streaming functions based on `mode`; the SSE transport (`event: delta | done | error` with the same payload shape) is unchanged so the frontend renders both modes identically.
+- **Responses path** — renamed `_stream_reply` → `_stream_responses_reply` and retagged its LangSmith span as `chat_turn_responses` so traces can filter by mode. Behaviour is otherwise US-004.
+- **Completions path** — new `_stream_completions_reply` (LangSmith span `chat_turn_completions`). Loads prior user/assistant messages from Supabase (minimum viable history — US-012 formalises the configurable sliding window + tool-message persistence), prepends a system prompt that nudges the model to call `search_documents`, and runs the tool-call loop.
+- **Tool-call loop** — manual, capped at `MAX_TOOL_ITERATIONS = 5` per the PRD Technical Considerations note. Per iteration: open a streaming `chat.completions.create` with `tools=[search_documents_tool_schema()]`; fold delta `content` into `full_text_parts` (streamed to the client as `event: delta`) and accumulate `delta.tool_calls` by `index` into `{id, name, arguments}` slots since Chat Completions streams tool-call arguments in partial chunks. On `finish_reason='tool_calls'` append an assistant turn with `tool_calls`, execute each call via `_execute_tool_call`, append one `role='tool'` message per call, re-request. Any other `finish_reason` (usually `stop`) ends the loop; blowing past the iteration cap emits an `error` event.
+- **Tool dispatch** — `_execute_tool_call` validates the JSON args with `SearchDocumentsInput`, then reuses the existing `search_documents` helper (same path as `POST /api/search`), so the RLS-scoped pgvector RPC from US-010 is the single source of retrieval. Errors (bad JSON, Pydantic validation, RPC failure) are serialised into the tool payload rather than aborting the turn — OpenAI's recommended pattern so the model can self-correct.
+- **LangSmith fidelity** — because `openai_client` is already wrapped with `langsmith.wrap_openai`, each `chat.completions.create` stream and each `embeddings.create` (inside `search_documents`) posts its own child span under the `chat_turn_completions` parent. Metadata is merged onto the active run via `_attach_run_metadata(user_id, thread_id, mode, user_message_id, assistant_message_id)` so the PRD's "traces distinguish the two paths" check holds.
+- **History scope** — the completions path pulls *all* persisted user/assistant rows for the thread (RLS-scoped). Tool-call persistence + a configurable window are explicitly US-012. Tool rows in the messages table are ignored here so we don't inject orphan `tool_call_id`s that no longer match any in-flight assistant turn.
+- **Public config endpoint** — new `GET /api/config` returns `{default_chat_mode, supported_chat_modes, file_search_enabled}`. Frontend hits this on mount to seed the toggle.
+- **Frontend wiring** — `frontend/src/lib/chat.ts` exports `ChatMode`, `BackendConfig`, and `fetchBackendConfig`; `streamChatTurn` now takes a required `mode` argument and forwards it in the POST body. `ChatPage` holds the current mode in state, initialises it from `fetchBackendConfig` (falling back to `'responses'` if the config call fails), and passes it through.
+- **UI surface** — new `components/chat/ChatModeToggle.tsx`, a two-option segmented control (radiogroup semantics, `aria-checked`, hover titles describing each mode). Placed above the conversation pane so it's reachable per-thread. Disabled while a turn is in flight.
+- **Env vars added** — `CHAT_MODE_DEFAULT=responses` in `backend/.env.example`. Invalid values fail fast at import time.
+- **Verification** — `python3 -m py_compile main.py chunking.py embeddings.py retrieval.py` and `npm run typecheck` (frontend) both pass. Live validation (PRD steps 1–4) requires an OpenAI key + LangSmith project + an ingested test document; the mode toggle flips the SSE producer without any other UX change, and LangSmith will show the `chat_turn_responses` vs `chat_turn_completions` span trees side-by-side.
+
 #### US-012: Stateless chat history persisted in Supabase
 
 **Description:** As a user, in Chat Completions mode I want my conversation history to persist across turns and page reloads (since the API is stateless).
 
 **Acceptance Criteria:**
 
-- [ ] Every user and assistant message written to `messages` table
-- [ ] Prior messages (sliding window, default last 20 turns, configurable) included in the Chat Completions prompt
-- [ ] Tool calls and tool results stored as `messages.role = 'tool'` rows for trace fidelity
-- [ ] Typecheck passes
+- [x] Every user and assistant message written to `messages` table
+- [x] Prior messages (sliding window, default last 20 turns, configurable) included in the Chat Completions prompt
+- [x] Tool calls and tool results stored as `messages.role = 'tool'` rows for trace fidelity
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -349,18 +405,34 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Step 3 returns "green", proving history was reloaded from Supabase.
 - **Failure Indicator:** Assistant has no memory after refresh, or history is stored but not included in the prompt.
 
+**Implementation notes (US-012):**
+
+- **Migration** `supabase/migrations/20260417160000_messages_tool_columns.sql` drops `NOT NULL` on `messages.content` (assistant rows that only emit `tool_calls` legitimately have no text), and adds three columns: `tool_calls jsonb` (OpenAI-format `[{id, type, function: {name, arguments}}, ...]` attached to the assistant row that requested the calls), `tool_call_id text` (set on `role='tool'` rows to link a result back to its spawning call), and `name text` (tool name on `role='tool'` rows, purely for trace fidelity). Role check constraint + RLS policies from US-001 are unchanged — tool rows inherit thread-owner access via the existing parent-thread join.
+- **Backend — per-turn persistence** `_stream_completions_reply` in `backend/main.py` now writes every step of the tool-call loop to Supabase, not just the final assistant answer:
+  1. User message (unchanged) → on entry.
+  2. On `finish_reason='tool_calls'`: persist an `assistant` row with `content = iter_content or null` and `tool_calls = <openai list>`. Then for each tool call: execute it, persist a `tool` row with `tool_call_id`, `name`, and the JSON result as `content`.
+  3. On any other finish reason: persist the final `assistant` row with its content (no `tool_calls`).
+  Every DB write shares the user's JWT via `_supabase_headers`, so RLS still gates inserts. The `done` SSE event now carries the final assistant row's id specifically, not an accumulated id.
+- **Backend — sliding window** New env `CHAT_HISTORY_MAX_TURNS` (default 20). `_apply_history_window` walks the ascending-ordered message list, finds the index of the Nth-from-last `user` row, and returns the slice from there — a "turn" is a user row plus everything that followed it until the next user row, so assistant + tool intermediates stay grouped with their user root. Zero disables history; fewer turns than the budget short-circuits to returning `prior` unchanged.
+- **Backend — projection** `_prior_to_completions` now handles all four role cases: `user`, plain `assistant` (content only), `assistant` with `tool_calls` (content nullable + `tool_calls` passed through verbatim), and `tool` (emits `{role, tool_call_id, content, name?}`). Orphan guard: maintains a `pending_tool_call_ids` set seeded from each assistant-with-tool_calls turn; a `tool` row only enters the projection if its `tool_call_id` is in that set, and if the final assistant-with-tool_calls turn has unanswered ids it's dropped entirely so OpenAI doesn't 400 on mismatched ids.
+- **Backend — insert helper** `_insert_message` grew optional kw-only `tool_calls`, `tool_call_id`, `name` and now accepts `content: str | None`. Old call sites (user + plain assistant + Responses mode) are unchanged.
+- **Responses mode unchanged** US-004's Responses path still persists just `user` + `assistant` rows — OpenAI owns the conversation state via `previous_response_id`, so tool spans don't need to land in our `messages` table. The PRD's US-012 AC targets Completions mode specifically (history reload after refresh); Responses handles that server-side via its managed thread.
+- **Frontend** `MessageRow.content` widened to `string | null`; `MessageList` now filters to `role ∈ {user, assistant}` AND `content.trim().length > 0`, so intermediate assistant rows (pure tool-call turns) and tool rows don't render as empty bubbles — they exist in the DB for trace fidelity / next-turn context only. The optimistic user row already sets `content` to a `string`, so no call-site typing change was needed.
+- **Env vars added** `CHAT_HISTORY_MAX_TURNS=20` in `backend/.env.example`.
+- **Verification** `python3 -m py_compile main.py chunking.py embeddings.py retrieval.py` and `npm run typecheck` (frontend) both pass. PRD validation test (favorite-color recall across a refresh) is runnable end-to-end once the user applies the new migration: the second question ("What is my favorite color?") will re-fetch all prior rows via `_load_prior_messages`, the window keeps the green-color turn, and the Completions call sees it in the prompt.
+
 #### US-013: Realtime ingestion status via Supabase Realtime
 
 **Description:** As a user, I want to see ingestion status (queued → processing → ready / error) update live without refreshing.
 
 **Acceptance Criteria:**
 
-- [ ] `documents.status` column with enum: `queued | processing | ready | error`
-- [ ] Frontend subscribes to Supabase Realtime on the `documents` table filtered by `user_id`
-- [ ] Status badge updates in real time as the backend progresses
-- [ ] Error messages visible in the UI on `status = error`
-- [ ] Typecheck passes
-- [ ] Verify in browser using dev-browser skill
+- [x] `documents.status` column with enum: `queued | processing | ready | error`
+- [x] Frontend subscribes to Supabase Realtime on the `documents` table filtered by `user_id`
+- [x] Status badge updates in real time as the backend progresses
+- [x] Error messages visible in the UI on `status = error`
+- [x] Typecheck passes
+- [ ] Verify in browser using dev-browser skill *(deferred — dev-browser skill not available in this environment, same pattern as earlier stories)*
 
 **Validation Test:**
 
@@ -371,6 +443,19 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
   3. Upload a deliberately malformed file (e.g., corrupted)
 - **Expected Result:** Step 2 shows badge transition queued → processing → ready without refresh. Step 3 ends in `error` with a readable error message.
 - **Failure Indicator:** Requires manual refresh to see status updates, or errors are silent.
+
+**Implementation notes (US-013):**
+
+- **Status enum** already in place from US-007 (`20260417120000_init_documents.sql`): `status text not null default 'queued' check (status in ('queued','processing','ready','error'))`. Backend transitions it from `processing` → `ready|error` inside `ingest_document` (US-008). No schema change needed for the enum itself.
+- **Migration** `supabase/migrations/20260417170000_documents_realtime.sql`: `alter publication supabase_realtime add table public.documents;` + `alter table public.documents replica identity full;`. The publication grant is what turns on the websocket broadcast; `REPLICA IDENTITY FULL` makes UPDATE payloads carry the full `old` row so the client can cheaply detect transitions (e.g. `old.status !== 'error' && new.status === 'error'` for the error-toast trigger) without refetching. RLS still governs what each subscriber is allowed to receive — Realtime checks each row against `documents_select_own` per-connection, so the `user_id=eq.<uid>` filter is a wire-chatter optimisation, not a security boundary.
+- **Frontend helper** `frontend/src/lib/ingestion.ts::subscribeToDocuments(userId, handlers)` wraps `supabase.channel('documents:<uid>').on('postgres_changes', {event:'*', schema:'public', table:'documents', filter:'user_id=eq.<uid>'}, ...)`. Dispatches INSERT/UPDATE/DELETE through typed handler callbacks (UPDATE also receives `old` for transition checks). Returns an unsubscribe thunk that calls `supabase.removeChannel(channel)` — callers hand it back as a React effect cleanup.
+- **IngestionPage wiring** `useEffect` keyed on `user` opens the subscription and writes three handlers:
+  - `onInsert`: prepend the row unless already present (dedup against the optimistic post-upload insert).
+  - `onUpdate`: find the row by id and replace; if `deleted_at` is now set, filter it out. On `status` transitioning into `error` (gated by `old.status !== 'error'` so re-renders don't re-toast) surface a toast including `error_message` when available.
+  - `onDelete`: remove by id (handles the future US-019 hard-delete path; soft-delete goes through the UPDATE branch).
+  The optimistic upload path in `handleFiles` now upserts by id instead of always prepending, so the Realtime INSERT that arrives for the same row is a no-op.
+- **Status badge + error message** already rendered by `DocumentsTable` (styled per enum via `STATUS_STYLES`, `error_message` shown under the filename on error) — the Realtime updates just mutate the row and React re-renders. No DOM / component change was needed.
+- **Verification** `npm run typecheck` passes. Live validation (PRD steps 1–3) requires the user to apply the new migration and ensure the `supabase_realtime` publication is enabled on their Supabase project (it is by default on hosted Supabase). Browser verification deferred as with earlier UI stories.
 
 ---
 

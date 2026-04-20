@@ -12,7 +12,10 @@ export type MessageRow = {
   id: string
   thread_id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
-  content: string
+  // US-012: assistant rows that only emit tool_calls have null content;
+  // tool rows always have stringified-JSON content but we widen the type for
+  // parity with the DB schema (content is nullable).
+  content: string | null
   created_at: string
 }
 
@@ -59,10 +62,24 @@ export function deriveTitle(firstUserMessage: string): string {
 
 const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000').replace(/\/$/, '')
 
+export type ChatMode = 'responses' | 'completions'
+
 export type ChatStreamEvent =
   | { kind: 'delta'; text: string }
   | { kind: 'done'; messageId: string; responseId: string | null }
   | { kind: 'error'; message: string }
+
+export type BackendConfig = {
+  default_chat_mode: ChatMode
+  supported_chat_modes: ChatMode[]
+  file_search_enabled: boolean
+}
+
+export async function fetchBackendConfig(): Promise<BackendConfig> {
+  const res = await fetch(`${BACKEND_URL}/api/config`)
+  if (!res.ok) throw new Error(`config fetch failed (${res.status})`)
+  return (await res.json()) as BackendConfig
+}
 
 // Stream a chat turn from the backend /api/chat SSE endpoint.
 // Backend persists both the user and assistant messages via RLS using the
@@ -70,6 +87,7 @@ export type ChatStreamEvent =
 export async function* streamChatTurn(
   threadId: string,
   message: string,
+  mode: ChatMode,
 ): AsyncGenerator<ChatStreamEvent> {
   const { data: sess } = await supabase.auth.getSession()
   const token = sess.session?.access_token
@@ -85,7 +103,7 @@ export async function* streamChatTurn(
       Authorization: `Bearer ${token}`,
       Accept: 'text/event-stream',
     },
-    body: JSON.stringify({ thread_id: threadId, message }),
+    body: JSON.stringify({ thread_id: threadId, message, mode }),
   })
 
   if (!res.ok || !res.body) {
