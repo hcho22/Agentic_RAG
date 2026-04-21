@@ -96,7 +96,7 @@ export function IngestionPage() {
     try {
       for (const file of accepted) {
         try {
-          const row = await uploadDocument(user.id, file)
+          const { document: row, duplicate } = await uploadDocument(user.id, file)
           // Optimistic upsert: Realtime will also deliver this row, the
           // subscription's dedupe keeps us from double-rendering.
           setDocuments((prev) =>
@@ -104,6 +104,9 @@ export function IngestionPage() {
               ? prev.map((d) => (d.id === row.id ? row : d))
               : [row, ...prev],
           )
+          if (duplicate) {
+            toast(`${file.name} already ingested`)
+          }
         } catch (e) {
           toast(
             e instanceof Error
