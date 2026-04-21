@@ -38,7 +38,9 @@ from pydantic import BaseModel, Field
 
 from chunking import chunk_text, get_chunk_config
 from embeddings import embed_texts, get_embedding_model, to_pgvector
+from metadata import extract_document_metadata, get_metadata_model
 from retrieval import (
+    METADATA_SCHEMA_HINT,
     SearchDocumentsInput,
     get_similarity_threshold,
     search_documents,
@@ -90,7 +92,10 @@ COMPLETIONS_SYSTEM_PROMPT = (
     "via the `search_documents` tool. Prefer calling the tool to ground your "
     "answer whenever the question might be answerable from the user's own "
     "documents. When you cite tool results, mention the document filename. If "
-    "no relevant chunks are returned, answer from general knowledge and say so."
+    "no relevant chunks are returned, answer from general knowledge and say so.\n\n"
+    # US-017: tell the agent what structured metadata is available so it can
+    # decide when to pass `filters` to search_documents.
+    + METADATA_SCHEMA_HINT
 )
 
 # LangSmith: when LANGSMITH_API_KEY is set the SDK auto-ships traces for every
@@ -460,6 +465,7 @@ async def _execute_tool_call(
                 supabase_headers=_supabase_headers(user),
                 query=validated.query,
                 top_k=validated.top_k,
+                filters=validated.filters,
             )
             return json.dumps(
                 {
@@ -693,7 +699,7 @@ async def get_config() -> dict:
 
 DOCUMENT_COLUMNS = (
     "id,user_id,filename,storage_path,byte_size,content_type,status,"
-    "error_message,chunks_count,uploaded_at,deleted_at,content_hash"
+    "error_message,chunks_count,uploaded_at,deleted_at,content_hash,metadata"
 )
 
 
@@ -927,13 +933,35 @@ async def ingest_document(
                 metrics["chunks_unchanged"],
                 chunk_count,
             )
+
+            # US-016: LLM-extracted structured metadata. Non-fatal by
+            # design — a None return (network / parse / refusal) leaves
+            # documents.metadata as-is (NULL on first ingest, or the prior
+            # extraction on re-ingest) and the document still becomes
+            # 'ready'. A warning has already been logged inside the helper.
+            ready_fields: dict[str, object] = {
+                "status": "ready",
+                "chunks_count": chunk_count,
+                "error_message": None,
+            }
+            extracted = await extract_document_metadata(
+                openai_client, text, doc["filename"]
+            )
+            if extracted is not None:
+                ready_fields["metadata"] = extracted.model_dump(mode="json")
+                log.info(
+                    "ingest.metadata document_id=%s title=%r topics=%s type=%r",
+                    document_id,
+                    extracted.title,
+                    extracted.topics,
+                    extracted.document_type,
+                )
+
             updated = await _patch_document(
                 http,
                 user,
                 document_id,
-                status="ready",
-                chunks_count=chunk_count,
-                error_message=None,
+                **ready_fields,
             )
         except Exception as e:  # noqa: BLE001 — any failure marks the doc errored
             log.exception("ingestion failed for document %s", document_id)
@@ -956,6 +984,7 @@ async def ingest_document(
         "chunk_size_tokens": size,
         "chunk_overlap_tokens": overlap,
         "embedding_model": get_embedding_model(),
+        "metadata_model": get_metadata_model(),
     }
 
 
@@ -979,6 +1008,7 @@ async def search(
             supabase_headers=_supabase_headers(user),
             query=req.query,
             top_k=req.top_k,
+            filters=req.filters,
         )
     return {
         "results": [r.model_dump() for r in results],

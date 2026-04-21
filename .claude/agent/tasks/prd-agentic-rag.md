@@ -512,11 +512,11 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 
 **Acceptance Criteria:**
 
-- [ ] `documents.metadata JSONB` column
-- [ ] Pydantic schema: `{title, authors: [str], topics: [str], published_date: date | null, document_type: str}`
-- [ ] LLM extraction runs during ingestion using structured outputs
-- [ ] Extraction failures do not block ingestion; `metadata` may be null with a warning logged
-- [ ] Typecheck passes
+- [x] `documents.metadata JSONB` column
+- [x] Pydantic schema: `{title, authors: [str], topics: [str], published_date: date | null, document_type: str}`
+- [x] LLM extraction runs during ingestion using structured outputs
+- [x] Extraction failures do not block ingestion; `metadata` may be null with a warning logged
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -527,16 +527,26 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** `metadata` JSON contains a reasonable title, author list, and 2+ topics.
 - **Failure Indicator:** `metadata` is null without an error log, or schema-invalid JSON is stored.
 
+**Implementation notes (US-016):**
+
+- **Migration** `supabase/migrations/20260421120000_documents_metadata.sql` adds `documents.metadata jsonb` (nullable by design — extraction failures leave it NULL; pre-US-016 rows stay NULL until re-ingest) plus a GIN index (`documents_metadata_gin_idx`) so US-017's filter predicates (`?|` on `topics`, equality on `document_type`) stay index-backed. The schema shape is enforced in the app layer via Pydantic, not via a SQL check — the JSONB column stays flexible if we add fields later.
+- **Pydantic schema** `backend/metadata.py::DocumentMetadata` pins the five fields from the acceptance criterion as all-required so OpenAI's *strict* structured outputs accept the schema (optional keys are disallowed in strict mode). "No signal" sentinels are `""` / `[]` / `null`, and the system prompt instructs the model to prefer these over guessing. `published_date` is a Pydantic `date` serialised to ISO-8601 via `model_dump(mode="json")` before being sent to PostgREST — JSONB stores it as a string, and US-017's RPC casts `(metadata->>'published_date')::date` at read time.
+- **Extraction call** `metadata.extract_document_metadata(openai_client, text, filename)` uses `client.chat.completions.parse(..., response_format=DocumentMetadata)` (OpenAI Python SDK ≥ 1.50, satisfied by the `openai>=1.70.0` pin). The LangSmith-wrapped `openai_client` is reused so each extraction shows up as its own span alongside the embeddings + completions calls from the same ingest. Text is down-sampled to `DEFAULT_SAMPLE_CHARS = 8000` via a head+tail split (`_sample_text`) so title/authors near the top and date/footer near the bottom are both visible without blowing up cost on long documents.
+- **Model selection** `get_metadata_model()` resolves `METADATA_MODEL` → `OPENAI_MODEL` → `gpt-4o-mini`. Kept configurable so a deployer can point just the extractor at a cheaper model without touching chat behaviour. The resolved value is surfaced in the ingest response (`metadata_model`) alongside `embedding_model` for debuggability.
+- **Ingest wiring** `main.py::ingest_document` calls `extract_document_metadata` *after* `_reconcile_chunks` succeeds (chunks already persisted, so a metadata failure can't leave the doc in a worse state than pre-US-016) and folds the serialised result into the same PATCH that flips `status='ready'`. A `None` return (network error, parse failure, safety refusal) is non-fatal: the helper has already logged a warning, `documents.metadata` stays at its prior value (NULL on first ingest, or the last good extraction on re-ingest), and the document is still marked `ready` so it remains searchable. This matches the PRD acceptance criterion "Extraction failures do not block ingestion".
+- **Column surface** `DOCUMENT_COLUMNS` (backend) and `DOCUMENT_COLUMNS` / `DocumentRow` (frontend `lib/ingestion.ts`) both pick up `metadata` so any caller that fetches a row sees the field. The frontend exports a `DocumentMetadata` TS type mirroring the Pydantic schema — no UI surface consumes it yet (that's a later Module 4 / Module 7 concern), but the type is in place so US-017's filter UI can lean on it without another round-trip.
+- **Verification** backend import + byte-compile smoke passes (`python -m py_compile`, `import main` with stub env); `npm run typecheck` passes. Live validation per the PRD steps (upload a document, `SELECT metadata`) is deferred to the user since it requires the new migration applied to their Supabase project and a real OpenAI key.
+
 #### US-017: Metadata-filtered retrieval
 
 **Description:** As a user, I want my retrieval queries to optionally filter by metadata (e.g., "only documents from 2024") so I get more precise results.
 
 **Acceptance Criteria:**
 
-- [ ] `search_documents` tool accepts optional `filters: {topics?, document_type?, date_range?}`
-- [ ] Filters translated to SQL `WHERE` clauses on `documents.metadata`
-- [ ] Agent is prompted with the metadata schema so it knows what filters are valid
-- [ ] Typecheck passes
+- [x] `search_documents` tool accepts optional `filters: {topics?, document_type?, date_range?}`
+- [x] Filters translated to SQL `WHERE` clauses on `documents.metadata`
+- [x] Agent is prompted with the metadata schema so it knows what filters are valid
+- [x] Typecheck passes
 
 **Validation Test:**
 
