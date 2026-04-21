@@ -4,6 +4,18 @@ const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'
 
 export type DocumentStatus = 'queued' | 'processing' | 'ready' | 'error'
 
+// US-016: LLM-extracted structured metadata. Shape pinned by the backend
+// Pydantic `DocumentMetadata` schema — kept as a loose type on the TS side
+// because the JSONB column is null until ingestion populates it and
+// extraction is allowed to fail non-fatally.
+export type DocumentMetadata = {
+  title: string
+  authors: string[]
+  topics: string[]
+  published_date: string | null
+  document_type: string
+}
+
 export type DocumentRow = {
   id: string
   user_id: string
@@ -17,10 +29,11 @@ export type DocumentRow = {
   uploaded_at: string
   deleted_at: string | null
   content_hash: string | null
+  metadata: DocumentMetadata | null
 }
 
 const DOCUMENT_COLUMNS =
-  'id, user_id, filename, storage_path, byte_size, content_type, status, error_message, chunks_count, uploaded_at, deleted_at, content_hash'
+  'id, user_id, filename, storage_path, byte_size, content_type, status, error_message, chunks_count, uploaded_at, deleted_at, content_hash, metadata'
 
 // US-014: SHA-256 of the raw file bytes, lower-case hex. Matches hashlib.sha256
 // on the backend so the two sides can agree on a single content-addressable id.
