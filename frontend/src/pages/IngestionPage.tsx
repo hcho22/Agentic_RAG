@@ -5,9 +5,10 @@ import { AppHeader } from '@/components/AppHeader'
 import { DropZone } from '@/components/ingestion/DropZone'
 import { DocumentsTable } from '@/components/ingestion/DocumentsTable'
 import {
+  ACCEPTED_EXTENSIONS,
+  deleteDocument,
   isAcceptedFile,
   listDocuments,
-  softDeleteDocument,
   subscribeToDocuments,
   uploadDocument,
   type DocumentRow,
@@ -87,7 +88,10 @@ export function IngestionPage() {
       if (isAcceptedFile(file)) {
         accepted.push(file)
       } else {
-        toast(`Unsupported file: ${file.name}. Only .txt and .md are accepted.`, 'error')
+        toast(
+          `Unsupported file: ${file.name}. Accepted: ${ACCEPTED_EXTENSIONS.join(', ')}.`,
+          'error',
+        )
       }
     }
     if (accepted.length === 0) return
@@ -124,7 +128,7 @@ export function IngestionPage() {
   async function handleDelete(doc: DocumentRow) {
     setDeletingIds((prev) => new Set(prev).add(doc.id))
     try {
-      await softDeleteDocument(doc.id)
+      await deleteDocument(doc)
       setDocuments((prev) => prev.filter((d) => d.id !== doc.id))
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Failed to delete document', 'error')

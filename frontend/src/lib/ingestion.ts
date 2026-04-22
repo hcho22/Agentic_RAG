@@ -52,20 +52,23 @@ export type UploadResult = {
   duplicate: boolean
 }
 
-export const ACCEPTED_EXTENSIONS = ['.txt', '.md'] as const
+// US-018: multi-format support. Docling on the backend parses PDF / DOCX /
+// HTML / MD; .txt flows through as a straight utf-8 decode. Extension is the
+// source of truth for acceptance — browsers are unreliable about `file.type`
+// for Markdown and sometimes for HTML from local disk.
+export const ACCEPTED_EXTENSIONS = ['.txt', '.md', '.pdf', '.docx', '.html'] as const
 export const ACCEPTED_MIME_TYPES = new Set([
   'text/plain',
   'text/markdown',
   'text/x-markdown',
-  // some browsers send empty type for .md; we also validate by extension below.
+  'text/html',
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ])
 
 export function isAcceptedFile(file: File): boolean {
   const name = file.name.toLowerCase()
-  const extOk = ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))
-  if (!extOk) return false
-  // Trust the extension first (markdown often has empty/odd MIME); fall through.
-  return true
+  return ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))
 }
 
 export async function listDocuments(): Promise<DocumentRow[]> {
@@ -86,7 +89,9 @@ export async function listDocuments(): Promise<DocumentRow[]> {
 // document with the same hash, return that row instead of re-uploading.
 export async function uploadDocument(userId: string, file: File): Promise<UploadResult> {
   if (!isAcceptedFile(file)) {
-    throw new Error(`Unsupported file type: ${file.name}. Only .txt and .md are accepted.`)
+    throw new Error(
+      `Unsupported file type: ${file.name}. Accepted: ${ACCEPTED_EXTENSIONS.join(', ')}.`,
+    )
   }
 
   const contentHash = await sha256Hex(file)
@@ -178,15 +183,31 @@ async function triggerIngest(documentId: string): Promise<DocumentRow | null> {
   return payload.document ?? null
 }
 
-// Soft-delete: flags the row as deleted so it disappears from the UI list but
-// the blob + row remain for audit / undo. Hard-delete + Storage cleanup is
-// US-019 (cascade deletes on document removal).
-export async function softDeleteDocument(documentId: string): Promise<void> {
-  const { error } = await supabase
-    .from('documents')
-    .update({ deleted_at: new Date().toISOString() })
-    .eq('id', documentId)
-  if (error) throw error
+// US-019: hard delete. The DB row is removed first so chunks + embeddings
+// cascade via FK (chunks.document_id references documents(id) ON DELETE
+// CASCADE). The Storage blob is removed as a compensating action after the
+// row is gone — if this fails we log and continue, leaving an orphan object
+// rather than an orphan row. Order matters: an orphan row is user-visible
+// (broken document in the list); an orphan blob is not (user_id-scoped,
+// cleanable out-of-band). The UI reflects the deletion via the Realtime
+// DELETE event (documents has REPLICA IDENTITY FULL so the pre-image carries
+// the id).
+export async function deleteDocument(
+  doc: Pick<DocumentRow, 'id' | 'storage_path'>,
+): Promise<void> {
+  const { error: rowErr } = await supabase.from('documents').delete().eq('id', doc.id)
+  if (rowErr) throw rowErr
+
+  if (doc.storage_path) {
+    const { error: blobErr } = await supabase.storage
+      .from('documents')
+      .remove([doc.storage_path])
+    if (blobErr) {
+      console.warn(
+        `deleteDocument: row ${doc.id} removed but blob ${doc.storage_path} still present: ${blobErr.message}`,
+      )
+    }
+  }
 }
 
 export type DocumentRealtimeHandlers = {

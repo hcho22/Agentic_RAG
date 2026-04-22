@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from chunking import chunk_text, get_chunk_config
 from embeddings import embed_texts, get_embedding_model, to_pgvector
 from metadata import extract_document_metadata, get_metadata_model
+from parsing import UnsupportedFormatError, parse_document, warmup as warmup_parsing
 from retrieval import (
     METADATA_SCHEMA_HINT,
     SearchDocumentsInput,
@@ -119,6 +120,14 @@ app.add_middleware(
     allow_methods=["POST", "GET", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    # US-018: front-load the docling DocumentConverter so the first
+    # file-upload ingest doesn't pay multi-second import + backend init on the
+    # request path. Failures are swallowed — the lazy path still works.
+    warmup_parsing()
 
 
 class ChatRequest(BaseModel):
@@ -900,10 +909,19 @@ async def ingest_document(
 
         try:
             raw = await _download_storage_object(http, user, doc["storage_path"])
+            # US-018: multi-format parsing via docling. `parse_document`
+            # raises `UnsupportedFormatError` on unknown types and `ValueError`
+            # with a human-readable message on parse failure — both are caught
+            # by the outer except below and surfaced as `status=error` with
+            # `error_message` so the UI can show why a given file failed.
             try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError as e:
-                raise ValueError(f"file is not valid utf-8: {e}") from e
+                text = parse_document(
+                    raw,
+                    filename=doc.get("filename", ""),
+                    content_type=doc.get("content_type"),
+                )
+            except UnsupportedFormatError as e:
+                raise ValueError(str(e)) from e
 
             # US-014: backfill documents.content_hash on re-ingest of rows
             # that pre-date the hashing feature or were created by a non-UI

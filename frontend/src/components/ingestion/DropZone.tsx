@@ -59,7 +59,7 @@ export function DropZone({ onFiles, disabled }: Props) {
         Drag and drop files here, or click to browse
       </p>
       <p className="mt-1 text-xs text-neutral-500">
-        Accepted: {ACCEPTED_EXTENSIONS.join(', ')} — PDFs and DOCX come in Module 5.
+        Accepted: {ACCEPTED_EXTENSIONS.join(', ')}
       </p>
       <input
         ref={inputRef}
