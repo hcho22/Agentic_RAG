@@ -2,8 +2,18 @@ fastapi==0.115.6
 uvicorn[standard]==0.32.1
 httpx==0.27.2
 openai>=1.70.0
-supabase==2.10.0
+supabase>=2.15.0
 python-dotenv==1.0.1
 pydantic==2.10.4
 langsmith==0.2.10
 tiktoken==0.8.0
+# US-018: multi-format parsing. docling handles PDF/DOCX/HTML/MD through a
+# single converter. Torch gets pulled transitively — we pin numpy<2 because
+# torch<2.4 (what docling 2.90's resolver lands on) can't initialise against
+# numpy 2.x. PDF parsing runs with OCR disabled so torch models aren't needed.
+docling>=2.20.0,<3
+# pypdfium2 is a transitive dep of docling; we also call it directly in
+# parsing.py as a fallback when docling's torch-based PDF pipeline is
+# unavailable — pin it explicitly so the dep is documented.
+pypdfium2>=4
+numpy<2
