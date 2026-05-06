@@ -58,11 +58,37 @@ from retrieval import (
     search_documents,
     search_documents_tool_schema,
 )
+from text_to_sql import (
+    QueryDatabaseInput,
+    SqlSafetyError,
+    get_allowed_schemas,
+    get_analytics_database_url,
+    get_schema_snapshot,
+    is_enabled as sql_tool_enabled,
+    query_database,
+    query_database_tool_schema,
+)
+from web_search import (
+    WebSearchInput,
+    get_web_search_timeout_s,
+    is_enabled as web_search_tool_enabled,
+    web_search,
+    web_search_tool_schema,
+)
 
 load_dotenv()
 
 log = logging.getLogger("agentic_rag.backend")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+
+_REQUIRED_ENV = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "OPENAI_API_KEY")
+_missing = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
+if _missing:
+    raise RuntimeError(
+        "missing required environment variable(s): "
+        + ", ".join(_missing)
+        + ". Set them on the Railway service (Variables tab) and redeploy."
+    )
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
@@ -99,7 +125,7 @@ except ValueError as e:
     raise ValueError("CHAT_HISTORY_MAX_TURNS must be an integer") from e
 if CHAT_HISTORY_MAX_TURNS < 0:
     raise ValueError("CHAT_HISTORY_MAX_TURNS must be >= 0")
-COMPLETIONS_SYSTEM_PROMPT = (
+COMPLETIONS_SYSTEM_PROMPT_BASE = (
     "You are a helpful assistant with access to the user's ingested documents "
     "via the `search_documents` tool. Prefer calling the tool to ground your "
     "answer whenever the question might be answerable from the user's own "
@@ -109,6 +135,58 @@ COMPLETIONS_SYSTEM_PROMPT = (
     # decide when to pass `filters` to search_documents.
     + METADATA_SCHEMA_HINT
 )
+
+# US-023: appended to the system prompt only when the text-to-SQL tool is
+# configured (ANALYTICS_DATABASE_URL set). Includes the live schema snapshot
+# so the agent picks the right tool based on the question type.
+COMPLETIONS_SQL_PROMPT_TEMPLATE = (
+    "\n\nYou also have a `query_database` tool that runs read-only SQL "
+    "against the analytics schema(s): {schemas}. Use it for quantitative "
+    "questions (totals, counts, aggregates, lookups). Prefer "
+    "`search_documents` for free-text questions about uploaded documents.\n\n"
+    "{schema_snapshot}"
+)
+
+# US-024: appended only when the web search tool is configured. The routing
+# rule (prefer local retrieval first, fall back to web on empty results) is
+# stated here AND in the tool description because models sometimes skip
+# system-prompt detail when many tools are available.
+COMPLETIONS_WEB_SEARCH_PROMPT = (
+    "\n\nYou also have a `web_search` tool for current events and public "
+    "facts that aren't in the user's local documents. Routing rules: ALWAYS "
+    "try `search_documents` first. Only call `web_search` when "
+    "`search_documents` returns no relevant chunks (empty results or none "
+    "above the similarity threshold), OR when the question is obviously "
+    "about current events / breaking news. Do not use `web_search` for "
+    "questions whose answer is plausibly in the user's corpus. When you "
+    "cite a web result, include the URL in your reply so the user can click "
+    "through."
+)
+
+
+def _build_completions_system_prompt(schema_snapshot: str | None) -> str:
+    """Compose the chat system prompt, appending tool-specific blocks."""
+    prompt = COMPLETIONS_SYSTEM_PROMPT_BASE
+    if sql_tool_enabled():
+        schemas = ", ".join(get_allowed_schemas())
+        snapshot_block = (
+            schema_snapshot
+            if schema_snapshot
+            else "Schema introspection unavailable; ask the user for table names."
+        )
+        prompt += COMPLETIONS_SQL_PROMPT_TEMPLATE.format(
+            schemas=schemas,
+            schema_snapshot=snapshot_block,
+        )
+    if web_search_tool_enabled():
+        prompt += COMPLETIONS_WEB_SEARCH_PROMPT
+    return prompt
+
+
+# Cached at startup (and refreshable via `_refresh_sql_schema_snapshot`) so we
+# don't pay the introspection round-trip on every chat turn. None means "tool
+# disabled or introspection failed" — the prompt builder falls back gracefully.
+_SQL_SCHEMA_SNAPSHOT: str | None = None
 
 # LangSmith: when LANGSMITH_API_KEY is set the SDK auto-ships traces for every
 # wrapped OpenAI call and every @traceable function. When it's missing,
@@ -139,6 +217,22 @@ async def _on_startup() -> None:
     # file-upload ingest doesn't pay multi-second import + backend init on the
     # request path. Failures are swallowed — the lazy path still works.
     warmup_parsing()
+    # US-023: introspect the analytics schema once at startup so the system
+    # prompt + tool description don't pay an extra DB round-trip per chat
+    # turn. Empty result on failure means the prompt falls back to a
+    # "ask the user for table names" message.
+    global _SQL_SCHEMA_SNAPSHOT
+    db_url = get_analytics_database_url()
+    if db_url:
+        try:
+            _SQL_SCHEMA_SNAPSHOT = await get_schema_snapshot(db_url, get_allowed_schemas())
+            log.info(
+                "text_to_sql.snapshot_loaded chars=%d",
+                len(_SQL_SCHEMA_SNAPSHOT or ""),
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("text_to_sql.snapshot_load_failed")
+            _SQL_SCHEMA_SNAPSHOT = None
 
 
 class ChatRequest(BaseModel):
@@ -551,6 +645,48 @@ async def _execute_tool_call(
             log.exception("search_documents tool failed")
             return json.dumps({"error": str(e)})
 
+    if name == "query_database":
+        # US-023: text-to-SQL. Errors come back as tool-level JSON so the
+        # agent sees them and can recover (re-phrase the question, fall back
+        # to search_documents) rather than failing the whole turn.
+        try:
+            validated_sql = QueryDatabaseInput(**args)
+            result = await query_database(
+                openai_client=openai_client,
+                question=validated_sql.question,
+                row_limit=validated_sql.row_limit,
+                schema_snapshot=_SQL_SCHEMA_SNAPSHOT,
+            )
+            return json.dumps(result.model_dump())
+        except SqlSafetyError as e:
+            log.warning("query_database rejected unsafe sql: %s", e)
+            return json.dumps({"error": f"unsafe sql: {e}"})
+        except Exception as e:  # noqa: BLE001 — surface to model as tool error
+            log.exception("query_database tool failed")
+            return json.dumps({"error": str(e)})
+
+    if name == "web_search":
+        # US-024: fallback to public web when local retrieval misses. We hand
+        # the model an empty result list (not an error) on provider failure
+        # so the agent gracefully falls through to general knowledge with a
+        # disclaimer, rather than aborting the turn over a vendor outage.
+        try:
+            validated_web = WebSearchInput(**args)
+            results = await web_search(
+                http=http,
+                query=validated_web.query,
+                top_k=validated_web.top_k,
+            )
+            return json.dumps(
+                {
+                    "results": [r.model_dump() for r in results],
+                    "count": len(results),
+                }
+            )
+        except Exception as e:  # noqa: BLE001 — surface to model as tool error
+            log.exception("web_search tool failed")
+            return json.dumps({"error": str(e), "results": [], "count": 0})
+
     return json.dumps({"error": f"unknown tool: {name}"})
 
 
@@ -577,11 +713,16 @@ async def _stream_completions_reply(
             return
 
         windowed = _apply_history_window(prior, CHAT_HISTORY_MAX_TURNS)
-        messages: list[dict] = [{"role": "system", "content": COMPLETIONS_SYSTEM_PROMPT}]
+        system_prompt = _build_completions_system_prompt(_SQL_SCHEMA_SNAPSHOT)
+        messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(_prior_to_completions(windowed))
         messages.append({"role": "user", "content": message})
 
         tools = [search_documents_tool_schema()]
+        if sql_tool_enabled():
+            tools.append(query_database_tool_schema(_SQL_SCHEMA_SNAPSHOT))
+        if web_search_tool_enabled():
+            tools.append(web_search_tool_schema())
         final_assistant_msg: dict | None = None
 
         for _iteration in range(MAX_TOOL_ITERATIONS):
@@ -760,6 +901,8 @@ async def get_config() -> dict:
         "default_chat_mode": DEFAULT_CHAT_MODE,
         "supported_chat_modes": ["responses", "completions"],
         "file_search_enabled": bool(OPENAI_VECTOR_STORE_ID),
+        "sql_tool_enabled": sql_tool_enabled(),
+        "web_search_tool_enabled": web_search_tool_enabled(),
     }
 
 
@@ -1167,6 +1310,55 @@ async def search_rerank(
         "retrieval_mode": mode,
         "reranker": reranker_name,
         "rerank_input_k": get_rerank_input_k(),
+    }
+
+
+# US-023: direct text-to-SQL endpoint mirroring what the chat tool dispatches.
+# Useful for the PRD validation steps (revenue query, adversarial DROP, trace
+# inspection) without driving the agent. Auth required so RLS-equivalent access
+# control still applies — the read-only role under the hood doesn't grant
+# per-user scoping, only schema scoping.
+@app.post("/api/sql")
+async def sql_query(
+    req: QueryDatabaseInput,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    if not sql_tool_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="text-to-SQL tool is not configured (set ANALYTICS_DATABASE_URL)",
+        )
+    try:
+        result = await query_database(
+            openai_client=openai_client,
+            question=req.question,
+            row_limit=req.row_limit,
+            schema_snapshot=_SQL_SCHEMA_SNAPSHOT,
+        )
+    except SqlSafetyError as e:
+        raise HTTPException(status_code=400, detail=f"unsafe sql: {e}") from e
+    return result.model_dump()
+
+
+# US-024: direct web search endpoint mirroring what the chat tool dispatches.
+# Lets the PRD validation step ("ask about today's tech news on a fresh
+# account") be exercised end-to-end without driving the chat loop, and gives
+# us a clean way to smoke-test a new provider after rotating API keys.
+@app.post("/api/web-search")
+async def web_search_endpoint(
+    req: WebSearchInput,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    if not web_search_tool_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="web search tool is not configured (set WEB_SEARCH_PROVIDER)",
+        )
+    async with httpx.AsyncClient(timeout=get_web_search_timeout_s()) as http:
+        results = await web_search(http=http, query=req.query, top_k=req.top_k)
+    return {
+        "results": [r.model_dump() for r in results],
+        "count": len(results),
     }
 
 

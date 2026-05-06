@@ -724,11 +724,11 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 
 **Acceptance Criteria:**
 
-- [ ] Read-only Postgres role used for SQL execution
-- [ ] Allowlisted schema (e.g., `analytics.*`); all other schemas blocked
-- [ ] Agent provided schema snapshot (table + column list) in its system prompt
-- [ ] Query timeout (default 10s)
-- [ ] Typecheck passes
+- [x] Read-only Postgres role used for SQL execution
+- [x] Allowlisted schema (e.g., `analytics.*`); all other schemas blocked
+- [x] Agent provided schema snapshot (table + column list) in its system prompt
+- [x] Query timeout (default 10s)
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -740,17 +740,26 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Step 1 returns a SUM result with correct SQL. Step 2 is refused or fails on the read-only role. Step 3 shows the generated SQL in the trace.
 - **Failure Indicator:** Write query succeeds, SQL not logged, or agent hallucinates schema.
 
+**Implementation notes (US-023):**
+
+- New module `backend/text_to_sql.py` exposes `query_database(question, row_limit, …)`, the `QueryDatabaseInput` Pydantic schema, and `query_database_tool_schema()` for the Chat Completions `tools[]` array. The chat tool path in `main.py` dispatches `query_database` alongside `search_documents`; a direct `/api/sql` endpoint runs the same code path so the PRD validation steps (revenue total + adversarial DROP + LangSmith trace inspection) are runnable without driving the agent.
+- Three layers of safety stack so a single layer's bug doesn't expose writes: (1) the connection authenticates as `analytics_readonly` from migration `20260506120000_init_analytics_schema.sql` — the role has no write privileges on any schema, so even an unparsed DROP fails at the database boundary; (2) every query runs inside `BEGIN READ ONLY` with `set local statement_timeout = SQL_QUERY_TIMEOUT_MS` (default 10s per PRD); (3) `validate_sql_safety()` strips comments + string literals, requires the statement to start with `select` or `with`, rejects a forbidden-keyword set (INSERT/UPDATE/DELETE/MERGE/COPY/CREATE/DROP/ALTER/TRUNCATE/GRANT/REVOKE plus session-level SET/RESET), bans multiple statements, and walks every `schema.table` reference to confirm the schema is in `ALLOWED_SQL_SCHEMAS` (default `analytics`).
+- Schema snapshot is introspected once at startup via `information_schema.columns` against the allowed schemas, cached in module-level `_SQL_SCHEMA_SNAPSHOT`, and interpolated into both the LLM SQL-generation system prompt and the `query_database` tool description so the agent picks the right tool based on question type without an extra round-trip. Introspection failure degrades gracefully — the prompt falls back to "ask the user for table names" rather than failing the chat turn.
+- Tool result returns `{sql, columns, rows, row_count, truncated}` so the generated SQL is captured verbatim in the LangSmith tool-message payload for trace inspection. The chat tool handler turns `SqlSafetyError` into a `{"error": "unsafe sql: …"}` JSON payload (model can recover by re-phrasing); other exceptions surface the same way so the agent can fall back to `search_documents` or general knowledge.
+- Tool is opt-in: when `ANALYTICS_DATABASE_URL` is unset, `is_enabled()` returns False, the tool is omitted from the Chat Completions `tools[]` list, the SQL block is omitted from the system prompt, and `/api/sql` returns 503. This keeps existing deploys working without forcing the new env vars. The migration creates the role + schema + seed locally; production Supabase requires running the `CREATE ROLE` block manually via the SQL editor with a strong password (Supabase Cloud restricts CREATE ROLE in normal migrations).
+- `.env.example` documents `ANALYTICS_DATABASE_URL`, `ALLOWED_SQL_SCHEMAS`, `SQL_QUERY_TIMEOUT_MS`, and `OPENAI_SQL_MODEL` (falls through to `OPENAI_MODEL` then `gpt-4o-mini`). `requirements.txt` adds `asyncpg>=0.29` — the only place in the codebase that opens a raw Postgres connection; the rest of the chat path stays on PostgREST so RLS still applies to user-scoped reads/writes.
+
 #### US-024: Web search fallback tool
 
 **Description:** As an agent, when local retrieval returns nothing relevant, I want a `web_search` tool (e.g., Tavily, Brave, SerpAPI) so I can still answer the user.
 
 **Acceptance Criteria:**
 
-- [ ] Web search provider configurable via env
-- [ ] Tool returns top N results with title, URL, snippet
-- [ ] Agent instructed to prefer local retrieval; web search used when no local chunks pass threshold
-- [ ] Final response cites web sources with URLs
-- [ ] Typecheck passes
+- [x] Web search provider configurable via env
+- [x] Tool returns top N results with title, URL, snippet
+- [x] Agent instructed to prefer local retrieval; web search used when no local chunks pass threshold
+- [x] Final response cites web sources with URLs
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -761,16 +770,25 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Agent uses `web_search`; response includes clickable source URLs.
 - **Failure Indicator:** Agent hallucinates without tools, or citations are missing.
 
+**Implementation notes (US-024):**
+
+- New module `backend/web_search.py` with a `WebSearchProvider` ABC and four implementations: `NullProvider`, `TavilyProvider`, `BraveProvider`, `SerpApiProvider`. `build_web_search_provider(name, http)` is the factory; hosted backends raise on missing API keys at build time so config mistakes surface immediately, not at first request. All providers project to a uniform `WebSearchResult(title, url, snippet)` so swapping vendors via `WEB_SEARCH_PROVIDER` doesn't change agent behaviour.
+- Default `WEB_SEARCH_PROVIDER=none` so the tool is opt-in — no extra vendor dep, no $/query side effect from pulling latest. When unset, `is_enabled()` returns False, the tool is omitted from the Chat Completions `tools[]` list, the routing block is omitted from the system prompt, and `/api/web-search` returns 503. Same opt-in pattern as the SQL tool (US-023) and the reranker (US-022).
+- Routing rule lives in two places on purpose: the tool description says "Use this ONLY after `search_documents` returns no relevant chunks", and the system-prompt block (`COMPLETIONS_WEB_SEARCH_PROMPT` in `main.py`) repeats the same rule with extra context ("ALWAYS try `search_documents` first … include the URL"). Models occasionally skim system text when many tools are visible, so saying it twice is cheap insurance against the agent reaching for `web_search` on questions that belong in the user's corpus.
+- Errors are non-fatal at the chat-tool boundary: a Tavily/Brave/SerpAPI outage returns `{"error": …, "results": [], "count": 0}` to the agent, which then either re-tries with a tweaked query or falls through to general knowledge with a disclaimer — better than failing the user's whole turn over a vendor blip. The standalone `/api/web-search` endpoint (mirrors the chat path for the PRD validation test) bubbles errors up as 5xx since there's no agent on the other side to recover.
+- `WEB_SEARCH_TIMEOUT_S` (default 10s) caps the per-search HTTP call. Tool result includes `count` so LangSmith traces show whether the agent saw zero results (and correctly fell back) vs. picked one to cite. No changes to `requirements.txt` — every provider is a plain JSON HTTP call routed through the existing `httpx` dependency.
+- `.env.example` adds `WEB_SEARCH_PROVIDER`, `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, `SERPAPI_API_KEY`, and `WEB_SEARCH_TIMEOUT_S`. The frontend's `/api/config` response gains a `web_search_tool_enabled` flag for US-025's tool-attribution UI to consume in the next story.
+
 #### US-025: Tool routing with attribution in the UI
 
 **Description:** As a user, I want to see which tool(s) the agent used for each response (retrieval, SQL, web) with a collapsible details panel showing sources.
 
 **Acceptance Criteria:**
 
-- [ ] Each assistant message records the tools invoked and their outputs
-- [ ] UI shows icons/badges next to the message (e.g., 📄 docs, 🗄️ SQL, 🌐 web)
-- [ ] Clicking a badge expands a panel with retrieved chunks / SQL / URLs
-- [ ] Typecheck passes
+- [x] Each assistant message records the tools invoked and their outputs
+- [x] UI shows icons/badges next to the message (e.g., 📄 docs, 🗄️ SQL, 🌐 web)
+- [x] Clicking a badge expands a panel with retrieved chunks / SQL / URLs
+- [x] Typecheck passes
 - [ ] Verify in browser using dev-browser skill
 
 **Validation Test:**
@@ -782,6 +800,14 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
   3. Ask a current-events question
 - **Expected Result:** Each response shows the correct tool badge; expanding reveals matching sources.
 - **Failure Indicator:** Missing badges, wrong attributions, or expansion shows nothing.
+
+**Implementation notes (US-025):**
+
+- Backend was already persisting everything we need: US-012 added `tool_calls` (jsonb on assistant rows), `tool_call_id`, and `name` to `public.messages` so the Chat Completions tool-call loop could rebuild after a refresh. US-025 just teaches the UI to read those columns. `listMessages` in `frontend/src/lib/chat.ts` now selects them, the `MessageRow` type widens to include them, and `BackendConfig` gains optional `sql_tool_enabled` / `web_search_tool_enabled` flags from `/api/config` (older backends still parse — both default to undefined).
+- New helper `frontend/src/lib/toolInvocations.ts` walks the chronological message list and emits a flat `RenderItem[]` (one entry per visible bubble) where each assistant `RenderItem` carries the tool invocations that belong to its turn. Algorithm: a single forward pass buffers `tool_calls` rows in `pending`, matches `role=tool` rows to them by `tool_call_id`, and flushes the whole pending list onto the next answering assistant message (i.e. one with non-empty content). Multi-iteration tool loops fold cleanly because intermediate assistant rows just append to `pending`. Orphans from an aborted turn (MAX_TOOL_ITERATIONS hit) are dropped at the next user-message boundary so they don't bleed into the wrong answer's badges.
+- New component `ToolAttribution` (`frontend/src/components/chat/ToolAttribution.tsx`) renders the badge row + expansion panel. Three known tool kinds (`search_documents` → 📄 Docs, `query_database` → 🗄️ SQL, `web_search` → 🌐 Web) get bespoke detail views: chunk previews with filename + similarity score, the generated SQL in a code block plus a 25-row HTML table preview (with truncation hint), and the web hits as clickable URLs with title + snippet. Unknown tools degrade to a JSON dump so future Module 8 sub-agent tool calls render *something* rather than disappearing. A failed tool result (provider outage, unsafe SQL, etc.) tints the badge red and the panel surfaces the error message.
+- `MessageList` switched from filtering visible messages to consuming `buildRenderItems(messages)` via `useMemo`, then renders `<AssistantTurn>` for assistant items (bubble + ToolAttribution below) and the existing `<MessageBubble>` for user items / streaming. Streaming bubbles still show plain text — tool data isn't on the SSE stream, so badges only appear after the `done` event triggers `setMessages(await listMessages(activeId))`. This is intentional: during streaming the user is watching the reply form, and badges appearing after completion makes attribution feel like a confirmation rather than a distraction.
+- Verification: `npm run typecheck` passes (TS picked up the missing `tool_calls/tool_call_id/name` on the optimistic user-message stub in `ChatPage.tsx`; fixed by setting them all to `null`). `npm run build` produces a clean Vite bundle. Live browser verification with the dev-browser skill is deferred consistent with prior stories — exercising the validation steps requires an authenticated Supabase session plus the Module 7 tools turned on (`ANALYTICS_DATABASE_URL` + `WEB_SEARCH_PROVIDER` configured).
 
 ---
 

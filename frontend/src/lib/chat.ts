@@ -8,6 +8,19 @@ export type ThreadRow = {
   openai_thread_id?: string | null
 }
 
+// US-025: shape of an OpenAI-style tool call as we persist it on assistant
+// rows. Mirrors what the backend wrote in `_stream_completions_reply` so the
+// UI can decode `function.name` + `function.arguments` for badge attribution
+// and the expansion panel.
+export type PersistedToolCall = {
+  id: string
+  type: 'function'
+  function: {
+    name: string
+    arguments: string
+  }
+}
+
 export type MessageRow = {
   id: string
   thread_id: string
@@ -17,6 +30,12 @@ export type MessageRow = {
   // parity with the DB schema (content is nullable).
   content: string | null
   created_at: string
+  // US-025: assistant rows carry tool_calls when they invoked tools;
+  // tool rows carry tool_call_id (+ optional name) linking back to the
+  // assistant call that produced them. Null on user / plain-assistant rows.
+  tool_calls: PersistedToolCall[] | null
+  tool_call_id: string | null
+  name: string | null
 }
 
 export const TITLE_MAX_LEN = 50
@@ -43,7 +62,7 @@ export async function createThread(userId: string): Promise<ThreadRow> {
 export async function listMessages(threadId: string): Promise<MessageRow[]> {
   const { data, error } = await supabase
     .from('messages')
-    .select('id, thread_id, role, content, created_at')
+    .select('id, thread_id, role, content, created_at, tool_calls, tool_call_id, name')
     .eq('thread_id', threadId)
     .order('created_at', { ascending: true })
   if (error) throw error
@@ -73,6 +92,10 @@ export type BackendConfig = {
   default_chat_mode: ChatMode
   supported_chat_modes: ChatMode[]
   file_search_enabled: boolean
+  // US-023 / US-024: optional flags so the UI can hint which tool badges to
+  // expect. Older backends won't return these — treat undefined as disabled.
+  sql_tool_enabled?: boolean
+  web_search_tool_enabled?: boolean
 }
 
 export async function fetchBackendConfig(): Promise<BackendConfig> {
