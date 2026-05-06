@@ -75,6 +75,14 @@ from web_search import (
     web_search,
     web_search_tool_schema,
 )
+from subagent import (
+    SPAWN_DOCUMENT_AGENT_PROMPT_BLOCK,
+    SpawnDocumentAgentInput,
+    detect_full_document_intent,
+    get_intent_threshold,
+    run_document_subagent,
+    spawn_document_agent_tool_schema,
+)
 
 load_dotenv()
 
@@ -164,8 +172,20 @@ COMPLETIONS_WEB_SEARCH_PROMPT = (
 )
 
 
-def _build_completions_system_prompt(schema_snapshot: str | None) -> str:
-    """Compose the chat system prompt, appending tool-specific blocks."""
+def _build_completions_system_prompt(
+    schema_snapshot: str | None,
+    *,
+    full_document_intent: bool = False,
+) -> str:
+    """Compose the chat system prompt, appending tool-specific blocks.
+
+    `full_document_intent` is set per-turn (US-026) by the heuristic in
+    `subagent.detect_full_document_intent`. When True, an explicit hint is
+    appended that nudges the model to prefer `spawn_document_agent` over
+    `search_documents` for this turn — saying it twice (here + tool
+    description) hardens against the model skipping the system prompt when
+    many tools are visible.
+    """
     prompt = COMPLETIONS_SYSTEM_PROMPT_BASE
     if sql_tool_enabled():
         schemas = ", ".join(get_allowed_schemas())
@@ -180,6 +200,15 @@ def _build_completions_system_prompt(schema_snapshot: str | None) -> str:
         )
     if web_search_tool_enabled():
         prompt += COMPLETIONS_WEB_SEARCH_PROMPT
+    # Sub-agent block is unconditional (the tool is always registered) —
+    # see Module 8 in the PRD. Intent hint is per-turn.
+    prompt += SPAWN_DOCUMENT_AGENT_PROMPT_BLOCK
+    if full_document_intent:
+        prompt += (
+            "\n\n[Hint: this turn's user message looks like a full-document "
+            "task — strongly prefer `spawn_document_agent` over "
+            "`search_documents` unless the question is clearly chunk-level.]"
+        )
     return prompt
 
 
@@ -687,6 +716,26 @@ async def _execute_tool_call(
             log.exception("web_search tool failed")
             return json.dumps({"error": str(e), "results": [], "count": 0})
 
+    if name == "spawn_document_agent":
+        # US-027: delegate full-document tasks to a sub-agent with isolated
+        # context (its own message list, scoped to one document, two tools).
+        # Failures are caught and serialised so the parent agent sees a tool
+        # error rather than the whole turn aborting.
+        try:
+            validated_sub = SpawnDocumentAgentInput(**args)
+            result = await run_document_subagent(
+                openai_client=openai_client,
+                http=http,
+                supabase_url=SUPABASE_URL,
+                supabase_headers=_supabase_headers(user),
+                document_id=validated_sub.document_id,
+                task=validated_sub.task,
+            )
+            return json.dumps(result.model_dump())
+        except Exception as e:  # noqa: BLE001 — surface to model as tool error
+            log.exception("spawn_document_agent tool failed")
+            return json.dumps({"error": str(e)})
+
     return json.dumps({"error": f"unknown tool: {name}"})
 
 
@@ -713,7 +762,20 @@ async def _stream_completions_reply(
             return
 
         windowed = _apply_history_window(prior, CHAT_HISTORY_MAX_TURNS)
-        system_prompt = _build_completions_system_prompt(_SQL_SCHEMA_SNAPSHOT)
+        # US-026: heuristic-driven nudge that flips the system prompt toward
+        # `spawn_document_agent` when the user's message looks like a
+        # full-document task. The threshold + score live in `subagent.py`;
+        # we only attach the metadata + system-prompt hint here.
+        intent_score = detect_full_document_intent(message)
+        full_document_intent = intent_score >= get_intent_threshold()
+        _attach_run_metadata(
+            full_document_intent_score=str(intent_score),
+            full_document_intent=str(full_document_intent).lower(),
+        )
+        system_prompt = _build_completions_system_prompt(
+            _SQL_SCHEMA_SNAPSHOT,
+            full_document_intent=full_document_intent,
+        )
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         messages.extend(_prior_to_completions(windowed))
         messages.append({"role": "user", "content": message})
@@ -723,6 +785,10 @@ async def _stream_completions_reply(
             tools.append(query_database_tool_schema(_SQL_SCHEMA_SNAPSHOT))
         if web_search_tool_enabled():
             tools.append(web_search_tool_schema())
+        # US-027: sub-agent tool is always registered — full-document tasks
+        # are common enough that the cost of one extra tool slot in every
+        # turn is worth the simplification.
+        tools.append(spawn_document_agent_tool_schema())
         final_assistant_msg: dict | None = None
 
         for _iteration in range(MAX_TOOL_ITERATIONS):
@@ -903,6 +969,11 @@ async def get_config() -> dict:
         "file_search_enabled": bool(OPENAI_VECTOR_STORE_ID),
         "sql_tool_enabled": sql_tool_enabled(),
         "web_search_tool_enabled": web_search_tool_enabled(),
+        # US-026 / US-027: spawn_document_agent is always registered, so this
+        # flag is `true` whenever the completions path is available. The UI
+        # uses it to pre-register the badge style for the tree-attribution
+        # tile and to know whether to surface the activity log inline.
+        "subagent_tool_enabled": True,
     }
 
 
@@ -1360,6 +1431,29 @@ async def web_search_endpoint(
         "results": [r.model_dump() for r in results],
         "count": len(results),
     }
+
+
+# US-027: direct sub-agent endpoint mirroring what the chat tool dispatches.
+# Useful for the PRD validation steps (compare main-agent vs sub-agent
+# context size, inspect the activity log) without driving the chat loop.
+@app.post("/api/subagent")
+async def subagent_endpoint(
+    req: SpawnDocumentAgentInput,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    async with httpx.AsyncClient(timeout=120.0) as http:
+        try:
+            result = await run_document_subagent(
+                openai_client=openai_client,
+                http=http,
+                supabase_url=SUPABASE_URL,
+                supabase_headers=_supabase_headers(user),
+                document_id=req.document_id,
+                task=req.task,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+    return result.model_dump()
 
 
 @app.get("/healthz")

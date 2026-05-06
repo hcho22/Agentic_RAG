@@ -2,7 +2,7 @@
 -- pgvector is enabled here so later modules (embeddings) can add vector columns
 -- without a separate extension migration.
 
-create extension if not exists vector;
+create extension if not exists vector with schema extensions;
 create extension if not exists pgcrypto;
 
 create table public.threads (
