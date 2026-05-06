@@ -12,13 +12,27 @@ US-017: optional `filters` narrow retrieval by the structured metadata
 extracted in US-016 (topics, document_type, published_date range). The
 schema is surfaced to the agent via the tool description so it knows what
 filters are valid.
+
+US-020: `keyword_search` is the Postgres full-text counterpart to
+match_chunks. It calls the `keyword_search` RPC (added in
+20260505120100_add_keyword_search_fn.sql) and returns rows in the same
+SearchDocumentsResult shape so US-021 can fuse the two via RRF without a
+per-side projection.
+
+US-021: `hybrid_search` runs both `match_chunks` and `keyword_search` in
+parallel against a wider candidate pool, then fuses the two rankings via
+Reciprocal Rank Fusion (RRF). The fused score replaces `similarity` on
+returned rows. The `search_documents` tool dispatches through this by
+default; `RETRIEVAL_MODE=vector` flips back to vector-only as a safety
+escape hatch.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from openai import AsyncOpenAI
@@ -29,6 +43,19 @@ from embeddings import embed_texts, to_pgvector
 DEFAULT_TOP_K = 5
 MAX_TOP_K = 50
 DEFAULT_SIMILARITY_THRESHOLD = 0.3
+
+# US-021: RRF constant. 60 is the canonical default from Cormack et al. — it
+# damps near the top of either ranking so a #1 in one list and a #1 in the
+# other contribute roughly equally, while still penalising far-down items.
+DEFAULT_RRF_K = 60
+
+# Each side of hybrid pulls top_k * this multiplier candidates before fusion,
+# clamped to MAX_TOP_K. A wider pool gives RRF room to surface items that one
+# strategy ranks low but the other ranks well — too narrow and hybrid
+# degenerates to "whichever side ranked first".
+HYBRID_POOL_MULTIPLIER = 4
+
+RetrievalMode = Literal["hybrid", "vector"]
 
 
 class DateRange(BaseModel):
@@ -131,6 +158,30 @@ def get_similarity_threshold() -> float:
     return v
 
 
+def get_rrf_k() -> int:
+    """RRF damping constant (`HYBRID_RRF_K` env, default 60)."""
+    raw = os.environ.get("HYBRID_RRF_K")
+    if raw is None or raw == "":
+        return DEFAULT_RRF_K
+    try:
+        v = int(raw)
+    except ValueError as e:
+        raise ValueError(f"HYBRID_RRF_K must be an int, got {raw!r}") from e
+    if v < 1:
+        raise ValueError(f"HYBRID_RRF_K must be >= 1, got {v}")
+    return v
+
+
+def get_retrieval_mode() -> RetrievalMode:
+    """`RETRIEVAL_MODE` env: `hybrid` (default) | `vector`."""
+    raw = (os.environ.get("RETRIEVAL_MODE") or "hybrid").strip().lower()
+    if raw not in ("hybrid", "vector"):
+        raise ValueError(
+            f"RETRIEVAL_MODE must be 'hybrid' or 'vector', got {raw!r}"
+        )
+    return raw  # type: ignore[return-value]
+
+
 # Kept as a module-level string so both the tool schema description and the
 # chat system prompt stay in sync — if the metadata schema evolves in US-016,
 # updating this constant propagates to both surfaces automatically.
@@ -216,3 +267,110 @@ async def search_documents(
     )
     r.raise_for_status()
     return [SearchDocumentsResult(**row) for row in r.json()]
+
+
+async def keyword_search(
+    http: httpx.AsyncClient,
+    supabase_url: str,
+    supabase_headers: dict[str, str],
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    filters: MetadataFilters | None = None,
+) -> list[SearchDocumentsResult]:
+    """Call keyword_search RPC under the user's JWT, return ranked rows.
+
+    The `similarity` field on each result carries the ts_rank_cd score, which
+    is unbounded (unlike cosine similarity in [0,1]) and not directly
+    comparable to match_chunks results — US-021 RRF fuses by rank position,
+    so the magnitude doesn't need to match. `filters` parity with match_chunks
+    (US-017) was added in 20260505121000_keyword_search_filters.sql so hybrid
+    queries apply the same metadata filter on both halves.
+    """
+    payload: dict[str, Any] = {
+        "query": query,
+        "match_count": min(max(top_k, 1), MAX_TOP_K),
+    }
+    payload.update(_filters_to_rpc_payload(filters))
+    r = await http.post(
+        f"{supabase_url}/rest/v1/rpc/keyword_search",
+        headers=supabase_headers,
+        json=payload,
+    )
+    r.raise_for_status()
+    return [SearchDocumentsResult(**row) for row in r.json()]
+
+
+def _rrf_fuse(
+    rankings: list[list[SearchDocumentsResult]],
+    top_k: int,
+    k: int,
+) -> list[SearchDocumentsResult]:
+    """Reciprocal Rank Fusion over multiple rankings of SearchDocumentsResult.
+
+    For each ranking, item at rank r (1-indexed) contributes `1/(k+r)` to its
+    fused score. Duplicate items across rankings have their scores summed —
+    this is the deduplication path required by US-021. The returned list
+    carries the fused score in `similarity`, sorted descending. Ties broken
+    by chunk id for deterministic ordering across runs.
+    """
+    scores: dict[str, float] = {}
+    by_id: dict[str, SearchDocumentsResult] = {}
+    for ranked in rankings:
+        for rank, item in enumerate(ranked, start=1):
+            scores[item.id] = scores.get(item.id, 0.0) + 1.0 / (k + rank)
+            # First-seen wins for the row payload — both rankings carry the
+            # same content/filename/etc for a given chunk id, so this is
+            # really just picking one to surface. Vector ranking is iterated
+            # first (caller's responsibility) to keep its filename casing.
+            by_id.setdefault(item.id, item)
+    ordered_ids = sorted(scores.keys(), key=lambda i: (-scores[i], i))
+    fused: list[SearchDocumentsResult] = []
+    for chunk_id in ordered_ids[:top_k]:
+        row = by_id[chunk_id]
+        fused.append(row.model_copy(update={"similarity": scores[chunk_id]}))
+    return fused
+
+
+async def hybrid_search(
+    openai_client: AsyncOpenAI,
+    http: httpx.AsyncClient,
+    supabase_url: str,
+    supabase_headers: dict[str, str],
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    filters: MetadataFilters | None = None,
+) -> list[SearchDocumentsResult]:
+    """Vector + keyword retrieval fused via RRF (US-021).
+
+    Each side independently retrieves a wider pool (top_k * pool_multiplier,
+    clamped to MAX_TOP_K) so RRF has room to surface items one strategy
+    ranks low but the other ranks well. The two HTTP calls run concurrently
+    via asyncio.gather — total latency is roughly max(vector, keyword) plus
+    one OpenAI embedding round trip, not the sum.
+
+    Returned `similarity` is the fused RRF score (small absolute numbers,
+    bounded by `len(rankings) / (k + 1)` ≈ 0.033 at k=60). Magnitudes are not
+    comparable to vector-only or keyword-only results — only ordering is.
+    """
+    pool_size = min(max(top_k * HYBRID_POOL_MULTIPLIER, top_k), MAX_TOP_K)
+
+    vector_task = search_documents(
+        openai_client=openai_client,
+        http=http,
+        supabase_url=supabase_url,
+        supabase_headers=supabase_headers,
+        query=query,
+        top_k=pool_size,
+        filters=filters,
+    )
+    keyword_task = keyword_search(
+        http=http,
+        supabase_url=supabase_url,
+        supabase_headers=supabase_headers,
+        query=query,
+        top_k=pool_size,
+        filters=filters,
+    )
+    vector_results, keyword_results = await asyncio.gather(vector_task, keyword_task)
+
+    return _rrf_fuse([vector_results, keyword_results], top_k=top_k, k=get_rrf_k())
