@@ -173,8 +173,12 @@ def validate_sql_safety(sql: str, allowed_schemas: tuple[str, ...]) -> str:
     if ";" in cleaned:
         raise SqlSafetyError("multiple statements are not allowed")
 
-    head = cleaned[:5].lower()
-    if not (head.startswith("select") or head.startswith("with ") or head.startswith("with(")):
+    head_lower = cleaned.lower()
+    if not (
+        head_lower.startswith("select")
+        or head_lower.startswith("with ")
+        or head_lower.startswith("with(")
+    ):
         raise SqlSafetyError(
             "only SELECT (optionally preceded by WITH) statements are allowed"
         )
