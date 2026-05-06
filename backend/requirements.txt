@@ -17,3 +17,7 @@ docling>=2.20.0,<3
 # unavailable — pin it explicitly so the dep is documented.
 pypdfium2>=4
 numpy<2
+# US-023: direct Postgres connection used by the text-to-SQL tool. The chat
+# path uses PostgREST through Supabase for RLS-scoped reads; this is the only
+# place we open a raw connection (under a read-only role).
+asyncpg>=0.29

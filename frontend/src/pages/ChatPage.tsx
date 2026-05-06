@@ -128,6 +128,9 @@ export function ChatPage() {
         role: 'user',
         content: text,
         created_at: new Date().toISOString(),
+        tool_calls: null,
+        tool_call_id: null,
+        name: null,
       }
       setMessages((prev) => [...prev, optimisticUser])
 
