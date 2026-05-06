@@ -635,10 +635,10 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 
 **Acceptance Criteria:**
 
-- [ ] `chunks.content_tsv tsvector` column maintained via trigger or generated column
-- [ ] GIN index on `content_tsv`
-- [ ] `keyword_search(query, top_k)` function returns chunks ranked by `ts_rank_cd`
-- [ ] Typecheck passes
+- [x] `chunks.content_tsv tsvector` column maintained via trigger or generated column
+- [x] GIN index on `content_tsv`
+- [x] `keyword_search(query, top_k)` function returns chunks ranked by `ts_rank_cd`
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -649,16 +649,24 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Keyword search returns the exact-match chunk at rank 1. Vector search may or may not — this demonstrates why hybrid is needed.
 - **Failure Indicator:** Keyword search misses exact tokens or uses a slow sequential scan.
 
+**Implementation notes (US-020):**
+
+- `content_tsv` is a STORED generated column (`to_tsvector('english'::regconfig, content)`) so the existing chunk-insert path stays untouched — no trigger plumbing, just `add column` (`supabase/migrations/20260505120000_chunks_content_tsv.sql`). The `::regconfig` cast pins the IMMUTABLE overload of `to_tsvector`; without it Postgres can resolve to the (text,text) variant which is STABLE and rejected for STORED generated columns.
+- `keyword_search(query text, match_count int)` returns the same `(id, document_id, chunk_index, content, similarity, filename)` shape as `match_chunks` so US-021's RRF fusion is a clean drop-in. The `similarity` field carries `ts_rank_cd` (unbounded, not [0,1]) — RRF fuses by rank position so magnitude mismatch is fine.
+- Query parsing uses `websearch_to_tsquery` (quoted phrases, OR, `-negation`) instead of `plainto_tsquery` — never raises on malformed input, which is the right failure mode for an agent-supplied string.
+- Backend wrapper is `retrieval.keyword_search()`, exposed via `POST /api/search/keyword` for the validation test (vector vs. keyword side-by-side comparison). US-021 will add the hybrid route on top.
+- Filter parity with `match_chunks` (US-017 metadata filters) is intentionally deferred to US-021 — the PRD spec for US-020 is just `(query, top_k)`, and adding filters before RRF lands risks getting the join surface wrong.
+
 #### US-021: Reciprocal Rank Fusion (RRF) combining vector + keyword
 
 **Description:** As a developer, I want to combine vector and keyword results using RRF so retrieval balances semantic and lexical signals.
 
 **Acceptance Criteria:**
 
-- [ ] `hybrid_search(query, top_k)` runs both searches and merges via RRF (default `k=60`, configurable)
-- [ ] Duplicate chunks (appearing in both rankings) are deduplicated, scores summed
-- [ ] `search_documents` tool switched to use hybrid search by default
-- [ ] Typecheck passes
+- [x] `hybrid_search(query, top_k)` runs both searches and merges via RRF (default `k=60`, configurable)
+- [x] Duplicate chunks (appearing in both rankings) are deduplicated, scores summed
+- [x] `search_documents` tool switched to use hybrid search by default
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -669,16 +677,25 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Hybrid top-5 contains the best from both; neither exact-match nor semantic-match chunks are lost.
 - **Failure Indicator:** Hybrid favors one strategy, drops relevant results from the other, or duplicates entries.
 
+**Implementation notes (US-021):**
+
+- `hybrid_search` (in `backend/retrieval.py`) is application-side, not an SQL RPC: it calls `match_chunks` and `keyword_search` concurrently via `asyncio.gather`, then fuses Python-side. Keeps the embedding round trip (already Python-side for vector) on a single side and avoids a heavier SQL fusion function. Net latency ≈ max(vector, keyword) + one OpenAI embed.
+- Each side pulls a wider candidate pool (`top_k * 4`, clamped to `MAX_TOP_K=50`) before fusion. Pulling only `top_k` per side starves RRF — items one strategy ranks low but the other ranks well wouldn't make either pool. Tuneable later if needed.
+- RRF formula: per-item score = Σ over rankings of `1 / (k + rank)` (rank 1-indexed). Duplicate items get summed scores — this is the dedupe path. `k=60` default (Cormack et al. canonical), configurable via `HYBRID_RRF_K` env var. Returned `similarity` carries the fused score (small absolute numbers, ~0.033 max — only ordering is meaningful, magnitudes are not comparable to vector or keyword scores). Ties broken by chunk id for run-to-run determinism.
+- `search_documents` chat tool dispatch in `main.py:_execute_tool_call` flips to `hybrid_search` by default. Added `RETRIEVAL_MODE=hybrid|vector` env knob (default `hybrid`) as a rollback escape hatch — incident response shouldn't require code changes. Tool result includes `retrieval_mode` so traces show which path ran.
+- New migration `20260505121000_keyword_search_filters.sql` extends `keyword_search` with the same US-017 filters (`topics`, `document_type`, `published_date` range) as `match_chunks`. Without filter parity, a filtered hybrid query would bias toward keyword matches across all docs (filtered vector pool + unfiltered keyword pool) — silently corrupting results. Same drop-and-recreate pattern US-017 used.
+- `/api/search/hybrid` route added so the validation test (compare hybrid top-5 vs vector vs keyword) is runnable without driving the agent. `/api/search` stays vector-only and `/api/search/keyword` stays keyword-only — three explicit endpoints make the side-by-side comparison trivial to script.
+
 #### US-022: Reranking via cross-encoder or LLM
 
 **Description:** As a developer, I want the top N hybrid results reranked by a cross-encoder (or an LLM-as-reranker) so the final top-k is higher precision.
 
 **Acceptance Criteria:**
 
-- [ ] Reranker configurable via env: `RERANKER=cohere|voyage|llm|none`
-- [ ] Reranker takes top 20 from hybrid, returns top 5 to the agent
-- [ ] Latency logged; if reranker exceeds 2s, log a warning
-- [ ] Typecheck passes
+- [x] Reranker configurable via env: `RERANKER=cohere|voyage|llm|none`
+- [x] Reranker takes top 20 from hybrid, returns top 5 to the agent
+- [x] Latency logged; if reranker exceeds 2s, log a warning
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -688,6 +705,14 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
   2. Run hybrid + rerank; note top-5
 - **Expected Result:** Reranked top-5 includes the 8th-ranked chunk in a higher position.
 - **Failure Indicator:** Reranker has no effect on rankings, or reranker silently fails.
+
+**Implementation notes (US-022):**
+
+- New module `backend/reranking.py` with a `Reranker` ABC and four implementations: `NullReranker`, `CohereReranker` (Cohere v2 rerank API), `VoyageReranker` (Voyage v1 rerank API), `LlmReranker` (OpenAI chat-completions JSON-mode score-then-sort). `build_reranker(name, http, openai_client)` is the factory; hosted backends raise on missing API keys at build time so config mistakes surface immediately, not at first request.
+- Default `RERANKER=none` so this is opt-in — flipping it on adds latency and (for hosted backends) an extra vendor dep, neither of which should be free side effects of pulling latest. Models are env-tunable: `COHERE_RERANK_MODEL` (default `rerank-english-v3.0`), `VOYAGE_RERANK_MODEL` (default `rerank-2`), `OPENAI_RERANK_MODEL` (defaults to `OPENAI_MODEL`, then `gpt-4o-mini`). `RERANK_INPUT_K` controls the candidate pool fed to the reranker (default 20 per PRD).
+- `rerank_with_timing()` wraps the reranker call with `time.perf_counter()` and logs at three levels: `reranker.ok` for normal, `reranker.slow` warning when latency exceeds `RERANK_LATENCY_WARN_SECONDS=2.0`, and `reranker.error` warning with fall-back to input ordering on any exception. Hard-failing the user's whole turn over a refinement step would be wrong — the input was already filtered by hybrid retrieval, so degraded ordering is still useful.
+- LLM reranker prompts the model for `{"results": [{"index": int, "score": float}, ...]}` via `response_format={"type": "json_object"}` at `temperature=0`. Parser is defensive: dedupes repeat indices (model occasionally emits them), drops out-of-range indices, and tops up the result list from input order if the model under-counts so we always return `min(top_k, len(candidates))` rows. Caveat: LLM scoring has no calibration across runs — use Cohere/Voyage when score magnitudes matter for downstream logic.
+- Pipeline orchestrator `_retrieve_for_agent` in `main.py` ties it all together: pulls `RERANK_INPUT_K` candidates from the search backend (hybrid by default, vector when `RETRIEVAL_MODE=vector`) when reranking is on, otherwise pulls `top_k` directly. The chat tool path and the new `/api/search/rerank` endpoint share this helper so the validation test (compare hybrid-only via `/api/search/hybrid` vs hybrid+rerank via `/api/search/rerank`) hits the same code path the agent actually uses. Tool result includes `retrieval_mode` and `reranker` so LangSmith traces show which path ran.
 
 ---
 

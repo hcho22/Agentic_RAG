@@ -40,10 +40,21 @@ from chunking import chunk_text, get_chunk_config
 from embeddings import embed_texts, get_embedding_model, to_pgvector
 from metadata import extract_document_metadata, get_metadata_model
 from parsing import UnsupportedFormatError, parse_document, warmup as warmup_parsing
+from reranking import (
+    build_reranker,
+    get_rerank_input_k,
+    get_reranker_name,
+    rerank_with_timing,
+)
 from retrieval import (
     METADATA_SCHEMA_HINT,
     SearchDocumentsInput,
+    SearchDocumentsResult,
+    get_retrieval_mode,
+    get_rrf_k,
     get_similarity_threshold,
+    hybrid_search,
+    keyword_search,
     search_documents,
     search_documents_tool_schema,
 )
@@ -447,6 +458,59 @@ def _prior_to_completions(prior: list[dict]) -> list[dict]:
     return out
 
 
+async def _retrieve_for_agent(
+    *,
+    http: httpx.AsyncClient,
+    user: AuthedUser,
+    query: str,
+    top_k: int,
+    filters: object,
+) -> tuple[list[SearchDocumentsResult], str, str]:
+    """Full agent-tool retrieval pipeline: search (US-021) + optional rerank (US-022).
+
+    Returns `(results, retrieval_mode, reranker_name)`. When the reranker is
+    `none`, the search backend returns `top_k` directly. When a reranker is
+    configured, the search backend pulls a wider candidate pool
+    (`RERANK_INPUT_K`, default 20) and the reranker trims to `top_k`.
+
+    Centralising this here keeps the chat tool path and `/api/search/rerank`
+    in lockstep — the validation test in the PRD compares hybrid-only vs
+    hybrid+rerank against the same code path the agent actually uses.
+    """
+    mode = get_retrieval_mode()
+    reranker_name = get_reranker_name()
+
+    pool_k = top_k if reranker_name == "none" else max(get_rerank_input_k(), top_k)
+
+    if mode == "hybrid":
+        candidates = await hybrid_search(
+            openai_client=openai_client,
+            http=http,
+            supabase_url=SUPABASE_URL,
+            supabase_headers=_supabase_headers(user),
+            query=query,
+            top_k=pool_k,
+            filters=filters,  # type: ignore[arg-type]
+        )
+    else:
+        candidates = await search_documents(
+            openai_client=openai_client,
+            http=http,
+            supabase_url=SUPABASE_URL,
+            supabase_headers=_supabase_headers(user),
+            query=query,
+            top_k=pool_k,
+            filters=filters,  # type: ignore[arg-type]
+        )
+
+    if reranker_name == "none":
+        return candidates, mode, reranker_name
+
+    reranker = build_reranker(reranker_name, http=http, openai_client=openai_client)
+    results = await rerank_with_timing(reranker, query, candidates, top_k)
+    return results, mode, reranker_name
+
+
 async def _execute_tool_call(
     http: httpx.AsyncClient,
     user: AuthedUser,
@@ -467,11 +531,9 @@ async def _execute_tool_call(
     if name == "search_documents":
         try:
             validated = SearchDocumentsInput(**args)
-            results = await search_documents(
-                openai_client=openai_client,
+            results, mode, reranker_name = await _retrieve_for_agent(
                 http=http,
-                supabase_url=SUPABASE_URL,
-                supabase_headers=_supabase_headers(user),
+                user=user,
                 query=validated.query,
                 top_k=validated.top_k,
                 filters=validated.filters,
@@ -480,6 +542,8 @@ async def _execute_tool_call(
                 {
                     "results": [r.model_dump() for r in results],
                     "count": len(results),
+                    "retrieval_mode": mode,
+                    "reranker": reranker_name,
                     "similarity_threshold": get_similarity_threshold(),
                 }
             )
@@ -1032,6 +1096,77 @@ async def search(
         "results": [r.model_dump() for r in results],
         "similarity_threshold": get_similarity_threshold(),
         "embedding_model": get_embedding_model(),
+    }
+
+
+# US-020: keyword (full-text) search counterpart to /api/search. Surfaces the
+# Postgres tsvector ranking directly so the validation test in the PRD can
+# compare vector vs. keyword behaviour for exact-match tokens. US-021 adds
+# /api/search/hybrid below that fuses both.
+@app.post("/api/search/keyword")
+async def search_keyword(
+    req: SearchDocumentsInput,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    async with httpx.AsyncClient(timeout=30.0) as http:
+        results = await keyword_search(
+            http=http,
+            supabase_url=SUPABASE_URL,
+            supabase_headers=_supabase_headers(user),
+            query=req.query,
+            top_k=req.top_k,
+            filters=req.filters,
+        )
+    return {"results": [r.model_dump() for r in results]}
+
+
+# US-021: hybrid (vector + keyword via RRF). The chat tool dispatches through
+# `hybrid_search` by default; this endpoint exposes the same path directly so
+# the PRD validation step (compare hybrid top-5 vs vector-only vs keyword-only)
+# is runnable without driving the agent.
+@app.post("/api/search/hybrid")
+async def search_hybrid(
+    req: SearchDocumentsInput,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    async with httpx.AsyncClient(timeout=30.0) as http:
+        results = await hybrid_search(
+            openai_client=openai_client,
+            http=http,
+            supabase_url=SUPABASE_URL,
+            supabase_headers=_supabase_headers(user),
+            query=req.query,
+            top_k=req.top_k,
+            filters=req.filters,
+        )
+    return {
+        "results": [r.model_dump() for r in results],
+        "rrf_k": get_rrf_k(),
+        "embedding_model": get_embedding_model(),
+    }
+
+
+# US-022: full agent retrieval pipeline (search + rerank). Mirrors what the
+# chat tool path runs. Useful for the PRD validation step that compares
+# hybrid-only top-5 vs hybrid+rerank top-5 without driving the agent.
+@app.post("/api/search/rerank")
+async def search_rerank(
+    req: SearchDocumentsInput,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        results, mode, reranker_name = await _retrieve_for_agent(
+            http=http,
+            user=user,
+            query=req.query,
+            top_k=req.top_k,
+            filters=req.filters,
+        )
+    return {
+        "results": [r.model_dump() for r in results],
+        "retrieval_mode": mode,
+        "reranker": reranker_name,
+        "rerank_input_k": get_rerank_input_k(),
     }
 
 
