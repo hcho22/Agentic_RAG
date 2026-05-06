@@ -63,6 +63,35 @@ export type WebSearchResultPayload = {
   error?: string
 }
 
+// US-027 / US-028: sub-agent activity log + spawn result. Mirrors the
+// pydantic shapes in backend/subagent.py — we keep them aligned so the
+// UI can render the hierarchical tree without a server-side projection.
+export type SubAgentActivityKind = 'read' | 'reason' | 'finalize' | 'error'
+
+export type SubAgentActivityEntry = {
+  kind: SubAgentActivityKind
+  chunk_index?: number | null
+  preview?: string | null
+  text?: string | null
+  summary?: string | null
+}
+
+export type SpawnDocumentAgentArgs = {
+  document_id?: string
+  task?: string
+}
+
+export type SpawnDocumentAgentResultPayload = {
+  document_id?: string
+  filename?: string
+  summary?: string
+  activity?: SubAgentActivityEntry[]
+  iterations?: number
+  chunks_total?: number
+  truncated?: boolean
+  error?: string
+}
+
 export type ToolInvocation =
   | {
       kind: 'search_documents'
@@ -81,6 +110,12 @@ export type ToolInvocation =
       toolCallId: string
       args: WebSearchArgs
       result: WebSearchResultPayload | null
+    }
+  | {
+      kind: 'spawn_document_agent'
+      toolCallId: string
+      args: SpawnDocumentAgentArgs
+      result: SpawnDocumentAgentResultPayload | null
     }
   | {
       kind: 'unknown'
@@ -132,6 +167,14 @@ function buildInvocation(
       toolCallId: call.id,
       args: (args ?? {}) as WebSearchArgs,
       result: (result ?? null) as WebSearchResultPayload | null,
+    }
+  }
+  if (name === 'spawn_document_agent') {
+    return {
+      kind: 'spawn_document_agent',
+      toolCallId: call.id,
+      args: (args ?? {}) as SpawnDocumentAgentArgs,
+      result: (result ?? null) as SpawnDocumentAgentResultPayload | null,
     }
   }
   return {

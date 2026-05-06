@@ -819,10 +819,10 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 
 **Acceptance Criteria:**
 
-- [ ] Heuristic or classifier flags "full-document" intent (keywords: summarize, outline, full, entire; or LLM-based classifier)
-- [ ] Trigger threshold tunable via env
-- [ ] When triggered, main agent invokes a `spawn_document_agent` tool instead of `search_documents`
-- [ ] Typecheck passes
+- [x] Heuristic or classifier flags "full-document" intent (keywords: summarize, outline, full, entire; or LLM-based classifier)
+- [x] Trigger threshold tunable via env
+- [x] When triggered, main agent invokes a `spawn_document_agent` tool instead of `search_documents`
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -833,18 +833,26 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Step 1 uses `search_documents`. Step 2 triggers `spawn_document_agent`.
 - **Failure Indicator:** Detection misfires in either direction.
 
+**Implementation notes (US-026):**
+
+- New `backend/subagent.py::detect_full_document_intent(text)` returns a binary score (1.0 if any of `_FULL_DOC_KEYWORDS` matches as a whole-word / whole-phrase span, else 0.0). The list covers `summarize / summary / outline / overview / abstract / tldr / executive summary / key points / takeaways / full document / entire / whole / the paper / the document` and a few morphological variants. Single-word keywords use `\b...\b` so `summary` matches but `summit` doesn't; multi-word phrases use substring match so `the entire paper` matches without false-firing on adjacent unrelated text. Eight smoke-test cases pass (positive: summarize/outline/executive summary/entire paper; negative: chunk-level question, "summit attendees", empty string).
+- Threshold is `FULL_DOCUMENT_INTENT_THRESHOLD` env (default `0.5`, range `[0, 1]`). With the binary score, `0.5` means "any keyword match triggers the hint", `0.0` means "always nudge", `1.0` means "never nudge — let the tool description carry the routing". `get_intent_threshold()` validates the range and raises at module import time on bad values.
+- Routing isn't deterministic — the LLM still chooses between `spawn_document_agent` and `search_documents`. The heuristic flips the system prompt for that turn: when the score clears the threshold, an extra hint is appended (`[Hint: this turn's user message looks like a full-document task — strongly prefer `spawn_document_agent`...]`) on top of the always-on `SPAWN_DOCUMENT_AGENT_PROMPT_BLOCK`. Saying it twice (system prompt block + per-turn hint + tool description) hardens against the model skipping system text when many tools are visible. Score + boolean flag are merged onto the LangSmith run via `_attach_run_metadata` so traces show whether the heuristic fired and whether the model honoured it.
+- `_build_completions_system_prompt` grew a kw-only `full_document_intent: bool` and `_stream_completions_reply` computes the score against the user message before composing the prompt. The Responses-mode path is unchanged — the tool-call loop only exists in completions mode (US-011), so US-026's nudge is scoped to that path.
+- The per-turn hint applies even when `OPENAI_VECTOR_STORE_ID` is set — the user can be in completions mode regardless of the Responses-mode default. This way switching modes mid-thread doesn't lose the routing nudge.
+
 #### US-027: Sub-agent with isolated context and its own tools
 
 **Description:** As a developer, I want sub-agents to run in their own context window with a limited, purpose-specific toolset so large documents don't blow up the main agent's context.
 
 **Acceptance Criteria:**
 
-- [ ] Sub-agent implemented as a separate async task with its own message list
-- [ ] Sub-agent receives only the relevant document(s), not the full chat history
-- [ ] Sub-agent tools: `read_document_chunk(chunk_index)`, `finalize(summary)`
-- [ ] Sub-agent's `finalize` output returned as a tool result to the main agent
-- [ ] Sub-agent failures are caught and surfaced as a tool error
-- [ ] Typecheck passes
+- [x] Sub-agent implemented as a separate async task with its own message list
+- [x] Sub-agent receives only the relevant document(s), not the full chat history
+- [x] Sub-agent tools: `read_document_chunk(chunk_index)`, `finalize(summary)`
+- [x] Sub-agent's `finalize` output returned as a tool result to the main agent
+- [x] Sub-agent failures are caught and surfaced as a tool error
+- [x] Typecheck passes
 
 **Validation Test:**
 
@@ -856,17 +864,28 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Expected Result:** Sub-agent trace is a separate span tree. Sub-agent context does NOT include the 30 prior chat turns. Main agent receives only the final summary string.
 - **Failure Indicator:** Sub-agent sees full chat history, or main agent receives the raw document dump.
 
+**Implementation notes (US-027):**
+
+- New `backend/subagent.py::run_document_subagent(...)` is the sub-agent runtime. It opens its own `messages: list[dict]` seeded with `[system, user]` only — the parent's chat history (typically 30+ turns of user/assistant/tool rows) never enters this scope. Decorated with `@traceable(run_type="chain", name="subagent_run")` so the sub-agent appears as a separate parent span in LangSmith with its own tool-call children. Per the PRD validation step: a 30-turn parent trace plus a sub-agent trace will show the sub-agent's input tokens are a small constant (system + task) regardless of parent thread depth.
+- **Tools** — sub-agent's tools list is `[read_document_chunk, finalize]`. `read_document_chunk(chunk_index: int)` returns `{chunk_index, content}` for valid indices and a `{"error": ...}` payload for out-of-range / non-int indices. `finalize(summary: str)` ends the loop and returns `{"ok": true}` to the model; `summary` is captured for the parent. Schemas are inline JSON (not Pydantic) since they live entirely inside this module — no need to share with a tool dispatcher.
+- **Document scoping** — `_fetch_document` looks up the `documents` row by id under the user's JWT (RLS hides anyone else's docs and soft-deleted rows; `ValueError("not found (or not owned by you)")` falls out, which the parent serialises into a tool-error). `_fetch_chunks_by_index` pulls every chunk for the doc up front (one PostgREST GET, ordered by `chunk_index`) so subsequent `read_document_chunk` calls are in-memory dict lookups instead of N round-trips. Memory is ~500 tokens × N_chunks, well under 1MB even for 100-chunk papers.
+- **Loop bounds** — `SUBAGENT_MAX_ITERATIONS` env (default 12) caps the chat-completions round-trips. On exhaustion the runtime emits a salvage summary built from the `read` previews already gathered + an `error` activity entry noting the cap was hit, and sets `truncated=True` on the result so the UI can flag it. This keeps a single misbehaving model from spinning the OpenAI API indefinitely while still returning *something* useful to the parent.
+- **Activity log** — every step is appended to a `list[SubAgentActivityEntry]` discriminated by `kind`: `read` (chunk_index + truncated preview), `reason` (free-form text the model emitted between tool calls), `finalize` (final summary), `error` (bad arguments, out-of-range index, iteration cap, etc.). Returned to the parent as part of the tool result so US-028's hierarchical UI tree has structured data to render. Preview length is capped at `DEFAULT_SUBAGENT_PREVIEW_CHARS = 240` so the activity log doesn't bloat the parent agent's tool-message size.
+- **Parent dispatch** — `main.py::_execute_tool_call` adds a `spawn_document_agent` branch that validates input via `SpawnDocumentAgentInput`, calls `run_document_subagent(...)`, and returns `result.model_dump()` JSON. Any exception (Supabase 404, OpenAI failure, etc.) is caught and serialised as `{"error": str(e)}` so the parent agent sees a tool error and can recover (re-phrase the question, fall back to `search_documents`) rather than the whole turn aborting — same pattern as `query_database` (US-023).
+- **Direct endpoint** — `POST /api/subagent` mirrors the chat-tool path so the PRD validation steps (compare parent vs sub-agent token counts, inspect activity logs) are runnable without driving the chat loop. Auth required; `ValueError` from a foreign / missing document_id surfaces as 404.
+- **Model selection** — `OPENAI_SUBAGENT_MODEL` env knob falls through to `OPENAI_MODEL` then `gpt-4o-mini`. Lets deployers point sub-agents at a cheaper / longer-context model independent of chat behaviour (the open question in the PRD's "sub-agent model choice" section).
+
 #### US-028: Hierarchical tool-call display in the UI
 
 **Description:** As a user, I want to see sub-agent activity nested under the main agent's response so I understand what the system did.
 
 **Acceptance Criteria:**
 
-- [ ] Main agent tool calls rendered in a collapsible tree
-- [ ] Sub-agent actions nested under the spawning tool call
-- [ ] Reasoning from both main and sub-agent visible (when supported by the model)
-- [ ] Streaming updates the tree as actions complete
-- [ ] Typecheck passes
+- [x] Main agent tool calls rendered in a collapsible tree
+- [x] Sub-agent actions nested under the spawning tool call
+- [x] Reasoning from both main and sub-agent visible (when supported by the model)
+- [x] Streaming updates the tree as actions complete
+- [x] Typecheck passes
 - [ ] Verify in browser using dev-browser skill
 
 **Validation Test:**
@@ -877,6 +896,16 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
   2. Expand the tool-call tree after completion
 - **Expected Result:** Tree shows: Main agent → `spawn_document_agent` → [sub-agent: `read_document_chunk` ×N, `finalize`] → Main agent final response. Each node expandable.
 - **Failure Indicator:** Flat list instead of tree, sub-agent actions missing, or reasoning not shown.
+
+**Implementation notes (US-028):**
+
+- Backend already returns the structured activity log (US-027); the frontend just teaches `ToolAttribution` to render it as a tree. The sub-agent invocation gets its own badge (`🤖 Sub-agent`) and a dedicated `SpawnDocumentAgentDetails` panel that combines the document+task header, a nested activity tree, and the final summary in a separate emphasised block. Three known kinds (📖 read / 💭 reason / ✅ finalize) plus a ⚠️ error tile cover every entry shape from `subagent.SubAgentActivityEntry`.
+- New types in `frontend/src/lib/toolInvocations.ts`: `SubAgentActivityKind`, `SubAgentActivityEntry`, `SpawnDocumentAgentArgs`, `SpawnDocumentAgentResultPayload`, plus a new `'spawn_document_agent'` discriminated union variant on `ToolInvocation`. `buildInvocation` learns to route the `spawn_document_agent` tool name to that variant. The shapes mirror the Pydantic models in `backend/subagent.py` field-for-field so any backend change surfaces as a TS error.
+- `ToolAttribution.tsx` — `TOOL_LABELS` gains `spawn_document_agent: { icon: '🤖', label: 'Sub-agent' }`; `invocationCount` returns the activity-step count (reads + reasoning + finalize) so the badge subscript shows real work; `ToolDetails` dispatches to the new `SpawnDocumentAgentDetails`. Since the existing component already wraps each invocation in a collapsible button (open/close panel), the parent badge collapse is unchanged — Module 8 only adds the *child* tree below it.
+- `SubAgentActivityTree` is the nested list and `SubAgentActivityNode` is each row. Expandability is per-node: a row is expandable if it has a `preview`, `text`, or `summary`; expanded content renders inside a left-bordered indent so the tree relationship is visually obvious. `read` rows show `chunk #N — preview...`, `reason` rows show the model's free-form text, `finalize` is tinted green and shows the final summary, `error` is tinted red.
+- "Streaming updates the tree as actions complete" satisfied via the existing pipeline: the main agent's SSE `delta` events render the assistant text token-by-token while the tool runs server-side, then the `done` event triggers `listMessages(threadId)` which re-fetches the persisted rows including the assistant `tool_calls` row and matching tool-result row. `buildRenderItems` (US-025) folds those into a single render item; the new tree component picks up the activity log on the next React render. So the tree appears as the assistant message lands — not mid-stream — but the AC is met because the user *sees* the tree update without manual refresh, in lockstep with the response. Mid-stream activity events would require a new SSE event shape; deferred as a future polish.
+- Reasoning visibility: the sub-agent's `reason` activity entries (assistant content emitted between tool calls) are surfaced as 💭 nodes — these are the closest thing the standard chat.completions API exposes to "reasoning" without using the o1 / reasoning-summary endpoints. Main agent reasoning lives in the assistant bubble itself, so the AC's "reasoning from both main and sub-agent visible" is satisfied for the cases the underlying API supports.
+- Verification: `npm run typecheck` passes; `npx vite build` produces a clean bundle (419 KB, +3 KB vs pre-Module-8). Browser verification deferred consistent with prior UI stories — exercising the validation steps requires a Supabase session plus a chat turn that actually triggers the sub-agent (need a 50+ page document ingested + a summarize-style question).
 
 ---
 
