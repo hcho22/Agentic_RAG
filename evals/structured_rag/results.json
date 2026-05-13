@@ -1,0 +1,2586 @@
+{
+  "aggregates": {
+    "overall": {
+      "naive": 10.0,
+      "semantic": 80.0,
+      "delta_pp": 70.0,
+      "n": 30
+    },
+    "by_category": {
+      "join": {
+        "naive": 0.0,
+        "semantic": 88.9,
+        "delta_pp": 88.9,
+        "n": 9
+      },
+      "metric": {
+        "naive": 6.7,
+        "semantic": 93.3,
+        "delta_pp": 86.6,
+        "n": 15
+      },
+      "time": {
+        "naive": 33.3,
+        "semantic": 33.3,
+        "delta_pp": 0.0,
+        "n": 6
+      }
+    },
+    "elapsed_s": 74.4,
+    "generated_at": "2026-05-13T13:12:58"
+  },
+  "questions": [
+    {
+      "id": "q01",
+      "category": "metric",
+      "question": "What is our total revenue?",
+      "gold": {
+        "sql": "SELECT SUM(crm.orders.total) AS revenue\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'",
+        "rows": [
+          {
+            "revenue": 703507.15
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(total) AS total_revenue FROM crm.orders WHERE status = 'completed' LIMIT 200",
+        "rows": [
+          {
+            "total_revenue": null
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "gross_revenue"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\nFROM crm.orders\nLIMIT 200",
+        "rows": [
+          {
+            "gross_revenue": 703507.15
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q02",
+      "category": "metric",
+      "question": "What is our net revenue?",
+      "gold": {
+        "sql": "SELECT (\n  (SELECT COALESCE(SUM(crm.orders.total), 0) FROM crm.orders WHERE crm.orders.status <> 'cancelled')\n  - (SELECT COALESCE(SUM(crm.refunds.amount), 0) FROM crm.refunds)\n) AS net_revenue",
+        "rows": [
+          {
+            "net_revenue": 635666.75
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(total) - SUM(discount) AS net_revenue FROM crm.orders WHERE status = 'completed' LIMIT 200",
+        "rows": [
+          {
+            "net_revenue": null
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "net_revenue"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT (SELECT COALESCE(SUM(o.total), 0) FROM crm.orders o WHERE o.status <> 'cancelled') - (SELECT COALESCE(SUM(r.amount), 0) FROM crm.refunds r) AS net_revenue",
+        "rows": [
+          {
+            "net_revenue": 635666.75
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q03",
+      "category": "metric",
+      "question": "What is our gross revenue?",
+      "gold": {
+        "sql": "SELECT SUM(crm.orders.total) AS gross_revenue\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'",
+        "rows": [
+          {
+            "gross_revenue": 703507.15
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(total) AS gross_revenue FROM crm.orders WHERE status = 'completed' LIMIT 1",
+        "rows": [
+          {
+            "gross_revenue": null
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "gross_revenue"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\nFROM crm.orders\nLIMIT 200",
+        "rows": [
+          {
+            "gross_revenue": 703507.15
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q04",
+      "category": "metric",
+      "question": "What is our revenue after refunds?",
+      "gold": {
+        "sql": "SELECT (\n  (SELECT COALESCE(SUM(crm.orders.total), 0) FROM crm.orders WHERE crm.orders.status <> 'cancelled')\n  - (SELECT COALESCE(SUM(crm.refunds.amount), 0) FROM crm.refunds)\n) AS revenue_after_refunds",
+        "rows": [
+          {
+            "revenue_after_refunds": 635666.75
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(total - COALESCE((SELECT SUM(amount) FROM crm.refunds WHERE order_id = crm.orders.id), 0)) AS revenue_after_refunds FROM crm.orders WHERE status = 'completed' LIMIT 200",
+        "rows": [
+          {
+            "revenue_after_refunds": null
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "net_revenue"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT (SELECT COALESCE(SUM(o.total), 0) FROM crm.orders o WHERE o.status <> 'cancelled') - (SELECT COALESCE(SUM(r.amount), 0) FROM crm.refunds r) AS net_revenue",
+        "rows": [
+          {
+            "net_revenue": 635666.75
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q05",
+      "category": "metric",
+      "question": "What is our subtotal revenue, before tax and shipping?",
+      "gold": {
+        "sql": "SELECT SUM(crm.orders.subtotal) AS subtotal_revenue\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'",
+        "rows": [
+          {
+            "subtotal_revenue": 657731.91
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(subtotal) AS total_revenue FROM crm.orders WHERE status = 'completed' LIMIT 1",
+        "rows": [
+          {
+            "total_revenue": null
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "subtotal_revenue"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT SUM(crm.orders.subtotal) FILTER (WHERE crm.orders.status <> 'cancelled') AS subtotal_revenue\nFROM crm.orders\nLIMIT 200",
+        "rows": [
+          {
+            "subtotal_revenue": 657731.91
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q06",
+      "category": "metric",
+      "question": "What is our merchandise revenue?",
+      "gold": {
+        "sql": "SELECT SUM(crm.orders.subtotal) AS merchandise_revenue\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'",
+        "rows": [
+          {
+            "merchandise_revenue": 657731.91
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(total) AS merchandise_revenue FROM crm.orders WHERE status = 'completed' LIMIT 200",
+        "rows": [
+          {
+            "merchandise_revenue": null
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "subtotal_revenue"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT SUM(crm.orders.subtotal) FILTER (WHERE crm.orders.status <> 'cancelled') AS subtotal_revenue\nFROM crm.orders\nLIMIT 200",
+        "rows": [
+          {
+            "subtotal_revenue": 657731.91
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q07",
+      "category": "metric",
+      "question": "What is our average order value?",
+      "gold": {
+        "sql": "SELECT AVG(crm.orders.total) AS aov\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'",
+        "rows": [
+          {
+            "aov": 757.2735737351992
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT AVG(total) AS average_order_value FROM crm.orders LIMIT 200",
+        "rows": [
+          {
+            "average_order_value": 754.09226
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "aov"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT AVG(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS aov\nFROM crm.orders\nLIMIT 200",
+        "rows": [
+          {
+            "aov": 757.2735737351992
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q08",
+      "category": "metric",
+      "question": "How many orders have we processed?",
+      "gold": {
+        "sql": "SELECT COUNT(*) AS order_count\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'",
+        "rows": [
+          {
+            "order_count": 929
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT COUNT(*) FROM crm.orders LIMIT 200",
+        "rows": [
+          {
+            "count": 1000
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "order_count"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled') AS order_count\nFROM crm.orders\nLIMIT 200",
+        "rows": [
+          {
+            "order_count": 929
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q09",
+      "category": "metric",
+      "question": "How many transactions do we have?",
+      "gold": {
+        "sql": "SELECT COUNT(*) AS transactions\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'",
+        "rows": [
+          {
+            "transactions": 929
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT COUNT(*) FROM crm.orders LIMIT 200",
+        "rows": [
+          {
+            "count": 1000
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "order_count"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled') AS order_count\nFROM crm.orders\nLIMIT 200",
+        "rows": [
+          {
+            "order_count": 929
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q10",
+      "category": "metric",
+      "question": "What is our gross margin?",
+      "gold": {
+        "sql": "SELECT\n    (SUM(crm.order_items.line_total) - SUM(crm.order_items.quantity * crm.products.cost))\n    / NULLIF(SUM(crm.order_items.line_total), 0) AS gross_margin\n  FROM crm.order_items\n  JOIN crm.products ON crm.order_items.product_id = crm.products.id",
+        "rows": [
+          {
+            "gross_margin": 0.37594228707260835
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(p.list_price - p.cost) AS gross_margin FROM crm.products p LIMIT 200",
+        "rows": [
+          {
+            "gross_margin": 2154.22
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": null,
+        "sql": null,
+        "rows": null,
+        "error": "no_match: The question asks for a scalar metric (gross margin) that cannot be combined with dimensions, and it does not specify any dimensions or filters to provide context.",
+        "no_match": true,
+        "suggested_fallback": "none",
+        "correct": false
+      }
+    },
+    {
+      "id": "q11",
+      "category": "metric",
+      "question": "How many repeat customers do we have?",
+      "gold": {
+        "sql": "SELECT COUNT(*) AS repeat_customers\n  FROM (\n    SELECT crm.orders.customer_id\n      FROM crm.orders\n     WHERE crm.orders.status <> 'cancelled'\n     GROUP BY crm.orders.customer_id\n    HAVING COUNT(*) > 1\n  ) sub",
+        "rows": [
+          {
+            "repeat_customers": 185
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT COUNT(DISTINCT customer_id) FROM crm.orders GROUP BY customer_id HAVING COUNT(*) > 1 LIMIT 200",
+        "rows": [
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "repeat_customers"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT (SELECT COUNT(*) FROM (SELECT customer_id FROM crm.orders WHERE status <> 'cancelled' GROUP BY customer_id HAVING COUNT(*) > 1) sub) AS repeat_customers",
+        "rows": [
+          {
+            "repeat_customers": 185
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q12",
+      "category": "metric",
+      "question": "What is the total billed amount across non-cancelled orders?",
+      "gold": {
+        "sql": "SELECT SUM(crm.orders.total) AS billed\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'",
+        "rows": [
+          {
+            "billed": 703507.15
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(total) AS total_billed FROM crm.orders WHERE status <> 'cancelled' LIMIT 200",
+        "rows": [
+          {
+            "total_billed": 703507.15
+          }
+        ],
+        "error": null,
+        "correct": true
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "gross_revenue"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\nFROM crm.orders\nLIMIT 200",
+        "rows": [
+          {
+            "gross_revenue": 703507.15
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q13",
+      "category": "metric",
+      "question": "What is our take-home revenue?",
+      "gold": {
+        "sql": "SELECT (\n  (SELECT COALESCE(SUM(crm.orders.total), 0) FROM crm.orders WHERE crm.orders.status <> 'cancelled')\n  - (SELECT COALESCE(SUM(crm.refunds.amount), 0) FROM crm.refunds)\n) AS take_home_revenue",
+        "rows": [
+          {
+            "take_home_revenue": 635666.75
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(total) - SUM(discount) AS take_home_revenue FROM crm.orders WHERE status = 'completed' LIMIT 200",
+        "rows": [
+          {
+            "take_home_revenue": null
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "net_revenue"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT (SELECT COALESCE(SUM(o.total), 0) FROM crm.orders o WHERE o.status <> 'cancelled') - (SELECT COALESCE(SUM(r.amount), 0) FROM crm.refunds r) AS net_revenue",
+        "rows": [
+          {
+            "net_revenue": 635666.75
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q14",
+      "category": "metric",
+      "question": "How many returning customers placed more than one order?",
+      "gold": {
+        "sql": "SELECT COUNT(*) AS returning_customers\n  FROM (\n    SELECT crm.orders.customer_id\n      FROM crm.orders\n     WHERE crm.orders.status <> 'cancelled'\n     GROUP BY crm.orders.customer_id\n    HAVING COUNT(*) > 1\n  ) sub",
+        "rows": [
+          {
+            "returning_customers": 185
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT COUNT(DISTINCT customer_id) FROM crm.orders WHERE customer_id IN (SELECT customer_id FROM crm.orders GROUP BY customer_id HAVING COUNT(*) > 1)",
+        "rows": [
+          {
+            "count": 189
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "repeat_customers"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT (SELECT COUNT(*) FROM (SELECT customer_id FROM crm.orders WHERE status <> 'cancelled' GROUP BY customer_id HAVING COUNT(*) > 1) sub) AS repeat_customers",
+        "rows": [
+          {
+            "repeat_customers": 185
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q15",
+      "category": "metric",
+      "question": "What are our total sales?",
+      "gold": {
+        "sql": "SELECT SUM(crm.orders.total) AS sales\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'",
+        "rows": [
+          {
+            "sales": 703507.15
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT SUM(total) AS total_sales FROM crm.orders WHERE status = 'completed' LIMIT 200",
+        "rows": [
+          {
+            "total_sales": null
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "gross_revenue"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\nFROM crm.orders\nLIMIT 200",
+        "rows": [
+          {
+            "gross_revenue": 703507.15
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q16",
+      "category": "join",
+      "question": "What is our gross revenue by country?",
+      "gold": {
+        "sql": "SELECT crm.customers.country AS country, SUM(crm.orders.total) AS gross_revenue\n  FROM crm.customers\n  JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY crm.customers.country\n ORDER BY crm.customers.country",
+        "rows": [
+          {
+            "country": "DE",
+            "gross_revenue": 156766.35
+          },
+          {
+            "country": "FR",
+            "gross_revenue": 191464.97
+          },
+          {
+            "country": "JP",
+            "gross_revenue": 121633.17
+          },
+          {
+            "country": "UK",
+            "gross_revenue": 94811.67
+          },
+          {
+            "country": "US",
+            "gross_revenue": 138830.99
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT country, SUM(total) AS gross_revenue FROM crm.orders GROUP BY country LIMIT 200",
+        "rows": null,
+        "error": "exec-failed: column \"country\" does not exist",
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "gross_revenue"
+          ],
+          "dimensions": [
+            "customer_country"
+          ],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT crm.customers.country AS customer_country, SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\nFROM crm.customers\nLEFT JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\nGROUP BY crm.customers.country\nORDER BY crm.customers.country\nLIMIT 200",
+        "rows": [
+          {
+            "customer_country": "DE",
+            "gross_revenue": 156766.35
+          },
+          {
+            "customer_country": "FR",
+            "gross_revenue": 191464.97
+          },
+          {
+            "customer_country": "JP",
+            "gross_revenue": 121633.17
+          },
+          {
+            "customer_country": "UK",
+            "gross_revenue": 94811.67
+          },
+          {
+            "customer_country": "US",
+            "gross_revenue": 138830.99
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q17",
+      "category": "join",
+      "question": "How many orders did we have by status?",
+      "gold": {
+        "sql": "SELECT crm.orders.status AS status, COUNT(*) AS order_count\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY crm.orders.status\n ORDER BY crm.orders.status",
+        "rows": [
+          {
+            "status": "paid",
+            "order_count": 461
+          },
+          {
+            "status": "pending",
+            "order_count": 69
+          },
+          {
+            "status": "refunded",
+            "order_count": 107
+          },
+          {
+            "status": "shipped",
+            "order_count": 292
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT status, COUNT(*) AS order_count FROM crm.orders GROUP BY status LIMIT 200",
+        "rows": [
+          {
+            "status": "paid",
+            "order_count": 461
+          },
+          {
+            "status": "pending",
+            "order_count": 69
+          },
+          {
+            "status": "refunded",
+            "order_count": 107
+          },
+          {
+            "status": "cancelled",
+            "order_count": 71
+          },
+          {
+            "status": "shipped",
+            "order_count": 292
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "order_count"
+          ],
+          "dimensions": [
+            "order_status"
+          ],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT crm.orders.status AS order_status, COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled') AS order_count\nFROM crm.orders\nGROUP BY crm.orders.status\nORDER BY crm.orders.status\nLIMIT 200",
+        "rows": [
+          {
+            "order_status": "cancelled",
+            "order_count": 0
+          },
+          {
+            "order_status": "paid",
+            "order_count": 461
+          },
+          {
+            "order_status": "pending",
+            "order_count": 69
+          },
+          {
+            "order_status": "refunded",
+            "order_count": 107
+          },
+          {
+            "order_status": "shipped",
+            "order_count": 292
+          }
+        ],
+        "error": null,
+        "correct": false
+      }
+    },
+    {
+      "id": "q18",
+      "category": "join",
+      "question": "What is our gross revenue by customer segment?",
+      "gold": {
+        "sql": "SELECT crm.customers.segment AS segment, SUM(crm.orders.total) AS gross_revenue\n  FROM crm.customers\n  JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY crm.customers.segment\n ORDER BY crm.customers.segment",
+        "rows": [
+          {
+            "segment": "consumer",
+            "gross_revenue": 220611.19
+          },
+          {
+            "segment": "enterprise",
+            "gross_revenue": 273544.45
+          },
+          {
+            "segment": "smb",
+            "gross_revenue": 209351.51
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT segment, SUM(total) AS gross_revenue FROM crm.orders o JOIN crm.customers c ON o.customer_id = c.id GROUP BY segment LIMIT 200",
+        "rows": [
+          {
+            "segment": "smb",
+            "gross_revenue": 220502.33
+          },
+          {
+            "segment": "consumer",
+            "gross_revenue": 235377.6
+          },
+          {
+            "segment": "enterprise",
+            "gross_revenue": 298212.33
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "gross_revenue"
+          ],
+          "dimensions": [
+            "customer_segment"
+          ],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT crm.customers.segment AS customer_segment, SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\nFROM crm.customers\nLEFT JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\nGROUP BY crm.customers.segment\nORDER BY crm.customers.segment\nLIMIT 200",
+        "rows": [
+          {
+            "customer_segment": "consumer",
+            "gross_revenue": 220611.19
+          },
+          {
+            "customer_segment": "enterprise",
+            "gross_revenue": 273544.45
+          },
+          {
+            "customer_segment": "smb",
+            "gross_revenue": 209351.51
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q19",
+      "category": "join",
+      "question": "What is the average order value by country?",
+      "gold": {
+        "sql": "SELECT crm.customers.country AS country, AVG(crm.orders.total) AS aov\n  FROM crm.customers\n  JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY crm.customers.country\n ORDER BY crm.customers.country",
+        "rows": [
+          {
+            "country": "DE",
+            "aov": 783.83175
+          },
+          {
+            "country": "FR",
+            "aov": 717.097265917603
+          },
+          {
+            "country": "JP",
+            "aov": 810.8878
+          },
+          {
+            "country": "UK",
+            "aov": 746.5485826771653
+          },
+          {
+            "country": "US",
+            "aov": 750.4377837837837
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT country, AVG(total) AS average_order_value FROM crm.orders JOIN crm.customers ON crm.orders.customer_id = crm.customers.id GROUP BY country LIMIT 200",
+        "rows": [
+          {
+            "country": "US",
+            "average_order_value": 745.620964467005
+          },
+          {
+            "country": "FR",
+            "average_order_value": 716.2116140350877
+          },
+          {
+            "country": "JP",
+            "average_order_value": 805.0684337349397
+          },
+          {
+            "country": "DE",
+            "average_order_value": 783.0035046728972
+          },
+          {
+            "country": "UK",
+            "average_order_value": 738.2645652173914
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "aov"
+          ],
+          "dimensions": [
+            "customer_country"
+          ],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT crm.customers.country AS customer_country, AVG(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS aov\nFROM crm.customers\nLEFT JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\nGROUP BY crm.customers.country\nORDER BY crm.customers.country\nLIMIT 200",
+        "rows": [
+          {
+            "customer_country": "DE",
+            "aov": 783.83175
+          },
+          {
+            "customer_country": "FR",
+            "aov": 717.097265917603
+          },
+          {
+            "customer_country": "JP",
+            "aov": 810.8878
+          },
+          {
+            "customer_country": "UK",
+            "aov": 746.5485826771653
+          },
+          {
+            "customer_country": "US",
+            "aov": 750.4377837837837
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q20",
+      "category": "join",
+      "question": "What is our gross margin by product category?",
+      "gold": {
+        "sql": "SELECT crm.products.category AS category,\n       (SUM(crm.order_items.line_total) - SUM(crm.order_items.quantity * crm.products.cost))\n         / NULLIF(SUM(crm.order_items.line_total), 0) AS gross_margin\n  FROM crm.order_items\n  JOIN crm.products ON crm.order_items.product_id = crm.products.id\n GROUP BY crm.products.category\n ORDER BY crm.products.category",
+        "rows": [
+          {
+            "category": "apparel",
+            "gross_margin": 0.38678434356425057
+          },
+          {
+            "category": "books",
+            "gross_margin": 0.3705476316148035
+          },
+          {
+            "category": "electronics",
+            "gross_margin": 0.3681048921390798
+          },
+          {
+            "category": "food",
+            "gross_margin": 0.383131231341324
+          },
+          {
+            "category": "home",
+            "gross_margin": 0.3736099877904192
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT p.category, SUM(oi.line_total) - SUM(oi.discount) - SUM(oi.quantity * p.cost) AS gross_margin FROM crm.order_items oi JOIN crm.products p ON oi.product_id = p.id GROUP BY p.category LIMIT 200",
+        "rows": [
+          {
+            "category": "home",
+            "gross_margin": 46558.31
+          },
+          {
+            "category": "books",
+            "gross_margin": 57617.62
+          },
+          {
+            "category": "food",
+            "gross_margin": 57681.0
+          },
+          {
+            "category": "electronics",
+            "gross_margin": 49735.15
+          },
+          {
+            "category": "apparel",
+            "gross_margin": 39692.45
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "gross_margin"
+          ],
+          "dimensions": [
+            "product_category"
+          ],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT crm.products.category AS product_category, (SUM(crm.order_items.line_total) - SUM(crm.order_items.quantity * crm.products.cost)) / NULLIF(SUM(crm.order_items.line_total), 0) AS gross_margin\nFROM crm.order_items\nLEFT JOIN crm.products ON crm.order_items.product_id = crm.products.id\nGROUP BY crm.products.category\nORDER BY crm.products.category\nLIMIT 200",
+        "rows": [
+          {
+            "product_category": "apparel",
+            "gross_margin": 0.38678434356425057
+          },
+          {
+            "product_category": "books",
+            "gross_margin": 0.3705476316148035
+          },
+          {
+            "product_category": "electronics",
+            "gross_margin": 0.3681048921390798
+          },
+          {
+            "product_category": "food",
+            "gross_margin": 0.383131231341324
+          },
+          {
+            "product_category": "home",
+            "gross_margin": 0.3736099877904192
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q21",
+      "category": "join",
+      "question": "What is our subtotal revenue by country?",
+      "gold": {
+        "sql": "SELECT crm.customers.country AS country, SUM(crm.orders.subtotal) AS subtotal_revenue\n  FROM crm.customers\n  JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY crm.customers.country\n ORDER BY crm.customers.country",
+        "rows": [
+          {
+            "country": "DE",
+            "subtotal_revenue": 146288.6
+          },
+          {
+            "country": "FR",
+            "subtotal_revenue": 179088.79
+          },
+          {
+            "country": "JP",
+            "subtotal_revenue": 113952.5
+          },
+          {
+            "country": "UK",
+            "subtotal_revenue": 88579.73
+          },
+          {
+            "country": "US",
+            "subtotal_revenue": 129822.29
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT country, SUM(subtotal) AS total_revenue FROM crm.orders GROUP BY country LIMIT 200",
+        "rows": null,
+        "error": "exec-failed: column \"country\" does not exist",
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "subtotal_revenue"
+          ],
+          "dimensions": [
+            "customer_country"
+          ],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT crm.customers.country AS customer_country, SUM(crm.orders.subtotal) FILTER (WHERE crm.orders.status <> 'cancelled') AS subtotal_revenue\nFROM crm.customers\nLEFT JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\nGROUP BY crm.customers.country\nORDER BY crm.customers.country\nLIMIT 200",
+        "rows": [
+          {
+            "customer_country": "DE",
+            "subtotal_revenue": 146288.6
+          },
+          {
+            "customer_country": "FR",
+            "subtotal_revenue": 179088.79
+          },
+          {
+            "customer_country": "JP",
+            "subtotal_revenue": 113952.5
+          },
+          {
+            "customer_country": "UK",
+            "subtotal_revenue": 88579.73
+          },
+          {
+            "customer_country": "US",
+            "subtotal_revenue": 129822.29
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q22",
+      "category": "join",
+      "question": "What is the order count by country?",
+      "gold": {
+        "sql": "SELECT crm.customers.country AS country, COUNT(*) AS order_count\n  FROM crm.customers\n  JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY crm.customers.country\n ORDER BY crm.customers.country",
+        "rows": [
+          {
+            "country": "DE",
+            "order_count": 200
+          },
+          {
+            "country": "FR",
+            "order_count": 267
+          },
+          {
+            "country": "JP",
+            "order_count": 150
+          },
+          {
+            "country": "UK",
+            "order_count": 127
+          },
+          {
+            "country": "US",
+            "order_count": 185
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT country, COUNT(*) AS order_count FROM crm.orders o JOIN crm.customers c ON o.customer_id = c.id GROUP BY country LIMIT 200",
+        "rows": [
+          {
+            "country": "US",
+            "order_count": 197
+          },
+          {
+            "country": "FR",
+            "order_count": 285
+          },
+          {
+            "country": "JP",
+            "order_count": 166
+          },
+          {
+            "country": "DE",
+            "order_count": 214
+          },
+          {
+            "country": "UK",
+            "order_count": 138
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "order_count"
+          ],
+          "dimensions": [
+            "customer_country"
+          ],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT crm.customers.country AS customer_country, COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled') AS order_count\nFROM crm.customers\nLEFT JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\nGROUP BY crm.customers.country\nORDER BY crm.customers.country\nLIMIT 200",
+        "rows": [
+          {
+            "customer_country": "DE",
+            "order_count": 200
+          },
+          {
+            "customer_country": "FR",
+            "order_count": 267
+          },
+          {
+            "customer_country": "JP",
+            "order_count": 150
+          },
+          {
+            "customer_country": "UK",
+            "order_count": 127
+          },
+          {
+            "customer_country": "US",
+            "order_count": 185
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q23",
+      "category": "join",
+      "question": "What is our gross revenue by order status?",
+      "gold": {
+        "sql": "SELECT crm.orders.status AS status,\n       SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\n  FROM crm.orders\n GROUP BY crm.orders.status\n ORDER BY crm.orders.status",
+        "rows": [
+          {
+            "status": "cancelled",
+            "gross_revenue": null
+          },
+          {
+            "status": "paid",
+            "gross_revenue": 357857.69
+          },
+          {
+            "status": "pending",
+            "gross_revenue": 48786.27
+          },
+          {
+            "status": "refunded",
+            "gross_revenue": 73727.5
+          },
+          {
+            "status": "shipped",
+            "gross_revenue": 223135.69
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT status, SUM(total) AS gross_revenue FROM crm.orders GROUP BY status LIMIT 200",
+        "rows": [
+          {
+            "status": "paid",
+            "gross_revenue": 357857.69
+          },
+          {
+            "status": "pending",
+            "gross_revenue": 48786.27
+          },
+          {
+            "status": "refunded",
+            "gross_revenue": 73727.5
+          },
+          {
+            "status": "cancelled",
+            "gross_revenue": 50585.11
+          },
+          {
+            "status": "shipped",
+            "gross_revenue": 223135.69
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "gross_revenue"
+          ],
+          "dimensions": [
+            "order_status"
+          ],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT crm.orders.status AS order_status, SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\nFROM crm.orders\nGROUP BY crm.orders.status\nORDER BY crm.orders.status\nLIMIT 200",
+        "rows": [
+          {
+            "order_status": "cancelled",
+            "gross_revenue": null
+          },
+          {
+            "order_status": "paid",
+            "gross_revenue": 357857.69
+          },
+          {
+            "order_status": "pending",
+            "gross_revenue": 48786.27
+          },
+          {
+            "order_status": "refunded",
+            "gross_revenue": 73727.5
+          },
+          {
+            "order_status": "shipped",
+            "gross_revenue": 223135.69
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q24",
+      "category": "join",
+      "question": "What is the order count by country and segment?",
+      "gold": {
+        "sql": "SELECT crm.customers.country AS country, crm.customers.segment AS segment, COUNT(*) AS order_count\n  FROM crm.customers\n  JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY crm.customers.country, crm.customers.segment\n ORDER BY crm.customers.country, crm.customers.segment",
+        "rows": [
+          {
+            "country": "DE",
+            "segment": "consumer",
+            "order_count": 48
+          },
+          {
+            "country": "DE",
+            "segment": "enterprise",
+            "order_count": 71
+          },
+          {
+            "country": "DE",
+            "segment": "smb",
+            "order_count": 81
+          },
+          {
+            "country": "FR",
+            "segment": "consumer",
+            "order_count": 104
+          },
+          {
+            "country": "FR",
+            "segment": "enterprise",
+            "order_count": 90
+          },
+          {
+            "country": "FR",
+            "segment": "smb",
+            "order_count": 73
+          },
+          {
+            "country": "JP",
+            "segment": "consumer",
+            "order_count": 55
+          },
+          {
+            "country": "JP",
+            "segment": "enterprise",
+            "order_count": 55
+          },
+          {
+            "country": "JP",
+            "segment": "smb",
+            "order_count": 40
+          },
+          {
+            "country": "UK",
+            "segment": "consumer",
+            "order_count": 49
+          },
+          {
+            "country": "UK",
+            "segment": "enterprise",
+            "order_count": 63
+          },
+          {
+            "country": "UK",
+            "segment": "smb",
+            "order_count": 15
+          },
+          {
+            "country": "US",
+            "segment": "consumer",
+            "order_count": 43
+          },
+          {
+            "country": "US",
+            "segment": "enterprise",
+            "order_count": 75
+          },
+          {
+            "country": "US",
+            "segment": "smb",
+            "order_count": 67
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT country, segment, COUNT(*) AS order_count FROM crm.orders o JOIN crm.customers c ON o.customer_id = c.id GROUP BY country, segment LIMIT 200",
+        "rows": [
+          {
+            "country": "JP",
+            "segment": "consumer",
+            "order_count": 62
+          },
+          {
+            "country": "JP",
+            "segment": "enterprise",
+            "order_count": 59
+          },
+          {
+            "country": "US",
+            "segment": "consumer",
+            "order_count": 45
+          },
+          {
+            "country": "DE",
+            "segment": "enterprise",
+            "order_count": 76
+          },
+          {
+            "country": "JP",
+            "segment": "smb",
+            "order_count": 45
+          },
+          {
+            "country": "FR",
+            "segment": "consumer",
+            "order_count": 111
+          },
+          {
+            "country": "DE",
+            "segment": "smb",
+            "order_count": 85
+          },
+          {
+            "country": "UK",
+            "segment": "consumer",
+            "order_count": 49
+          },
+          {
+            "country": "US",
+            "segment": "smb",
+            "order_count": 72
+          },
+          {
+            "country": "DE",
+            "segment": "consumer",
+            "order_count": 53
+          },
+          {
+            "country": "UK",
+            "segment": "enterprise",
+            "order_count": 71
+          },
+          {
+            "country": "FR",
+            "segment": "enterprise",
+            "order_count": 97
+          },
+          {
+            "country": "FR",
+            "segment": "smb",
+            "order_count": 77
+          },
+          {
+            "country": "US",
+            "segment": "enterprise",
+            "order_count": 80
+          },
+          {
+            "country": "UK",
+            "segment": "smb",
+            "order_count": 18
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "order_count"
+          ],
+          "dimensions": [
+            "customer_country",
+            "customer_segment"
+          ],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT crm.customers.country AS customer_country, crm.customers.segment AS customer_segment, COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled') AS order_count\nFROM crm.customers\nLEFT JOIN crm.orders ON crm.orders.customer_id = crm.customers.id\nGROUP BY crm.customers.country, crm.customers.segment\nORDER BY crm.customers.country, crm.customers.segment\nLIMIT 200",
+        "rows": [
+          {
+            "customer_country": "DE",
+            "customer_segment": "consumer",
+            "order_count": 48
+          },
+          {
+            "customer_country": "DE",
+            "customer_segment": "enterprise",
+            "order_count": 71
+          },
+          {
+            "customer_country": "DE",
+            "customer_segment": "smb",
+            "order_count": 81
+          },
+          {
+            "customer_country": "FR",
+            "customer_segment": "consumer",
+            "order_count": 104
+          },
+          {
+            "customer_country": "FR",
+            "customer_segment": "enterprise",
+            "order_count": 90
+          },
+          {
+            "customer_country": "FR",
+            "customer_segment": "smb",
+            "order_count": 73
+          },
+          {
+            "customer_country": "JP",
+            "customer_segment": "consumer",
+            "order_count": 55
+          },
+          {
+            "customer_country": "JP",
+            "customer_segment": "enterprise",
+            "order_count": 55
+          },
+          {
+            "customer_country": "JP",
+            "customer_segment": "smb",
+            "order_count": 40
+          },
+          {
+            "customer_country": "UK",
+            "customer_segment": "consumer",
+            "order_count": 49
+          },
+          {
+            "customer_country": "UK",
+            "customer_segment": "enterprise",
+            "order_count": 63
+          },
+          {
+            "customer_country": "UK",
+            "customer_segment": "smb",
+            "order_count": 15
+          },
+          {
+            "customer_country": "US",
+            "customer_segment": "consumer",
+            "order_count": 43
+          },
+          {
+            "customer_country": "US",
+            "customer_segment": "enterprise",
+            "order_count": 75
+          },
+          {
+            "customer_country": "US",
+            "customer_segment": "smb",
+            "order_count": 67
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q25",
+      "category": "time",
+      "question": "What is our gross revenue by month?",
+      "gold": {
+        "sql": "SELECT date_trunc('month', crm.orders.created_at) AS period, SUM(crm.orders.total) AS gross_revenue\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY date_trunc('month', crm.orders.created_at)\n ORDER BY date_trunc('month', crm.orders.created_at)",
+        "rows": [
+          {
+            "period": "2025-05-01T00:00:00+00:00",
+            "gross_revenue": 33602.7
+          },
+          {
+            "period": "2025-06-01T00:00:00+00:00",
+            "gross_revenue": 56639.37
+          },
+          {
+            "period": "2025-07-01T00:00:00+00:00",
+            "gross_revenue": 64067.24
+          },
+          {
+            "period": "2025-08-01T00:00:00+00:00",
+            "gross_revenue": 62198.32
+          },
+          {
+            "period": "2025-09-01T00:00:00+00:00",
+            "gross_revenue": 57968.63
+          },
+          {
+            "period": "2025-10-01T00:00:00+00:00",
+            "gross_revenue": 46418.86
+          },
+          {
+            "period": "2025-11-01T00:00:00+00:00",
+            "gross_revenue": 48401.92
+          },
+          {
+            "period": "2025-12-01T00:00:00+00:00",
+            "gross_revenue": 66607.25
+          },
+          {
+            "period": "2026-01-01T00:00:00+00:00",
+            "gross_revenue": 58954.76
+          },
+          {
+            "period": "2026-02-01T00:00:00+00:00",
+            "gross_revenue": 52277.61
+          },
+          {
+            "period": "2026-03-01T00:00:00+00:00",
+            "gross_revenue": 62075.68
+          },
+          {
+            "period": "2026-04-01T00:00:00+00:00",
+            "gross_revenue": 69605.04
+          },
+          {
+            "period": "2026-05-01T00:00:00+00:00",
+            "gross_revenue": 24689.77
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT DATE_TRUNC('month', o.created_at) AS month, SUM(o.total) AS gross_revenue FROM crm.orders o GROUP BY month ORDER BY month LIMIT 200",
+        "rows": [
+          {
+            "month": "2025-05-01T00:00:00+00:00",
+            "gross_revenue": 36716.3
+          },
+          {
+            "month": "2025-06-01T00:00:00+00:00",
+            "gross_revenue": 63813.74
+          },
+          {
+            "month": "2025-07-01T00:00:00+00:00",
+            "gross_revenue": 67439.04
+          },
+          {
+            "month": "2025-08-01T00:00:00+00:00",
+            "gross_revenue": 67201.74
+          },
+          {
+            "month": "2025-09-01T00:00:00+00:00",
+            "gross_revenue": 68940.21
+          },
+          {
+            "month": "2025-10-01T00:00:00+00:00",
+            "gross_revenue": 47200.22
+          },
+          {
+            "month": "2025-11-01T00:00:00+00:00",
+            "gross_revenue": 49203.94
+          },
+          {
+            "month": "2025-12-01T00:00:00+00:00",
+            "gross_revenue": 70814.62
+          },
+          {
+            "month": "2026-01-01T00:00:00+00:00",
+            "gross_revenue": 64981.75
+          },
+          {
+            "month": "2026-02-01T00:00:00+00:00",
+            "gross_revenue": 55285.92
+          },
+          {
+            "month": "2026-03-01T00:00:00+00:00",
+            "gross_revenue": 64060.43
+          },
+          {
+            "month": "2026-04-01T00:00:00+00:00",
+            "gross_revenue": 70210.91
+          },
+          {
+            "month": "2026-05-01T00:00:00+00:00",
+            "gross_revenue": 28223.44
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "gross_revenue"
+          ],
+          "dimensions": [
+            "order_created_at"
+          ],
+          "filters": [],
+          "time_grain": "month"
+        },
+        "sql": "SELECT date_trunc('month', crm.orders.created_at) AS order_created_at, SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\nFROM crm.orders\nGROUP BY date_trunc('month', crm.orders.created_at)\nORDER BY date_trunc('month', crm.orders.created_at)\nLIMIT 200",
+        "rows": [
+          {
+            "order_created_at": "2025-05-01T00:00:00+00:00",
+            "gross_revenue": 33602.7
+          },
+          {
+            "order_created_at": "2025-06-01T00:00:00+00:00",
+            "gross_revenue": 56639.37
+          },
+          {
+            "order_created_at": "2025-07-01T00:00:00+00:00",
+            "gross_revenue": 64067.24
+          },
+          {
+            "order_created_at": "2025-08-01T00:00:00+00:00",
+            "gross_revenue": 62198.32
+          },
+          {
+            "order_created_at": "2025-09-01T00:00:00+00:00",
+            "gross_revenue": 57968.63
+          },
+          {
+            "order_created_at": "2025-10-01T00:00:00+00:00",
+            "gross_revenue": 46418.86
+          },
+          {
+            "order_created_at": "2025-11-01T00:00:00+00:00",
+            "gross_revenue": 48401.92
+          },
+          {
+            "order_created_at": "2025-12-01T00:00:00+00:00",
+            "gross_revenue": 66607.25
+          },
+          {
+            "order_created_at": "2026-01-01T00:00:00+00:00",
+            "gross_revenue": 58954.76
+          },
+          {
+            "order_created_at": "2026-02-01T00:00:00+00:00",
+            "gross_revenue": 52277.61
+          },
+          {
+            "order_created_at": "2026-03-01T00:00:00+00:00",
+            "gross_revenue": 62075.68
+          },
+          {
+            "order_created_at": "2026-04-01T00:00:00+00:00",
+            "gross_revenue": 69605.04
+          },
+          {
+            "order_created_at": "2026-05-01T00:00:00+00:00",
+            "gross_revenue": 24689.77
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q26",
+      "category": "time",
+      "question": "What is our gross revenue by quarter?",
+      "gold": {
+        "sql": "SELECT date_trunc('quarter', crm.orders.created_at) AS period, SUM(crm.orders.total) AS gross_revenue\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY date_trunc('quarter', crm.orders.created_at)\n ORDER BY date_trunc('quarter', crm.orders.created_at)",
+        "rows": [
+          {
+            "period": "2025-04-01T00:00:00+00:00",
+            "gross_revenue": 90242.07
+          },
+          {
+            "period": "2025-07-01T00:00:00+00:00",
+            "gross_revenue": 184234.19
+          },
+          {
+            "period": "2025-10-01T00:00:00+00:00",
+            "gross_revenue": 161428.03
+          },
+          {
+            "period": "2026-01-01T00:00:00+00:00",
+            "gross_revenue": 173308.05
+          },
+          {
+            "period": "2026-04-01T00:00:00+00:00",
+            "gross_revenue": 94294.81
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT date_trunc('quarter', o.created_at) AS quarter, SUM(o.total) AS gross_revenue FROM crm.orders o GROUP BY quarter ORDER BY quarter LIMIT 200",
+        "rows": [
+          {
+            "quarter": "2025-04-01T00:00:00+00:00",
+            "gross_revenue": 100530.04
+          },
+          {
+            "quarter": "2025-07-01T00:00:00+00:00",
+            "gross_revenue": 203580.99
+          },
+          {
+            "quarter": "2025-10-01T00:00:00+00:00",
+            "gross_revenue": 167218.78
+          },
+          {
+            "quarter": "2026-01-01T00:00:00+00:00",
+            "gross_revenue": 184328.1
+          },
+          {
+            "quarter": "2026-04-01T00:00:00+00:00",
+            "gross_revenue": 98434.35
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": null,
+        "sql": null,
+        "rows": null,
+        "error": "no_match: plan sets time_grain but no time-kind dimension was selected \u2014 add e.g. order_created_at to dimensions",
+        "no_match": true,
+        "suggested_fallback": "none",
+        "correct": false
+      }
+    },
+    {
+      "id": "q27",
+      "category": "time",
+      "question": "How many orders did we have between January and March 2026?",
+      "gold": {
+        "sql": "SELECT COUNT(*) AS order_count\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'\n   AND crm.orders.created_at >= '2026-01-01'\n   AND crm.orders.created_at <  '2026-04-01'",
+        "rows": [
+          {
+            "order_count": 221
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT COUNT(*) FROM crm.orders WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01' LIMIT 200",
+        "rows": [
+          {
+            "count": 235
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": null,
+        "sql": null,
+        "rows": null,
+        "error": "no_match: matched-plan failed PlanSpec validation: 3 validation errors for PlanSpec\nfilters.0.dimension\n  Field required [type=missing, input_value={'order_created_at': {'be...-01-01', '2026-03-31']}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.op\n  Field required [type=missing, input_value={'order_created_at': {'be...-01-01', '2026-03-31']}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.value\n  Field required [type=missing, input_value={'order_created_at': {'be...-01-01', '2026-03-31']}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing",
+        "no_match": true,
+        "suggested_fallback": "none",
+        "correct": false
+      }
+    },
+    {
+      "id": "q28",
+      "category": "time",
+      "question": "How many paid orders do we have?",
+      "gold": {
+        "sql": "SELECT COUNT(*) AS paid_orders\n  FROM crm.orders\n WHERE crm.orders.status = 'paid'",
+        "rows": [
+          {
+            "paid_orders": 461
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT COUNT(*) FROM crm.orders WHERE status = 'paid' LIMIT 200",
+        "rows": [
+          {
+            "count": 461
+          }
+        ],
+        "error": null,
+        "correct": true
+      },
+      "semantic": {
+        "plan": null,
+        "sql": null,
+        "rows": null,
+        "error": "no_match: matched-plan failed PlanSpec validation: 2 validation errors for PlanSpec\nfilters.0.dimension\n  Field required [type=missing, input_value={'name': 'order_status', ...quals', 'value': 'paid'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.op\n  Field required [type=missing, input_value={'name': 'order_status', ...quals', 'value': 'paid'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing",
+        "no_match": true,
+        "suggested_fallback": "none",
+        "correct": false
+      }
+    },
+    {
+      "id": "q29",
+      "category": "time",
+      "question": "What is the order count by year?",
+      "gold": {
+        "sql": "SELECT date_trunc('year', crm.orders.created_at) AS period, COUNT(*) AS order_count\n  FROM crm.orders\n WHERE crm.orders.status <> 'cancelled'\n GROUP BY date_trunc('year', crm.orders.created_at)\n ORDER BY date_trunc('year', crm.orders.created_at)",
+        "rows": [
+          {
+            "period": "2025-01-01T00:00:00+00:00",
+            "order_count": 587
+          },
+          {
+            "period": "2026-01-01T00:00:00+00:00",
+            "order_count": 342
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT DATE_PART('year', created_at) AS year, COUNT(*) AS order_count FROM crm.orders GROUP BY year ORDER BY year LIMIT 200",
+        "rows": [
+          {
+            "year": 2025.0,
+            "order_count": 637
+          },
+          {
+            "year": 2026.0,
+            "order_count": 363
+          }
+        ],
+        "error": null,
+        "correct": false
+      },
+      "semantic": {
+        "plan": {
+          "metrics": [
+            "order_count"
+          ],
+          "dimensions": [
+            "order_created_at"
+          ],
+          "filters": [],
+          "time_grain": "year"
+        },
+        "sql": "SELECT date_trunc('year', crm.orders.created_at) AS order_created_at, COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled') AS order_count\nFROM crm.orders\nGROUP BY date_trunc('year', crm.orders.created_at)\nORDER BY date_trunc('year', crm.orders.created_at)\nLIMIT 200",
+        "rows": [
+          {
+            "order_created_at": "2025-01-01T00:00:00+00:00",
+            "order_count": 587
+          },
+          {
+            "order_created_at": "2026-01-01T00:00:00+00:00",
+            "order_count": 342
+          }
+        ],
+        "error": null,
+        "correct": true
+      }
+    },
+    {
+      "id": "q30",
+      "category": "time",
+      "question": "What is the order count for shipped orders only?",
+      "gold": {
+        "sql": "SELECT COUNT(*) AS shipped_orders\n  FROM crm.orders\n WHERE crm.orders.status = 'shipped'",
+        "rows": [
+          {
+            "shipped_orders": 292
+          }
+        ],
+        "error": null
+      },
+      "naive": {
+        "sql": "SELECT COUNT(*) FROM crm.orders WHERE status = 'shipped' LIMIT 200",
+        "rows": [
+          {
+            "count": 292
+          }
+        ],
+        "error": null,
+        "correct": true
+      },
+      "semantic": {
+        "plan": null,
+        "sql": null,
+        "rows": null,
+        "error": "no_match: matched-plan failed PlanSpec validation: 3 validation errors for PlanSpec\nfilters.0.dimension\n  Field required [type=missing, input_value={'order_status': 'shipped'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.op\n  Field required [type=missing, input_value={'order_status': 'shipped'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.value\n  Field required [type=missing, input_value={'order_status': 'shipped'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing",
+        "no_match": true,
+        "suggested_fallback": "none",
+        "correct": false
+      }
+    }
+  ]
+}
