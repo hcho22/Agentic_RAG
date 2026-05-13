@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import os
 from collections import deque
+from datetime import date, datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -151,6 +152,35 @@ def _resolve_root_and_joins(
     return root, ordered
 
 
+def _coerce_time_value(v: Any) -> Any:
+    """asyncpg validates parameter types at bind time — passing a str to a
+    timestamptz column raises before the SQL-level cast ever runs. For
+    time-kind dim values we parse ISO 8601 strings to a UTC-aware
+    `datetime`. Plain `date` won't do: Postgres casts `date::timestamptz`
+    using the *system* TZ (not the session TZ), so a naive date can shift
+    by hours from what the user meant. UTC is the canonical assumption for
+    unqualified BI date filters; the planner's prompt nudges the model
+    toward ISO date strings in UTC.
+    """
+    if isinstance(v, datetime):
+        return v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+    if isinstance(v, date):  # plain date, not datetime
+        return datetime(v.year, v.month, v.day, tzinfo=timezone.utc)
+    if not isinstance(v, str):
+        return v
+    s = v.strip()
+    try:
+        if len(s) == 10:
+            d = date.fromisoformat(s)
+            return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        # Leave malformed strings alone — asyncpg's error message is more
+        # actionable than a re-raise we'd have to compose here.
+        return v
+
+
 def _filter_clause(
     f: Filter, layer: SemanticLayer, param_start: int
 ) -> tuple[str, list[Any]]:
@@ -161,21 +191,43 @@ def _filter_clause(
     dim = layer.dimensions[f.dimension]
     col = _dim_column_ref(dim, layer)
     op = _op_sql(f.op)
+    # asyncpg's positional binding requires the runtime type to match the
+    # column type — a `str` won't bind to a timestamptz column even with a
+    # SQL-level `::timestamptz` cast (it errors before reaching Postgres).
+    # For time-kind dims we both coerce the Python value to `date`/`datetime`
+    # AND emit the cast as defense in depth.
+    is_time = dim.kind == "time"
+    cast = "::timestamptz" if is_time else ""
+
+    def prep(v: Any) -> Any:
+        return _coerce_time_value(v) if is_time else v
+
     if f.op == "between":
-        # Validated upstream — value is a 2-element list.
+        # Validated upstream — value is a 2-element list. For time-kind
+        # dimensions we emit a half-open range (`>= low AND < high`) to
+        # match the BI convention "Jan-Mar" = [2026-01-01, 2026-04-01).
+        # `BETWEEN` is inclusive at both ends, which over-counts boundary
+        # rows when the model uses start-of-next-period as the upper bound
+        # (the standard pattern we instruct in the planner prompt).
+        if is_time:
+            return (
+                f"{col} >= ${param_start}{cast} AND {col} < ${param_start + 1}{cast}",
+                [prep(x) for x in f.value],  # type: ignore[arg-type]
+            )
         return (
-            f"{col} {op} ${param_start} AND ${param_start + 1}",
+            f"{col} {op} ${param_start}{cast} AND ${param_start + 1}{cast}",
             list(f.value),  # type: ignore[arg-type]
         )
     if f.op == "in":
         # asyncpg supports IN via = ANY($1::text[]). We use ANY rather than
         # building `IN ($1, $2, ...)` so the param count stays at 1
         # regardless of list size — also dodges Postgres's parameter cap.
+        values = [prep(x) for x in f.value] if is_time else list(f.value)  # type: ignore[arg-type]
         return (
             f"{col} = ANY(${param_start})",
-            [list(f.value)],  # type: ignore[arg-type]
+            [values],
         )
-    return (f"{col} {op} ${param_start}", [f.value])
+    return (f"{col} {op} ${param_start}{cast}", [prep(f.value)])
 
 
 def _entities_for_plan(

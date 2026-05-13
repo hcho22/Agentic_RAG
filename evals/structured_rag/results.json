@@ -2,32 +2,32 @@
   "aggregates": {
     "overall": {
       "naive": 10.0,
-      "semantic": 80.0,
-      "delta_pp": 70.0,
+      "semantic": 100.0,
+      "delta_pp": 90.0,
       "n": 30
     },
     "by_category": {
       "join": {
         "naive": 0.0,
-        "semantic": 88.9,
-        "delta_pp": 88.9,
+        "semantic": 100.0,
+        "delta_pp": 100.0,
         "n": 9
       },
       "metric": {
         "naive": 6.7,
-        "semantic": 93.3,
-        "delta_pp": 86.6,
+        "semantic": 100.0,
+        "delta_pp": 93.3,
         "n": 15
       },
       "time": {
         "naive": 33.3,
-        "semantic": 33.3,
-        "delta_pp": 0.0,
+        "semantic": 100.0,
+        "delta_pp": 66.7,
         "n": 6
       }
     },
-    "elapsed_s": 74.4,
-    "generated_at": "2026-05-13T13:12:58"
+    "elapsed_s": 66.3,
+    "generated_at": "2026-05-13T13:39:28"
   },
   "questions": [
     {
@@ -86,10 +86,10 @@
         "error": null
       },
       "naive": {
-        "sql": "SELECT SUM(total) - SUM(discount) AS net_revenue FROM crm.orders WHERE status = 'completed' LIMIT 200",
+        "sql": "SELECT SUM(total) FROM crm.orders WHERE status = 'completed' LIMIT 200",
         "rows": [
           {
-            "net_revenue": null
+            "sum": null
           }
         ],
         "error": null,
@@ -128,7 +128,7 @@
         "error": null
       },
       "naive": {
-        "sql": "SELECT SUM(total) AS gross_revenue FROM crm.orders WHERE status = 'completed' LIMIT 1",
+        "sql": "SELECT SUM(total) AS gross_revenue FROM crm.orders WHERE status = 'completed' LIMIT 200",
         "rows": [
           {
             "gross_revenue": null
@@ -432,13 +432,22 @@
         "correct": false
       },
       "semantic": {
-        "plan": null,
-        "sql": null,
-        "rows": null,
-        "error": "no_match: The question asks for a scalar metric (gross margin) that cannot be combined with dimensions, and it does not specify any dimensions or filters to provide context.",
-        "no_match": true,
-        "suggested_fallback": "none",
-        "correct": false
+        "plan": {
+          "metrics": [
+            "gross_margin"
+          ],
+          "dimensions": [],
+          "filters": [],
+          "time_grain": null
+        },
+        "sql": "SELECT (SUM(crm.order_items.line_total) - SUM(crm.order_items.quantity * crm.products.cost)) / NULLIF(SUM(crm.order_items.line_total), 0) AS gross_margin\nFROM crm.order_items\nLEFT JOIN crm.products ON crm.order_items.product_id = crm.products.id\nLIMIT 200",
+        "rows": [
+          {
+            "gross_margin": 0.37594228707260835
+          }
+        ],
+        "error": null,
+        "correct": true
       }
     },
     {
@@ -1145,10 +1154,574 @@
         "error": null
       },
       "naive": {
-        "sql": "SELECT COUNT(DISTINCT customer_id) FROM crm.orders WHERE customer_id IN (SELECT customer_id FROM crm.orders GROUP BY customer_id HAVING COUNT(*) > 1)",
+        "sql": "SELECT COUNT(DISTINCT customer_id) FROM crm.orders GROUP BY customer_id HAVING COUNT(id) > 1 LIMIT 200",
         "rows": [
           {
-            "count": 189
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
+          },
+          {
+            "count": 1
           }
         ],
         "error": null,
@@ -1377,7 +1950,7 @@
           }
         ],
         "error": null,
-        "correct": false
+        "correct": true
       }
     },
     {
@@ -1482,7 +2055,7 @@
         "error": null
       },
       "naive": {
-        "sql": "SELECT country, AVG(total) AS average_order_value FROM crm.orders JOIN crm.customers ON crm.orders.customer_id = crm.customers.id GROUP BY country LIMIT 200",
+        "sql": "SELECT c.country, AVG(o.total) AS average_order_value FROM crm.orders o JOIN crm.customers c ON o.customer_id = c.id GROUP BY c.country LIMIT 200",
         "rows": [
           {
             "country": "US",
@@ -1577,30 +2150,9 @@
         "error": null
       },
       "naive": {
-        "sql": "SELECT p.category, SUM(oi.line_total) - SUM(oi.discount) - SUM(oi.quantity * p.cost) AS gross_margin FROM crm.order_items oi JOIN crm.products p ON oi.product_id = p.id GROUP BY p.category LIMIT 200",
-        "rows": [
-          {
-            "category": "home",
-            "gross_margin": 46558.31
-          },
-          {
-            "category": "books",
-            "gross_margin": 57617.62
-          },
-          {
-            "category": "food",
-            "gross_margin": 57681.0
-          },
-          {
-            "category": "electronics",
-            "gross_margin": 49735.15
-          },
-          {
-            "category": "apparel",
-            "gross_margin": 39692.45
-          }
-        ],
-        "error": null,
+        "sql": "SELECT p.category, SUM(o.total - o.discount - SUM(oi.line_total)) AS gross_margin\nFROM crm.products p\nJOIN crm.order_items oi ON p.id = oi.product_id\nJOIN crm.orders o ON oi.order_id = o.id\nGROUP BY p.category\nLIMIT 200;",
+        "rows": null,
+        "error": "exec-failed: aggregate function calls cannot be nested",
         "correct": false
       },
       "semantic": {
@@ -2415,13 +2967,41 @@
         "correct": false
       },
       "semantic": {
-        "plan": null,
-        "sql": null,
-        "rows": null,
-        "error": "no_match: plan sets time_grain but no time-kind dimension was selected \u2014 add e.g. order_created_at to dimensions",
-        "no_match": true,
-        "suggested_fallback": "none",
-        "correct": false
+        "plan": {
+          "metrics": [
+            "gross_revenue"
+          ],
+          "dimensions": [
+            "order_created_at"
+          ],
+          "filters": [],
+          "time_grain": "quarter"
+        },
+        "sql": "SELECT date_trunc('quarter', crm.orders.created_at) AS order_created_at, SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue\nFROM crm.orders\nGROUP BY date_trunc('quarter', crm.orders.created_at)\nORDER BY date_trunc('quarter', crm.orders.created_at)\nLIMIT 200",
+        "rows": [
+          {
+            "order_created_at": "2025-04-01T00:00:00+00:00",
+            "gross_revenue": 90242.07
+          },
+          {
+            "order_created_at": "2025-07-01T00:00:00+00:00",
+            "gross_revenue": 184234.19
+          },
+          {
+            "order_created_at": "2025-10-01T00:00:00+00:00",
+            "gross_revenue": 161428.03
+          },
+          {
+            "order_created_at": "2026-01-01T00:00:00+00:00",
+            "gross_revenue": 173308.05
+          },
+          {
+            "order_created_at": "2026-04-01T00:00:00+00:00",
+            "gross_revenue": 94294.81
+          }
+        ],
+        "error": null,
+        "correct": true
       }
     },
     {
@@ -2448,13 +3028,31 @@
         "correct": false
       },
       "semantic": {
-        "plan": null,
-        "sql": null,
-        "rows": null,
-        "error": "no_match: matched-plan failed PlanSpec validation: 3 validation errors for PlanSpec\nfilters.0.dimension\n  Field required [type=missing, input_value={'order_created_at': {'be...-01-01', '2026-03-31']}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.op\n  Field required [type=missing, input_value={'order_created_at': {'be...-01-01', '2026-03-31']}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.value\n  Field required [type=missing, input_value={'order_created_at': {'be...-01-01', '2026-03-31']}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing",
-        "no_match": true,
-        "suggested_fallback": "none",
-        "correct": false
+        "plan": {
+          "metrics": [
+            "order_count"
+          ],
+          "dimensions": [],
+          "filters": [
+            {
+              "dimension": "order_created_at",
+              "op": "between",
+              "value": [
+                "2026-01-01",
+                "2026-04-01"
+              ]
+            }
+          ],
+          "time_grain": null
+        },
+        "sql": "SELECT COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled') AS order_count\nFROM crm.orders\nWHERE crm.orders.created_at >= $1::timestamptz AND crm.orders.created_at < $2::timestamptz\nLIMIT 200",
+        "rows": [
+          {
+            "order_count": 221
+          }
+        ],
+        "error": null,
+        "correct": true
       }
     },
     {
@@ -2481,13 +3079,28 @@
         "correct": true
       },
       "semantic": {
-        "plan": null,
-        "sql": null,
-        "rows": null,
-        "error": "no_match: matched-plan failed PlanSpec validation: 2 validation errors for PlanSpec\nfilters.0.dimension\n  Field required [type=missing, input_value={'name': 'order_status', ...quals', 'value': 'paid'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.op\n  Field required [type=missing, input_value={'name': 'order_status', ...quals', 'value': 'paid'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing",
-        "no_match": true,
-        "suggested_fallback": "none",
-        "correct": false
+        "plan": {
+          "metrics": [
+            "order_count"
+          ],
+          "dimensions": [],
+          "filters": [
+            {
+              "dimension": "order_status",
+              "op": "eq",
+              "value": "paid"
+            }
+          ],
+          "time_grain": null
+        },
+        "sql": "SELECT COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled') AS order_count\nFROM crm.orders\nWHERE crm.orders.status = $1\nLIMIT 200",
+        "rows": [
+          {
+            "order_count": 461
+          }
+        ],
+        "error": null,
+        "correct": true
       }
     },
     {
@@ -2573,13 +3186,28 @@
         "correct": true
       },
       "semantic": {
-        "plan": null,
-        "sql": null,
-        "rows": null,
-        "error": "no_match: matched-plan failed PlanSpec validation: 3 validation errors for PlanSpec\nfilters.0.dimension\n  Field required [type=missing, input_value={'order_status': 'shipped'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.op\n  Field required [type=missing, input_value={'order_status': 'shipped'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing\nfilters.0.value\n  Field required [type=missing, input_value={'order_status': 'shipped'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.10/v/missing",
-        "no_match": true,
-        "suggested_fallback": "none",
-        "correct": false
+        "plan": {
+          "metrics": [
+            "order_count"
+          ],
+          "dimensions": [],
+          "filters": [
+            {
+              "dimension": "order_status",
+              "op": "eq",
+              "value": "shipped"
+            }
+          ],
+          "time_grain": null
+        },
+        "sql": "SELECT COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled') AS order_count\nFROM crm.orders\nWHERE crm.orders.status = $1\nLIMIT 200",
+        "rows": [
+          {
+            "order_count": 292
+          }
+        ],
+        "error": null,
+        "correct": true
       }
     }
   ]

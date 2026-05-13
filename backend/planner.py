@@ -183,11 +183,26 @@ Explain briefly why, and pick a fallback tool the parent agent should try \
 instead.
 
 Hard rules:
+  * Questions like "what is X?" or "how many X?" that don't ask for a \
+breakdown are perfectly valid — emit `submit_matched_plan` with empty \
+`dimensions` and the relevant metric. The result is a single scalar. Do \
+NOT call `submit_no_match` just because the question is short or doesn't \
+specify a grouping.
   * Use metric and dimension names exactly as listed below. No spelling drift.
-  * Filters must reference a dimension by name (not a raw column).
+  * Filters are objects with exactly three keys: `dimension`, `op`, `value`. \
+Use the dimension's name (e.g. "order_status"), not a column path. \
+Allowed ops: eq, neq, gt, gte, lt, lte, in, between. Do NOT use \
+shorthand like {{"order_status": "paid"}} — always emit the three-key form.
+  * `op: "between"` → `value` is a 2-element list [low, high].
+  * `op: "in"` → `value` is a non-empty list.
+  * All other ops → `value` is a scalar (string, number, or boolean).
   * When the user asks for a time bucket ("by month", "weekly", "per quarter"), \
-include a time-kind dimension in dimensions AND set time_grain. Without a \
-time-kind dimension, time_grain is ignored.
+include a time-kind dimension in dimensions AND set time_grain. \
+For order data the default time-kind dim is "order_created_at".
+  * For date-range filters ("between Jan and March", "in 2026 Q1", "last 90 days"), \
+use a filter with op="between" on a time-kind dimension and ISO 8601 \
+date strings as the two-element value list — e.g. \
+{{"dimension": "order_created_at", "op": "between", "value": ["2026-01-01", "2026-04-01"]}}.
   * Distinguish "revenue" carefully: synonyms can map to multiple metrics. \
 When the user is explicit ("net revenue", "after refunds"), follow their \
 wording. When ambiguous, pick gross_revenue and the agent will surface the \
@@ -196,6 +211,14 @@ choice in its reply.
 Tuesday"), novel metrics not in the layer, free-text descriptions of \
 products. For these, call submit_no_match with suggested_fallback="file_search" \
 if documents might answer, otherwise "none".
+
+Example PlanSpec for "what was our gross revenue by month for paid orders":
+{{
+  "metrics": ["gross_revenue"],
+  "dimensions": ["order_created_at"],
+  "filters": [{{"dimension": "order_status", "op": "eq", "value": "paid"}}],
+  "time_grain": "month"
+}}
 
 Semantic layer:
 {layer_block}
@@ -302,11 +325,24 @@ async def plan_query(
 
     if name == "submit_matched_plan":
         plan_payload = args.get("plan")
+        # GPT-4o-mini occasionally flattens the plan onto the top-level
+        # function args (skipping the `plan` wrapper), even though the
+        # schema requires nesting. If `args` itself looks like a PlanSpec
+        # — has `metrics` at the top — treat it as the plan.
+        if not isinstance(plan_payload, dict) and "metrics" in args:
+            plan_payload = args
         if not isinstance(plan_payload, dict):
             return PlanNoMatch(
                 reason=f"matched-plan call missing `plan` object: {args!r}",
                 suggested_fallback="none",
             )
+        # GPT-4o-mini ignores the schema's filter shape more often than is
+        # comfortable — it emits {name, operator, value}, or short-form
+        # {order_status: "paid"}, or key-as-dim {order_created_at: {between:
+        # [...]}}. The model's *intent* is unambiguous in each case; we
+        # coerce to canonical form rather than failing the question with a
+        # no_match. See _coerce_plan_payload for the supported alt shapes.
+        plan_payload = _coerce_plan_payload(plan_payload, layer)
         try:
             plan = PlanSpec.model_validate(plan_payload)
         except Exception as e:  # noqa: BLE001
@@ -336,6 +372,106 @@ async def plan_query(
         reason=f"planner called unexpected function: {name!r}",
         suggested_fallback="none",
     )
+
+
+# Maps the alternate operator strings GPT-4o-mini frequently produces back to
+# the canonical short codes the Filter.op enum uses. Anything outside this
+# table falls through unchanged — Pydantic will reject it downstream, which
+# is the desired behaviour (we coerce common variants, not anything goes).
+_FILTER_OP_ALIASES: dict[str, str] = {
+    "eq": "eq", "equals": "eq", "equal": "eq", "==": "eq", "=": "eq", "is": "eq",
+    "neq": "neq", "not_equals": "neq", "ne": "neq", "!=": "neq",
+    "gt": "gt", "greater_than": "gt", ">": "gt",
+    "gte": "gte", "greater_than_or_equal": "gte", "ge": "gte", ">=": "gte",
+    "lt": "lt", "less_than": "lt", "<": "lt",
+    "lte": "lte", "less_than_or_equal": "lte", "le": "lte", "<=": "lte",
+    "in": "in", "one_of": "in",
+    "between": "between", "range": "between",
+}
+
+
+def _coerce_filter(raw: Any, dimension_names: set[str]) -> Any:
+    """Map common LLM-emitted filter shapes back to the canonical {dimension,
+    op, value} form. Returns the raw value unchanged for shapes we can't
+    confidently coerce — Pydantic will then surface a useful error.
+
+    Supported alt shapes (observed in the wild on gpt-4o-mini, US-031 eval):
+      * {name, operator, value}           — alt field names
+      * {dimension, op, value} with op=str alias (e.g. "equals" → "eq")
+      * {<dim_name>: <scalar>}            — short-form, treated as op=eq
+      * {<dim_name>: {<op>: <value>}}     — key-as-dim with nested op
+    """
+    if not isinstance(raw, dict):
+        return raw
+
+    # Already canonical, possibly with an op alias to normalise.
+    if {"dimension", "op", "value"}.issubset(raw.keys()):
+        op = raw["op"]
+        if isinstance(op, str):
+            raw = {**raw, "op": _FILTER_OP_ALIASES.get(op.lower(), op)}
+        return raw
+
+    # `{name, operator, value}` — alt key names.
+    if "name" in raw and "value" in raw and ("operator" in raw or "op" in raw):
+        op = raw.get("operator") or raw.get("op")
+        if isinstance(op, str):
+            op = _FILTER_OP_ALIASES.get(op.lower(), op)
+        return {"dimension": raw["name"], "op": op, "value": raw["value"]}
+
+    # `{<dim_name>: ...}` — single-key dispatch. Only coerce when the key is
+    # a real dimension name from the layer, otherwise we'd guess wrong.
+    if len(raw) == 1:
+        (key, val), = raw.items()
+        if key in dimension_names:
+            if isinstance(val, dict) and len(val) == 1:
+                # {dim: {op: value}}
+                ((op_raw, value),) = val.items()
+                op = _FILTER_OP_ALIASES.get(op_raw.lower(), op_raw) if isinstance(op_raw, str) else op_raw
+                return {"dimension": key, "op": op, "value": value}
+            # {dim: scalar} — short form, treat as equality.
+            return {"dimension": key, "op": "eq", "value": val}
+
+    return raw
+
+
+def _coerce_plan_payload(payload: dict, layer: SemanticLayer) -> dict:
+    """Lossy normalisation step between OpenAI's function call output and
+    PlanSpec validation. Two transformations:
+
+      1. Each filter passes through `_coerce_filter` to absorb the alt
+         shapes GPT-4o-mini emits despite the schema.
+      2. If `time_grain` is set but no time-kind dimension was selected,
+         add `order_created_at` (the default order-side time dim) so the
+         compiler has something to date_trunc over. The PRD's expected
+         behaviour is "time_grain implies time dim" — the prompt now says
+         so explicitly, but a graceful fallback here keeps single-mistake
+         plans on the matched path.
+    """
+    out = dict(payload)
+    dim_names = set(layer.dimensions.keys())
+    if isinstance(out.get("filters"), list):
+        out["filters"] = [_coerce_filter(f, dim_names) for f in out["filters"]]
+    # time-grain auto-promotion
+    time_grain = out.get("time_grain")
+    dims = out.get("dimensions") or []
+    if time_grain and isinstance(dims, list):
+        has_time = any(
+            isinstance(d, str)
+            and d in layer.dimensions
+            and layer.dimensions[d].kind == "time"
+            for d in dims
+        )
+        if not has_time:
+            # Pick the default time dim. order_created_at is the canonical
+            # "when did the order happen" — covers >90% of intent.
+            default_time = "order_created_at"
+            if default_time in layer.dimensions and layer.dimensions[default_time].kind == "time":
+                log.info(
+                    "planner.auto_added_time_dim grain=%s dim=%s",
+                    time_grain, default_time,
+                )
+                out["dimensions"] = list(dims) + [default_time]
+    return out
 
 
 def _validate_plan_against_layer(

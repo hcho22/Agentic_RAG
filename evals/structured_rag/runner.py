@@ -93,13 +93,42 @@ def _normalise_cell(v: Any) -> Any:
     return v
 
 
+def _is_empty_bucket(values: tuple[Any, ...]) -> bool:
+    """A bucket whose every numeric (or null) cell is 0 / null is treated as
+    display-irrelevant. Two equivalent SQL formulations of a metric — `WHERE
+    status <> 'cancelled'` vs `COUNT(*) FILTER (WHERE …)` — differ only in
+    whether they produce a row for buckets with no contributing data. BI UIs
+    universally suppress those rows. Apply the same rule here so the eval
+    measures semantic equivalence rather than punctuation.
+
+    Categorical cells (strings — dimension labels) are ignored for the
+    purpose of "empty": every grouped row carries a label, the question is
+    whether the aggregates carry signal.
+    """
+    has_numeric = False
+    for v in values:
+        if isinstance(v, bool):
+            # bool is a subclass of int but semantically categorical here.
+            continue
+        if isinstance(v, (int, float)):
+            has_numeric = True
+            if v != 0:
+                return False
+        # str / None / other: ignore for emptiness (label or absent data).
+    return has_numeric
+
+
 def _normalise_rows(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
     """Drop column names; emit a sorted list of value-tuples in deterministic
     order. Lexicographic stringification handles mixed-type columns without
-    needing per-column metadata."""
+    needing per-column metadata. Empty buckets (all numerics zero/null) are
+    dropped before sorting — see `_is_empty_bucket`."""
     out: list[tuple[Any, ...]] = []
     for r in rows:
-        out.append(tuple(_normalise_cell(v) for v in r.values()))
+        vals = tuple(_normalise_cell(v) for v in r.values())
+        if _is_empty_bucket(vals):
+            continue
+        out.append(vals)
     out.sort(key=lambda t: tuple(str(x) for x in t))
     return out
 

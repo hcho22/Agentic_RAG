@@ -12,7 +12,12 @@ is `postgresql://postgres:postgres@localhost:54322/postgres`); the
 `crm_readonly` role used by the agent at query time cannot write.
 
 Run:
-    python -m supabase.seed.crm_seed
+    python -m db_seed.crm_seed
+
+Note: this module lives at the repo root rather than under `supabase/`
+because the local `supabase/` directory (Supabase CLI workspace) collides
+with the installed `supabase` PyPI package — `python -m supabase.seed.*`
+fails with ``ModuleNotFoundError: No module named 'supabase.seed'``.
 """
 
 from __future__ import annotations
