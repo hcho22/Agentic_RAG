@@ -49,6 +49,11 @@ npm run dev            # http://localhost:5173
 | `LANGSMITH_PROJECT` | no | Default `agentic-rag` |
 | `LANGSMITH_TRACING` | no | `true`/`false`; auto-set based on API key presence |
 | `PORT` | no | Injected by Railway/Fly at runtime |
+| `ANALYTICS_DATABASE_URL` | no (Module 7) | Postgres URL for the `analytics_readonly` role used by the text-to-SQL baseline |
+| `CRM_DATABASE_URL` | no (Module 9) | Postgres URL for the `crm_readonly` role used by the semantic-layer-aware SQL search. Falls back to `ANALYTICS_DATABASE_URL` |
+| `CRM_SEED_DATABASE_URL` | no (Module 9) | Writable Postgres URL used only by `python -m db_seed.crm_seed`. Falls back to `DATABASE_URL` |
+| `ALLOWED_SQL_SCHEMAS` | no | Comma-separated schema allowlist for SQL tools. Default `analytics,crm` |
+| `SQL_QUERY_TIMEOUT_MS` | no | Statement timeout for SQL tools. Default 10000 |
 
 ### Frontend (`frontend/.env`)
 

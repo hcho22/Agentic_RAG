@@ -83,6 +83,25 @@ from subagent import (
     run_document_subagent,
     spawn_document_agent_tool_schema,
 )
+from semantic_layer import (
+    SemanticLayer,
+    SemanticLayerError,
+    load_and_validate as load_semantic_layer,
+)
+from planner import (
+    PlanMatched,
+    PlanNoMatch,
+    PlanQueryInput,
+    plan_query,
+    plan_query_tool_schema,
+)
+from sql_compiler import (
+    CompileError,
+    SqlSearchInput,
+    is_enabled as crm_tool_enabled,
+    sql_search,
+    sql_search_tool_schema,
+)
 
 load_dotenv()
 
@@ -147,12 +166,24 @@ COMPLETIONS_SYSTEM_PROMPT_BASE = (
 # US-023: appended to the system prompt only when the text-to-SQL tool is
 # configured (ANALYTICS_DATABASE_URL set). Includes the live schema snapshot
 # so the agent picks the right tool based on the question type.
-COMPLETIONS_SQL_PROMPT_TEMPLATE = (
-    "\n\nYou also have a `query_database` tool that runs read-only SQL "
-    "against the analytics schema(s): {schemas}. Use it for quantitative "
-    "questions (totals, counts, aggregates, lookups). Prefer "
-    "`search_documents` for free-text questions about uploaded documents.\n\n"
-    "{schema_snapshot}"
+COMPLETIONS_PLAN_QUERY_PROMPT = (
+    "\n\nYou have a two-step structured-data path for quantitative questions "
+    "(totals, counts, aggregates by dimension, gross margin, customer counts) "
+    "over the business `crm` schema:\n"
+    "  1. Call `plan_query(question)` first. It returns either "
+    "{status: \"matched\", plan: ...} when the question maps onto the semantic "
+    "layer, or {status: \"no_match\", reason, suggested_fallback} when it doesn't.\n"
+    "  2. If matched, call `sql_search(plan=<that plan>, row_limit=...)`. You "
+    "CANNOT call `sql_search` without a plan — it requires the structured "
+    "object from step 1.\n"
+    "  3. If no_match with suggested_fallback=\"file_search\", call "
+    "`search_documents` next. If suggested_fallback=\"web_search\" and that "
+    "tool is enabled, call `web_search`. Otherwise tell the user the "
+    "question is out of scope for the structured business data and explain "
+    "the reason briefly.\n"
+    "Prefer `search_documents` for free-text questions about uploaded "
+    "documents; only enter the plan_query path when the question is "
+    "clearly about quantitative business data."
 )
 
 # US-024: appended only when the web search tool is configured. The routing
@@ -187,17 +218,15 @@ def _build_completions_system_prompt(
     many tools are visible.
     """
     prompt = COMPLETIONS_SYSTEM_PROMPT_BASE
-    if sql_tool_enabled():
-        schemas = ", ".join(get_allowed_schemas())
-        snapshot_block = (
-            schema_snapshot
-            if schema_snapshot
-            else "Schema introspection unavailable; ask the user for table names."
-        )
-        prompt += COMPLETIONS_SQL_PROMPT_TEMPLATE.format(
-            schemas=schemas,
-            schema_snapshot=snapshot_block,
-        )
+    # US-030: plan_query + sql_search replace query_database. Gated on
+    # crm_tool_enabled() (which checks CRM_DATABASE_URL → ANALYTICS_DATABASE_URL)
+    # AND a successfully loaded semantic layer — without both, the agent
+    # shouldn't see the structured path because sql_search would fail at
+    # execution time. `schema_snapshot` is unused here (the planner reads
+    # the semantic layer, not the raw schema dump) but the parameter stays
+    # for API stability — eval code and tests pass it in.
+    if crm_tool_enabled() and _SEMANTIC_LAYER is not None:
+        prompt += COMPLETIONS_PLAN_QUERY_PROMPT
     if web_search_tool_enabled():
         prompt += COMPLETIONS_WEB_SEARCH_PROMPT
     # Sub-agent block is unconditional (the tool is always registered) —
@@ -216,6 +245,11 @@ def _build_completions_system_prompt(
 # don't pay the introspection round-trip on every chat turn. None means "tool
 # disabled or introspection failed" — the prompt builder falls back gracefully.
 _SQL_SCHEMA_SNAPSHOT: str | None = None
+
+# US-029: structured-RAG semantic layer. Validated and loaded once at startup.
+# US-030's planner and compiler will read from this; until then it just
+# guarantees the YAML matches the live crm schema.
+_SEMANTIC_LAYER: SemanticLayer | None = None
 
 # LangSmith: when LANGSMITH_API_KEY is set the SDK auto-ships traces for every
 # wrapped OpenAI call and every @traceable function. When it's missing,
@@ -250,7 +284,7 @@ async def _on_startup() -> None:
     # prompt + tool description don't pay an extra DB round-trip per chat
     # turn. Empty result on failure means the prompt falls back to a
     # "ask the user for table names" message.
-    global _SQL_SCHEMA_SNAPSHOT
+    global _SQL_SCHEMA_SNAPSHOT, _SEMANTIC_LAYER
     db_url = get_analytics_database_url()
     if db_url:
         try:
@@ -262,6 +296,22 @@ async def _on_startup() -> None:
         except Exception:  # noqa: BLE001
             log.exception("text_to_sql.snapshot_load_failed")
             _SQL_SCHEMA_SNAPSHOT = None
+
+    # US-029: load + validate the semantic layer. A broken layer must stop
+    # the app from coming up — wrong SQL at query time is worse than a
+    # noisy startup failure. SemanticLayerError surfaces verbatim.
+    try:
+        _SEMANTIC_LAYER = await load_semantic_layer()
+        log.info(
+            "semantic_layer loaded — %d entities, %d dimensions, %d metrics, %d joins",
+            len(_SEMANTIC_LAYER.entities),
+            len(_SEMANTIC_LAYER.dimensions),
+            len(_SEMANTIC_LAYER.metrics),
+            len(_SEMANTIC_LAYER.joins),
+        )
+    except SemanticLayerError:
+        log.exception("semantic_layer.load_failed")
+        raise
 
 
 class ChatRequest(BaseModel):
@@ -674,24 +724,46 @@ async def _execute_tool_call(
             log.exception("search_documents tool failed")
             return json.dumps({"error": str(e)})
 
-    if name == "query_database":
-        # US-023: text-to-SQL. Errors come back as tool-level JSON so the
-        # agent sees them and can recover (re-phrase the question, fall back
-        # to search_documents) rather than failing the whole turn.
+    if name == "plan_query":
+        # US-030 step 1: map NL to a PlanSpec via OpenAI function-calling.
+        # Returns matched (plan ready) or no_match (with suggested_fallback)
+        # so the agent's next step is explicit in the result payload.
         try:
-            validated_sql = QueryDatabaseInput(**args)
-            result = await query_database(
+            validated_plan = PlanQueryInput(**args)
+            if _SEMANTIC_LAYER is None:
+                return json.dumps({"error": "semantic layer not loaded"})
+            result = await plan_query(
                 openai_client=openai_client,
-                question=validated_sql.question,
-                row_limit=validated_sql.row_limit,
-                schema_snapshot=_SQL_SCHEMA_SNAPSHOT,
+                question=validated_plan.question,
+                layer=_SEMANTIC_LAYER,
             )
             return json.dumps(result.model_dump())
+        except Exception as e:  # noqa: BLE001 — surface to model as tool error
+            log.exception("plan_query tool failed")
+            return json.dumps({"error": str(e)})
+
+    if name == "sql_search":
+        # US-030 step 2: compile + execute. The tool schema requires `plan`,
+        # so the agent can't reach this branch without a planner run. We
+        # still defensively reject if the layer somehow isn't loaded.
+        try:
+            validated_search = SqlSearchInput(**args)
+            if _SEMANTIC_LAYER is None:
+                return json.dumps({"error": "semantic layer not loaded"})
+            result = await sql_search(
+                plan=validated_search.plan,
+                layer=_SEMANTIC_LAYER,
+                row_limit=validated_search.row_limit,
+            )
+            return json.dumps(result.model_dump())
+        except CompileError as e:
+            log.warning("sql_search compile failed: %s", e)
+            return json.dumps({"error": f"compile: {e}"})
         except SqlSafetyError as e:
-            log.warning("query_database rejected unsafe sql: %s", e)
+            log.exception("sql_search safety violation: %s", e)
             return json.dumps({"error": f"unsafe sql: {e}"})
         except Exception as e:  # noqa: BLE001 — surface to model as tool error
-            log.exception("query_database tool failed")
+            log.exception("sql_search tool failed")
             return json.dumps({"error": str(e)})
 
     if name == "web_search":
@@ -781,8 +853,14 @@ async def _stream_completions_reply(
         messages.append({"role": "user", "content": message})
 
         tools = [search_documents_tool_schema()]
-        if sql_tool_enabled():
-            tools.append(query_database_tool_schema(_SQL_SCHEMA_SNAPSHOT))
+        # US-030: plan_query + sql_search replace query_database. Both are
+        # registered together (sql_search is useless without plan_query) and
+        # gated on a live semantic layer plus a CRM DB URL. The old
+        # query_database tool is no longer exposed to the agent; its naive
+        # generator stays available as a library function for the US-031 eval.
+        if crm_tool_enabled() and _SEMANTIC_LAYER is not None:
+            tools.append(plan_query_tool_schema())
+            tools.append(sql_search_tool_schema())
         if web_search_tool_enabled():
             tools.append(web_search_tool_schema())
         # US-027: sub-agent tool is always registered — full-document tasks
@@ -968,6 +1046,11 @@ async def get_config() -> dict:
         "supported_chat_modes": ["responses", "completions"],
         "file_search_enabled": bool(OPENAI_VECTOR_STORE_ID),
         "sql_tool_enabled": sql_tool_enabled(),
+        # US-030: separate flag for the new plan_query + sql_search path.
+        # Kept distinct from sql_tool_enabled (Module 7's query_database)
+        # so the frontend can show the right card mix and the eval can run
+        # the baseline path independently.
+        "crm_tool_enabled": crm_tool_enabled() and _SEMANTIC_LAYER is not None,
         "web_search_tool_enabled": web_search_tool_enabled(),
         # US-026 / US-027: spawn_document_agent is always registered, so this
         # flag is `true` whenever the completions path is available. The UI

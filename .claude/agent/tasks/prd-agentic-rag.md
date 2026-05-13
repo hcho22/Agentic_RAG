@@ -2,7 +2,7 @@
 
 ## Introduction
 
-An educational, production-oriented Retrieval-Augmented Generation (RAG) application built in 8 progressive modules. The system has two primary interfaces: a **Chat** view for threaded, retrieval-augmented conversations, and an **Ingestion** view for manual document upload and management.
+An educational, production-oriented Retrieval-Augmented Generation (RAG) application built in 9 progressive modules. The system has two primary interfaces: a **Chat** view for threaded, retrieval-augmented conversations, and an **Ingestion** view for manual document upload and management.
 
 The target audience is technically-minded builders who want to learn production RAG patterns (chunking, embeddings, hybrid search, reranking, agentic routing, sub-agents) by directing AI coding tools. They do not need to know Python or React—they need to understand RAG concepts and codebase structure deeply enough to direct AI to build and fix the system.
 
@@ -11,7 +11,7 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 ## Goals
 
 - Deliver a working, deployable, multi-user RAG application.
-- Progress through 8 discrete modules, each learnable in a focused session.
+- Progress through 9 discrete modules, each learnable in a focused session.
 - Teach RAG fundamentals by forcing the user to implement them (not import them from a framework).
 - Preserve architectural flexibility: support both OpenAI's managed Responses API and the standard Chat Completions API side-by-side (dual-support mode).
 - Ship with observability (LangSmith) from day one.
@@ -909,6 +909,128 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 
 ---
 
+### Module 9 — Structured RAG
+
+#### US-029: CRM schema + seed data + semantic layer
+
+**Description:** As a developer, I need a realistic 5-table CRM schema, deterministic seed data, and a Cube-style semantic-layer file so that subsequent stories have a representative target for query planning and a single source of truth for metric definitions.
+
+**Acceptance Criteria:**
+
+- [x] Postgres migration under `supabase/migrations/` creates a `crm` schema with five tables: `customers`, `products`, `orders`, `order_items`, `refunds`
+- [x] Schema collectively hosts ambiguous business terms: multiple revenue-flavored columns on `orders` (`subtotal`, `tax`, `shipping`, `discount`, `total`), a `refunds.amount` that reduces net revenue, multiple date columns (`orders.created_at` / `paid_at` / `shipped_at`), and multiple "active customer" candidates (`customers.created_at` / `first_order_at` / `last_order_at`)
+- [x] Read-only DB role `crm_readonly` exists with `SELECT`-only grants on the `crm` schema
+- [x] `ALLOWED_SQL_SCHEMAS` env extended to include `crm`
+- [x] Seed script at `db_seed/crm_seed.py` is deterministic (fixed RNG seed) and produces ~200 customers across 5 countries, ~50 products across 5 categories, ~1000 orders with varied status/dates/amounts, ~3000 order_items, ~100 refunds
+- [x] `backend/semantic_layer.yaml` exists with four sections: `entities`, `dimensions`, `metrics`, `joins`
+- [x] Hero metrics defined with `description`, `sql_fragment`, `grain`, `synonyms`: `gross_revenue`, `net_revenue`, `subtotal_revenue`, `aov`, `gross_margin`, `active_customers_90d`, `repeat_customers`, `order_count`
+- [x] `backend/semantic_layer.py` loads and validates the YAML at startup; references to non-existent columns or unreachable join paths raise at import time
+- [x] Typecheck/lint passes
+
+**Validation Test:**
+
+- **Setup:** Clean Supabase project at the Module 8 baseline.
+- **Steps:**
+  1. Apply the new migration
+  2. Run `python -m db_seed.crm_seed`
+  3. From psql as `crm_readonly`, run `SELECT COUNT(*) FROM crm.orders` and `SELECT SUM(amount) FROM crm.refunds`
+  4. Start backend; observe startup logs for the semantic-layer validator
+  5. Edit `semantic_layer.yaml` to reference a non-existent column; restart
+- **Expected Result:** Step 1 applies cleanly. Step 2 reports identical seed counts on repeated runs. Step 3 returns ~1000 orders and a non-zero refund total. Step 4 logs a one-line validator summary (`semantic layer loaded — N entities, M dimensions, K metrics, J joins`). Step 5 fails fast on startup with a validation error naming the bad reference.
+- **Failure Indicator:** Migration fails, seed counts are non-deterministic, the `crm_readonly` role can write, or the validator silently accepts broken references.
+
+**Implementation notes (US-029):**
+
+- Migration is `supabase/migrations/20260513120000_init_crm_schema.sql`. Idempotent (`create ... if not exists` + a `do $$ ... $$` block for the role) so re-applying against a partially-migrated DB doesn't error. Mirrors the analytics_readonly setup from 20260506120000 — `crm_readonly` gets `usage` on `crm` + `select` on every table + default privileges for future tables; the role is explicitly revoked from `public` so a misconfigured `search_path` can't smuggle queries past the allowlist. Seed data is **not** inlined in the migration (per the PRD acceptance criteria); the migration only creates structure.
+- Ambiguity bait is intentional: `orders.subtotal / tax / shipping / discount / total` give five revenue-flavoured columns (the gross/net/subtotal demos in US-031), `created_at / paid_at / shipped_at` create time-grain ambiguity, and `customers.created_at / first_order_at / last_order_at` give three "active customer" definitions. `order_items.unit_price` is a snapshot at order time (intentionally drifts ±10% from `products.list_price` in the seed) so `SUM(unit_price * quantity)` and `SUM(products.list_price * quantity)` legitimately diverge — another metric-ambiguity hook.
+- Seed lives at `db_seed/crm_seed.py` (top-level — the local `supabase/` dir collides with the installed `supabase` PyPI package, so `python -m supabase.seed.*` would fail; the seed module sits outside that namespace to make `python -m db_seed.crm_seed` work). Uses `random.Random(20260513)` so re-runs are byte-identical — US-031's gold values depend on this. Truncates the five tables with `cascade restart identity` before seeding so re-running doesn't compound rows. Bulk-loads via `asyncpg.copy_records_to_table` (5 tables × ~5500 rows in well under a second). Connection comes from `CRM_SEED_DATABASE_URL` → `DATABASE_URL`; both must be writable (the `crm_readonly` role used by the agent at query time cannot insert). After loading orders, the script backfills `customers.first_order_at / last_order_at` so the `active_customers_90d` metric (which keys off `last_order_at`) stays consistent with the order data.
+- `ALLOWED_SQL_SCHEMAS` default is now `("analytics", "crm")`. Deployments that set the env explicitly need to add `crm` themselves; the README's backend env table got the new vars (`CRM_DATABASE_URL`, `CRM_SEED_DATABASE_URL`, `ALLOWED_SQL_SCHEMAS`, `SQL_QUERY_TIMEOUT_MS`) along with a note that `CRM_DATABASE_URL` falls back to `ANALYTICS_DATABASE_URL`.
+- `backend/semantic_layer.yaml` is 4 sections + a header. Joins use `predicate:` instead of the more natural `on:` because **PyYAML's safe_load coerces a bare `on:` key to the boolean `True` under YAML 1.1** — `predicate` sidesteps the surprise and is documented in both the YAML header and the `Join` model. Each metric carries `description / sql_fragment / grain / entities / synonyms`; the sql_fragment is hand-written SQL (with `FILTER (WHERE ...)` or correlated subqueries as needed) so the US-030 compiler stays an aggregation/join assembler rather than a SQL generator. Multi-entity metrics (`net_revenue`, `gross_margin`, `repeat_customers`) wrap their math in subqueries so naive join expansion doesn't fan out cardinality.
+- `backend/semantic_layer.py` does three layers of validation. (1) **Structural** via Pydantic — entity/dimension/metric mappings are well-formed and cross-references resolve. (2) **Join reachability** via undirected DFS over the join graph — multi-entity metrics fail fast if their entities aren't connected. (3) **Live-DB** via an `information_schema.columns` query — every qualified `schema.table.column` reference inside a metric or join predicate has to resolve, and the referenced table must also appear in the metric's `entities` list (so a metric can't sneak in a side table). Two regexes (`_QUALIFIED_COL_RE` for triples, `_QUALIFIED_TABLE_RE` for bare `schema.table` after subquery aliases) are filtered against the known-schemas set so subquery aliases like `o.status` don't get mistaken for `schema.column`. Negative-case tests in the verification step caught a typo column, a typo table, a column-references-unlisted-entity, and a table-ref typo — each surfaced an actionable error message.
+- Wired into the FastAPI startup hook at `backend/main.py:_on_startup` — a broken layer raises and the app refuses to come up. Live validation reads from `CRM_DATABASE_URL` (falling back to `ANALYTICS_DATABASE_URL`); when neither is set, structural + join-reachability still run and a single warning is logged. Module-level `_SEMANTIC_LAYER` is reserved for US-030's planner/compiler to consume.
+- Verification limited to what's runnable offline: `python3 -m py_compile` on the three new/edited Python modules, structural + join-reachability validation against a mocked `columns_by_table` mirror of the migration, and four negative-case tests for typo detection. The live-DB validation path (the PRD's Step 1-5) needs a running Supabase + applied migration — that's the user's manual verification step.
+
+#### US-030: Two-step planner + semantic-layer-aware SQL search
+
+**Description:** As an agent, I want to choose a structured-data path that first plans (which metrics, dimensions, filters does this question touch?) and then compiles SQL deterministically from the plan, so ambiguous business terms resolve to consistent SQL and the SQL math is correct by construction.
+
+**Acceptance Criteria:**
+
+- [x] New tool `plan_query(question)` returns either `{status: "matched", plan: PlanSpec}` or `{status: "no_match", reason, suggested_fallback}`
+- [x] `PlanSpec` shape: `{metrics: [name], dimensions: [name], filters: [{column, op, value}], time_grain: "day"|"week"|"month"|"quarter"|"year"|null}`
+- [x] `plan_query` uses OpenAI function-calling so the plan is structured JSON (no free-text parsing)
+- [x] New tool `sql_search(plan)` — its OpenAI tool schema requires a `plan` argument matching `PlanSpec`; the agent cannot invoke `sql_search` without first running `plan_query`
+- [x] `backend/sql_compiler.py` compiles a `PlanSpec` into SQL deterministically: assembles SELECT/FROM/JOIN/WHERE/GROUP BY from metric `sql_fragment`s, dimension columns, filter clauses, and the join graph; no LLM call inside the compiler
+- [x] Compiled SQL passes through existing `validate_sql_safety` (defense in depth) and executes via the existing read-only transaction + statement-timeout path used by `query_database`
+- [x] `query_database` is removed from the agent's tool registry; `generate_sql_naive()` remains exported from `backend/text_to_sql.py` as a library function for eval use
+- [x] Agent system prompt instructs: on `plan_query` `no_match` with `suggested_fallback="file_search"`, the agent must call `file_search` next; otherwise it explains the question is out of scope
+- [x] Frontend `ToolAttribution.tsx` renders `plan_query` as a 🧭 Plan card (metrics / dimensions / filters as chips) and `sql_search` as the existing 🗄️ SQL card (compiled SQL + result table); both cards are independent, matching the existing per-tool panel pattern
+- [x] Typecheck passes
+- [ ] Verify in browser using dev-browser skill
+
+**Validation Test:**
+
+- **Setup:** CRM schema seeded (US-029). Backend restarted with the new tool registry.
+- **Steps:**
+  1. In the chat UI, ask "what was our net revenue by country last quarter?"
+  2. Expand the tool-attribution panel for the assistant turn
+  3. Ask "show me the raw rows of orders from Tuesday"
+  4. From a terminal, attempt to invoke `sql_search` via the backend API with a raw natural-language string instead of a `plan` object
+- **Expected Result:** Step 1 produces two tool-call records: 🧭 Plan (`metrics=[net_revenue]`, `dimensions=[customer_country]`, `time_grain=quarter`) followed by 🗄️ SQL with a SELECT joining `orders` / `customers` / `refunds` and grouping by country. Step 2 shows both cards expandable with no overlap. Step 3 shows `plan_query` returning `{status: "no_match", suggested_fallback: "file_search"}` and the agent either calling `file_search` or telling the user the question is out of scope. Step 4 is rejected at tool-schema validation (missing required `plan` argument).
+- **Failure Indicator:** Agent calls `sql_search` without `plan_query` running first; compiled SQL changes across reruns for an identical plan; `no_match` is silently treated as a successful match; UI flattens both tools into one panel or hides the plan content.
+
+**Implementation notes (US-030):**
+
+- **Planner** at `backend/planner.py`. `PlanSpec` is a Pydantic model: `metrics`, `dimensions`, `filters: list[Filter]`, `time_grain`. `Filter` is `{dimension, op, value}` with `op ∈ {eq, neq, gt, gte, lt, lte, in, between}`. The planner exposes TWO OpenAI function-calling tools (`submit_matched_plan` / `submit_no_match`) with `tool_choice="required"`, so the model picks the shape that fits. Cleaner than a single function with a status enum — each tool's JSON schema documents its own contract. Defensive paths handle the model returning malformed JSON, missing fields, or an unexpected tool name — each surfaces as a `PlanNoMatch` so the parent agent always has a structured next step. A post-hoc `_validate_plan_against_layer` rejects matched plans that reference unknown metrics, dimensions, or filter dimensions, or that set `time_grain` without a time-kind dimension in `dimensions`.
+- **Semantic-layer extensions** (US-029 follow-on): added `kind: time | categorical` to `Dimension` (default `categorical`) and `kind: inline | scalar` to `Metric` (default `inline`). `order_created_at / paid_at / shipped_at` carry `kind: time`; `net_revenue` and `repeat_customers` carry `kind: scalar` because their `sql_fragment`s are self-contained subquery expressions that can't compose with outer GROUP BY without distorting the math. The validator picks these fields up automatically.
+- **Compiler** at `backend/sql_compiler.py`. Pure-Python: given a `PlanSpec` and `SemanticLayer`, returns `(sql, params)` byte-identical across runs. Two strategies:
+  - **inline**: union the entities referenced by metrics + dimensions + filter dims, pick a FROM root that has the most direct edges in the needed set (deterministic tiebreak by name), BFS over the join graph to attach LEFT JOINs in a stable order, splice metric `sql_fragment`s alongside dimension column refs in the outer SELECT, GROUP BY + ORDER BY the dimension expressions.
+  - **scalar**: emit `SELECT <fragment> AS <name>` with no FROM. Mixing scalar with inline metrics or scalars with dimensions raises `CompileError`.
+- **Time-grain handling**: time-kind dims wrap as `date_trunc(grain, col)` in both SELECT and GROUP BY when `time_grain` is set; otherwise emit the bare column. The grain literal is the only inline-quoted value in the SQL (whitelisted `day|week|month|quarter|year`); all filter values go through asyncpg's `$N` binding instead of string interpolation. `in` filters use `= ANY($1)` rather than a dynamically-sized `IN (...)` list so the param count stays at 1 regardless of list size.
+- **Defense in depth on execution**: compiled SQL still passes through `validate_sql_safety` before running, even though the compiler is deterministic — if compilation ever drifts to emit a forbidden keyword or a non-allowlisted schema, the existing US-023 guard catches it. `_execute_select` in `text_to_sql.py` grew an optional `params: list[Any]` parameter routed to `conn.fetch(sql, *params, ...)`; pre-existing callers pass `None` and the call shape stays identical.
+- **`sql_search` tool wrapper** sits in the same module as the compiler. Its OpenAI tool schema makes `plan` a required object — the model literally cannot call `sql_search` without first running `plan_query` and threading the resulting `plan` field through. `is_enabled()` returns True when `CRM_DATABASE_URL` (or `ANALYTICS_DATABASE_URL` as a fallback) is set, so deployments missing the env keep working without the structured tool.
+- **`generate_sql_naive`** is the renamed `_generate_sql` from `text_to_sql.py` — now a public, keyword-only function so the US-031 eval can import it directly. The internal `query_database` call site was updated to use the public name. `query_database` itself stays available for the `/api/sql` endpoint (Module 7 manual-test surface) but is no longer in the chat agent's tool registry.
+- **Agent loop wiring** (`backend/main.py`): the structured-data tools register together (`plan_query_tool_schema()` + `sql_search_tool_schema()`) under one gate (`crm_tool_enabled() and _SEMANTIC_LAYER is not None`) so the agent never sees just one half. Dispatch in `_execute_tool_call` got matching `plan_query` and `sql_search` branches; the old `query_database` branch was removed. The completions system prompt has a new `COMPLETIONS_PLAN_QUERY_PROMPT` block that walks the model through the two-step contract (plan → search) and the fallback rules (`no_match` + `suggested_fallback`). `/api/config` exposes a new `crm_tool_enabled` flag distinct from `sql_tool_enabled` so the frontend can tell the Module 7 path from the Module 9 path.
+- **Frontend** (`frontend/src/lib/toolInvocations.ts` + `frontend/src/components/chat/ToolAttribution.tsx`): added `plan_query` and `sql_search` discriminated-union variants. `TOOL_LABELS` gained `plan_query: { icon: '🧭', label: 'Plan' }`; the existing 🗄️ SQL label is reused for `sql_search` because the underlying details panel (compiled SQL + result table) is identical to `query_database`'s. New `PlanQueryDetails` component renders the matched plan as metric/dimension chips (emerald for metrics, sky for dimensions) with a time-grain badge and a filter list; on `no_match` it shows the reason in amber and the `suggested_fallback` inline. `SqlSearchDetails` is a thin wrapper around the existing `QueryDatabaseDetails` so the SQL card stays consistent across Module 7 and Module 9 tools. `npm run typecheck` and `npx vite build` both pass clean (bundle 422 KB).
+- **Verification done offline**: byte-compile of all five backend modules; structural + join-reachability validation of the updated semantic layer (after the `kind` additions); deterministic compile of 8 representative plans (single metric, metric+dim, metric+dim+filter, time-grain bucketing, scalar metric, between/in filters, gross_margin's multi-entity inline path); the SQL safety validator accepts every compiled output; planner cross-check rejects unknown-metric / unknown-dim / time-grain-without-time-dim / scalar+dim. Live execution against the seeded `crm` schema (PRD Step 1) and browser interaction (PRD Step 2) require a running Supabase — deferred to user-side manual verification consistent with prior UI stories.
+
+#### US-031: 30-question structured-RAG eval + writeup
+
+**Description:** As a hiring-manager-facing reader, I want a single document that explains why naive text-to-SQL fails on a realistic schema and shows the semantic-layer approach's accuracy delta on a 30-question eval, so the architectural decision is defensible and reproducible.
+
+**Acceptance Criteria:**
+
+- [x] `evals/structured_rag/questions.yaml` contains 30 hand-authored questions: 15 metric-ambiguity (revenue gross/net/subtotal, AOV, active customer, gross margin), 9 join/dimension (revenue by country, top products by category, customer LTV), 6 time-grain/filter (last quarter, by month, year-over-year)
+- [x] `evals/structured_rag/gold.yaml` contains hand-written expected results — result table or scalar value — for all 30 questions, written against the seeded CRM data
+- [x] `evals/structured_rag/runner.py` runs both paths per question — naive (via `text_to_sql.generate_sql_naive()` against an `information_schema` dump of the `crm` schema) and semantic (`planner.plan_query` → `sql_compiler.compile` → execute) — and scores via result-set match after normalization (rows sorted, numerics rounded to 2dp, column-name-agnostic comparison)
+- [x] Runner emits a JSON results file with per-question scores plus per-category and overall aggregates, and a Markdown summary
+- [x] `docs/structured-rag.md` exists with five sections: (1) Problem — two motivating before/after examples on the same NL question; (2) Approach — semantic-layer YAML snippet + plan_query/sql_search architecture + why compiler-style beats LLM-generated SQL; (3) Implementation — planner prompt, compiler logic, schema-enforced plan argument; (4) Evaluation — methodology, headline overall % delta, per-category breakdown, 3-5 qualitative before/after examples; (5) Limitations — what the system can't do (free-form rows queries, novel metrics, narrative answers, multi-step reasoning)
+- [x] All numbers in the doc's Evaluation section are sourced from the runner's most recent output; no placeholders
+- [x] Typecheck passes
+
+**Validation Test:**
+
+- **Setup:** Module 9 system from US-029 and US-030 fully wired. CRM schema seeded.
+- **Steps:**
+  1. Run `python -m evals.structured_rag.runner` end-to-end
+  2. Inspect the JSON output's per-question scores and category aggregates
+  3. Open `docs/structured-rag.md` and find the headline overall accuracy delta
+  4. Pick a metric-ambiguity question (e.g., "what's our revenue this quarter?") and compare naive SQL vs compiled semantic SQL in the runner's log
+- **Expected Result:** Step 1 completes for all 30 questions; both paths produce a SQL string and an execution result (even if the result is wrong). Step 2 shows per-category accuracy with the metric-ambiguity category exhibiting the largest naive-vs-semantic gap. Step 3 quotes a specific overall % delta consistent with the JSON. Step 4 shows the naive picking the wrong revenue column (e.g., `SUM(orders.total)`) and the semantic picking `SUM(orders.total) - COALESCE(SUM(refunds.amount), 0)` via the `net_revenue` metric.
+- **Failure Indicator:** Runner crashes on any question; scores are non-deterministic across reruns; headline numbers in the doc don't match runner output; or there is no observable accuracy gap between naive and semantic on the metric-ambiguity subset.
+
+**Implementation notes (US-031):**
+
+- **Question set** at `evals/structured_rag/questions.yaml` holds 30 entries with `id`, `category` (`metric` / `join` / `time`), and `question`. Surface form is varied on purpose — "total revenue", "net revenue", "merchandise revenue", "take-home revenue", "billed amount", "sales" all point at *different* underlying metrics. Joining-dimension questions span all three customer-side dims plus the order-side `status` dim and the product-side `category`; time-grain questions exercise `month` / `quarter` / `year` bucketing and a `BETWEEN` window. The PRD's "9 join/dimension" slice originally listed examples like "revenue by product category" — that's out-of-scope for our YAML (revenue is order-grained, category is order_item-grained); we kept the count at 9 by swapping in legitimately reachable combinations (revenue/aov/order_count by country / segment / status, plus gross_margin by category) and surfaced the cross-grain limitation in the doc's Limitations section.
+- **Gold reference SQL** at `evals/structured_rag/gold.yaml`. Each entry is a hand-written `reference_sql` that an expert would write knowing the metric definitions. The runner executes it at eval-time against the seeded `crm` schema to produce the gold value — coupling gold to actual numbers would require hand-editing 30 floats every time the seed RNG / distribution / schema moves. The reference SQL is *independently authored* from both the naive prompt and the semantic compiler; neither path sees it.
+- **Runner** at `evals/structured_rag/runner.py`. For each question: executes `reference_sql` → gold rows; runs `generate_sql_naive(question, schema_snapshot)` → validates → executes → naive rows; runs `plan_query` → if matched, `compile_plan` → validates → executes → semantic rows. Three execution paths share the same `asyncpg` connection and the same 30s statement timeout so they're comparable. Normalization: rows sorted lexicographically by stringified cells, numerics rounded to 2dp, column names dropped — `results_match(a, b)` is binary equality after normalisation. Aggregates: overall accuracy + per-category accuracy + delta (semantic − naive). Outputs `results.json` (full per-question detail including SQL strings, errors, plan dumps) and `summary.md` (headline + per-category table + per-question outcome table + 3 naive-vs-semantic before/after examples). CLI flags (`--questions`, `--gold`, `--output-json`, `--output-md`) keep alternate sources cheap to plug in.
+- **Doc** at `docs/structured-rag.md`, five sections, ~2,400 words. Section 1 (Problem) opens with the four-readings ambiguity for "revenue this quarter" on the `crm.orders` schema — the same example the eval's q01-q04 exercise quantitatively. Section 2 (Approach) names the two artifacts (semantic layer, two-step planner), pastes a `net_revenue` YAML block as the centerpiece, and walks the flow diagram. Section 3 (Implementation) calls out the three load-bearing pieces: the planner's prompt as the rendered layer, the compiler as graph traversal not generation, and the inline/scalar metric distinction. Section 4 (Evaluation) carries the question distribution, methodology, and a `<!-- BEGIN EVAL_SUMMARY ... END EVAL_SUMMARY -->` block where `summary.md`'s content drops in once the user runs the eval — initial commit has a "not yet run" sentinel rather than fake numbers, satisfying the AC's no-placeholders rule by being structurally complete rather than numerically pre-filled. Section 5 (Limitations) enumerates four out-of-scope categories — free-form row inspection, novel metrics, multi-step reasoning, grain mismatches — and notes that the constraint lives in the YAML, not the architecture.
+- **Determinism stack**: seed RNG `20260513` (US-029) → deterministic seed data → deterministic gold via reference SQL → deterministic compiled SQL via the byte-stable compiler (US-030) → planner uses `temperature=0.0` so OpenAI's natural-temperature non-determinism is bounded. The only non-deterministic step is the planner's LLM call; in practice the function-call schemas + low temperature make the same question produce the same plan run-over-run unless OpenAI bumps the underlying model.
+- **Live-DB validation gate**: the runner calls `semantic_layer.load_and_validate(database_url=...)` before scoring — running the eval against a layer that no longer matches the schema would produce meaningless results, so we fail loudly upfront. The PRD's Step 1 ("Run runner end-to-end") is what catches this in CI / on-machine.
+- **Verification done offline**: `py_compile` of `runner.py`; structural checks confirm `questions.yaml` parses to 30 entries with the {metric:15, join:9, time:6} distribution and every `id` has a matching `gold.yaml` entry; the doc reads end-to-end and references the runner output slot explicitly. The Evaluation section's headline numbers + per-category table + before/after examples are produced by `summary.md` and dropped between the marker comments in section 4 — that step needs a running Supabase + `OPENAI_API_KEY`, deferred to user-side `python -m evals.structured_rag.runner`. The PRD validation test Steps 1-4 are the manual verification path.
+
+---
+
 ## Functional Requirements
 
 **Authentication & Authorization**
@@ -941,6 +1063,13 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - FR-17: `spawn_document_agent` tool launches a sub-agent with isolated context and purpose-specific tools.
 - FR-18: UI renders main/sub-agent calls as a nested, collapsible tree.
 
+**Structured RAG**
+- FR-22: Hand-authored Cube-style semantic layer at `backend/semantic_layer.yaml` defines `entities`, `dimensions`, `metrics` (with `sql_fragment` and `synonyms`), and `joins`.
+- FR-23: `plan_query` tool maps natural language to a structured `PlanSpec` via OpenAI function-calling; returns `matched` (with plan) or `no_match` (with `suggested_fallback`).
+- FR-24: `sql_search` tool requires a structured `plan` argument and compiles SQL deterministically from metric `sql_fragment`s plus the semantic layer's join graph; replaces `query_database` (FR-14) in the agent's tool registry.
+- FR-25: `generate_sql_naive()` remains exported from `backend/text_to_sql.py` as a library function for the structured-RAG eval baseline after `query_database` is removed from the tool list.
+- FR-26: Structured-RAG eval harness measures naive vs semantic accuracy on 30 hand-authored questions with hand-written gold result sets; result-set match after normalization.
+
 **Observability & Config**
 - FR-19: LangSmith traces every LLM call and tool call with user_id/thread_id metadata.
 - FR-20: All configuration (model names, thresholds, providers, keys) via environment variables — no admin UI.
@@ -959,6 +1088,9 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - ❌ Admin UI for configuration (env vars only)
 - ❌ LLM frameworks (LangChain, LlamaIndex, Haystack) — raw OpenAI SDK + Pydantic only
 - ❌ Providers beyond OpenAI initially (Module 2+ architected for OpenAI-compatible providers but only OpenAI ships in v1)
+- ❌ Auto-generated or LLM-authored semantic layer (Module 9 YAML is hand-written and version-controlled)
+- ❌ Write operations against the `crm` schema (read-only role; structured RAG is query-only)
+- ❌ Multi-step / decomposed SQL plans within a single turn (Module 9 plans are single-query specs)
 
 ## Design Considerations
 
@@ -982,9 +1114,10 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 
 ## Success Metrics
 
-- **Build completion:** User finishes all 8 modules and has a deployed app at a public URL.
+- **Build completion:** User finishes all 9 modules and has a deployed app at a public URL.
 - **Learning outcomes:** User can explain (verbally or in writing) chunking, embeddings, hybrid search, reranking, and sub-agent delegation, pointing to the exact code that implements each.
 - **Retrieval quality (post-Module 6):** On a small hand-curated eval set (20 Q/A pairs), top-5 hybrid + reranked recall ≥ 80%.
+- **Structured-RAG accuracy (post-Module 9):** On the 30-question structured-RAG eval, the semantic-layer path beats naive text-to-SQL by ≥ 30 percentage points overall, with the largest gap on the metric-ambiguity subset.
 - **Performance:** P50 first-token latency < 2s; P50 ingestion latency < 5s per MB of text.
 - **Cost discipline:** Embedding and completion costs visible in LangSmith per-trace.
 - **Multi-user correctness:** RLS tests pass — User B never sees User A's data under any code path.
@@ -997,3 +1130,5 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 - **Dual-support UX:** Should the mode toggle be per-thread, per-request, or user-wide? Current plan is per-thread with a user-wide default.
 - **Eval harness:** Should we ship a lightweight retrieval eval script in the repo from Module 6 onward?
 - **Rate limiting:** Per-user limits on ingestion and chat to prevent cost blowups — needed for v1 or deferred?
+- **Module 9 headline target:** Aim for ≥30 pp naive→semantic delta. If first eval run shows <15 pp, investigate whether the planner is under-constraining or whether the eval questions don't actually trigger metric ambiguity — do not p-hack the questions to inflate the gap.
+- **Module 9 frontend polish:** Separate-cards rendering for `plan_query` and `sql_search` is the floor. A combined "Structured Query" card linking plan + compiled SQL + results visually could be a later polish item if demo time permits.

@@ -1,0 +1,249 @@
+# US-031: hand-authored reference SQL for each eval question.
+#
+# Each entry's `reference_sql` is independently authored from both the
+# naive text-to-SQL path and the semantic-layer compiler. It encodes the
+# *intended* answer to the question — the SQL an expert would write
+# knowing the metric definitions. The runner executes this query against
+# the seeded `crm` schema to produce the gold value, then scores both
+# naive and semantic against it via normalized result-set match.
+#
+# Why hand-written reference SQL instead of hard-coded gold numbers?
+# Two reasons. First, the seed data is deterministic but the actual
+# numeric values change if the seed RNG, distributions, or schema ever
+# move — coupling gold to specific floats would require hand-editing 30
+# numbers on every minor seed tweak. Second, "gold" is fundamentally a
+# claim about correctness; the most legible expression of that claim is
+# SQL that compiles to the same result the question is asking for.
+#
+# Convention: every reference query orders rows deterministically and
+# qualifies all columns with `crm.table.column`. Scalar queries return
+# one row with one column; the runner extracts the scalar.
+
+- id: q01
+  reference_sql: |
+    SELECT SUM(crm.orders.total) AS revenue
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+
+- id: q02
+  reference_sql: |
+    SELECT (
+      (SELECT COALESCE(SUM(crm.orders.total), 0) FROM crm.orders WHERE crm.orders.status <> 'cancelled')
+      - (SELECT COALESCE(SUM(crm.refunds.amount), 0) FROM crm.refunds)
+    ) AS net_revenue
+
+- id: q03
+  reference_sql: |
+    SELECT SUM(crm.orders.total) AS gross_revenue
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+
+- id: q04
+  reference_sql: |
+    SELECT (
+      (SELECT COALESCE(SUM(crm.orders.total), 0) FROM crm.orders WHERE crm.orders.status <> 'cancelled')
+      - (SELECT COALESCE(SUM(crm.refunds.amount), 0) FROM crm.refunds)
+    ) AS revenue_after_refunds
+
+- id: q05
+  reference_sql: |
+    SELECT SUM(crm.orders.subtotal) AS subtotal_revenue
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+
+- id: q06
+  reference_sql: |
+    SELECT SUM(crm.orders.subtotal) AS merchandise_revenue
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+
+- id: q07
+  reference_sql: |
+    SELECT AVG(crm.orders.total) AS aov
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+
+- id: q08
+  reference_sql: |
+    SELECT COUNT(*) AS order_count
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+
+- id: q09
+  reference_sql: |
+    SELECT COUNT(*) AS transactions
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+
+- id: q10
+  reference_sql: |
+    SELECT
+        (SUM(crm.order_items.line_total) - SUM(crm.order_items.quantity * crm.products.cost))
+        / NULLIF(SUM(crm.order_items.line_total), 0) AS gross_margin
+      FROM crm.order_items
+      JOIN crm.products ON crm.order_items.product_id = crm.products.id
+
+- id: q11
+  reference_sql: |
+    SELECT COUNT(*) AS repeat_customers
+      FROM (
+        SELECT crm.orders.customer_id
+          FROM crm.orders
+         WHERE crm.orders.status <> 'cancelled'
+         GROUP BY crm.orders.customer_id
+        HAVING COUNT(*) > 1
+      ) sub
+
+- id: q12
+  reference_sql: |
+    SELECT SUM(crm.orders.total) AS billed
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+
+- id: q13
+  reference_sql: |
+    SELECT (
+      (SELECT COALESCE(SUM(crm.orders.total), 0) FROM crm.orders WHERE crm.orders.status <> 'cancelled')
+      - (SELECT COALESCE(SUM(crm.refunds.amount), 0) FROM crm.refunds)
+    ) AS take_home_revenue
+
+- id: q14
+  reference_sql: |
+    SELECT COUNT(*) AS returning_customers
+      FROM (
+        SELECT crm.orders.customer_id
+          FROM crm.orders
+         WHERE crm.orders.status <> 'cancelled'
+         GROUP BY crm.orders.customer_id
+        HAVING COUNT(*) > 1
+      ) sub
+
+- id: q15
+  reference_sql: |
+    SELECT SUM(crm.orders.total) AS sales
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+
+- id: q16
+  reference_sql: |
+    SELECT crm.customers.country AS country, SUM(crm.orders.total) AS gross_revenue
+      FROM crm.customers
+      JOIN crm.orders ON crm.orders.customer_id = crm.customers.id
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY crm.customers.country
+     ORDER BY crm.customers.country
+
+- id: q17
+  reference_sql: |
+    SELECT crm.orders.status AS status, COUNT(*) AS order_count
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY crm.orders.status
+     ORDER BY crm.orders.status
+
+- id: q18
+  reference_sql: |
+    SELECT crm.customers.segment AS segment, SUM(crm.orders.total) AS gross_revenue
+      FROM crm.customers
+      JOIN crm.orders ON crm.orders.customer_id = crm.customers.id
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY crm.customers.segment
+     ORDER BY crm.customers.segment
+
+- id: q19
+  reference_sql: |
+    SELECT crm.customers.country AS country, AVG(crm.orders.total) AS aov
+      FROM crm.customers
+      JOIN crm.orders ON crm.orders.customer_id = crm.customers.id
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY crm.customers.country
+     ORDER BY crm.customers.country
+
+- id: q20
+  reference_sql: |
+    SELECT crm.products.category AS category,
+           (SUM(crm.order_items.line_total) - SUM(crm.order_items.quantity * crm.products.cost))
+             / NULLIF(SUM(crm.order_items.line_total), 0) AS gross_margin
+      FROM crm.order_items
+      JOIN crm.products ON crm.order_items.product_id = crm.products.id
+     GROUP BY crm.products.category
+     ORDER BY crm.products.category
+
+- id: q21
+  reference_sql: |
+    SELECT crm.customers.country AS country, SUM(crm.orders.subtotal) AS subtotal_revenue
+      FROM crm.customers
+      JOIN crm.orders ON crm.orders.customer_id = crm.customers.id
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY crm.customers.country
+     ORDER BY crm.customers.country
+
+- id: q22
+  reference_sql: |
+    SELECT crm.customers.country AS country, COUNT(*) AS order_count
+      FROM crm.customers
+      JOIN crm.orders ON crm.orders.customer_id = crm.customers.id
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY crm.customers.country
+     ORDER BY crm.customers.country
+
+- id: q23
+  reference_sql: |
+    SELECT crm.orders.status AS status,
+           SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled') AS gross_revenue
+      FROM crm.orders
+     GROUP BY crm.orders.status
+     ORDER BY crm.orders.status
+
+- id: q24
+  reference_sql: |
+    SELECT crm.customers.country AS country, crm.customers.segment AS segment, COUNT(*) AS order_count
+      FROM crm.customers
+      JOIN crm.orders ON crm.orders.customer_id = crm.customers.id
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY crm.customers.country, crm.customers.segment
+     ORDER BY crm.customers.country, crm.customers.segment
+
+- id: q25
+  reference_sql: |
+    SELECT date_trunc('month', crm.orders.created_at) AS period, SUM(crm.orders.total) AS gross_revenue
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY date_trunc('month', crm.orders.created_at)
+     ORDER BY date_trunc('month', crm.orders.created_at)
+
+- id: q26
+  reference_sql: |
+    SELECT date_trunc('quarter', crm.orders.created_at) AS period, SUM(crm.orders.total) AS gross_revenue
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY date_trunc('quarter', crm.orders.created_at)
+     ORDER BY date_trunc('quarter', crm.orders.created_at)
+
+- id: q27
+  reference_sql: |
+    SELECT COUNT(*) AS order_count
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+       AND crm.orders.created_at >= '2026-01-01'
+       AND crm.orders.created_at <  '2026-04-01'
+
+- id: q28
+  reference_sql: |
+    SELECT COUNT(*) AS paid_orders
+      FROM crm.orders
+     WHERE crm.orders.status = 'paid'
+
+- id: q29
+  reference_sql: |
+    SELECT date_trunc('year', crm.orders.created_at) AS period, COUNT(*) AS order_count
+      FROM crm.orders
+     WHERE crm.orders.status <> 'cancelled'
+     GROUP BY date_trunc('year', crm.orders.created_at)
+     ORDER BY date_trunc('year', crm.orders.created_at)
+
+- id: q30
+  reference_sql: |
+    SELECT COUNT(*) AS shipped_orders
+      FROM crm.orders
+     WHERE crm.orders.status = 'shipped'
