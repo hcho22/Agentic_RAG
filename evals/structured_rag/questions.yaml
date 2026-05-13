@@ -1,0 +1,109 @@
+# US-031: 30 hand-authored questions for the structured-RAG eval.
+#
+# Distribution per the PRD:
+#   - 15 metric-ambiguity     (q01-q15) — naive text-to-SQL misfires on the
+#                              metric definition; semantic resolves via the
+#                              named metric in the YAML.
+#   - 9  join/dimension       (q16-q24) — requires joining customers/orders/
+#                              order_items/products through the semantic
+#                              layer's join graph.
+#   - 6  time-grain/filter    (q25-q30) — date_trunc bucketing or BETWEEN /
+#                              status filters.
+#
+# The questions are intentionally varied in surface form so the planner's
+# synonym handling is exercised: "revenue", "sales", "billed amount" all
+# point at gross_revenue; "net of refunds", "take-home", "earnings" point at
+# net_revenue, etc.
+
+- id: q01
+  category: metric
+  question: "What is our total revenue?"
+- id: q02
+  category: metric
+  question: "What is our net revenue?"
+- id: q03
+  category: metric
+  question: "What is our gross revenue?"
+- id: q04
+  category: metric
+  question: "What is our revenue after refunds?"
+- id: q05
+  category: metric
+  question: "What is our subtotal revenue, before tax and shipping?"
+- id: q06
+  category: metric
+  question: "What is our merchandise revenue?"
+- id: q07
+  category: metric
+  question: "What is our average order value?"
+- id: q08
+  category: metric
+  question: "How many orders have we processed?"
+- id: q09
+  category: metric
+  question: "How many transactions do we have?"
+- id: q10
+  category: metric
+  question: "What is our gross margin?"
+- id: q11
+  category: metric
+  question: "How many repeat customers do we have?"
+- id: q12
+  category: metric
+  question: "What is the total billed amount across non-cancelled orders?"
+- id: q13
+  category: metric
+  question: "What is our take-home revenue?"
+- id: q14
+  category: metric
+  question: "How many returning customers placed more than one order?"
+- id: q15
+  category: metric
+  question: "What are our total sales?"
+
+- id: q16
+  category: join
+  question: "What is our gross revenue by country?"
+- id: q17
+  category: join
+  question: "How many orders did we have by status?"
+- id: q18
+  category: join
+  question: "What is our gross revenue by customer segment?"
+- id: q19
+  category: join
+  question: "What is the average order value by country?"
+- id: q20
+  category: join
+  question: "What is our gross margin by product category?"
+- id: q21
+  category: join
+  question: "What is our subtotal revenue by country?"
+- id: q22
+  category: join
+  question: "What is the order count by country?"
+- id: q23
+  category: join
+  question: "What is our gross revenue by order status?"
+- id: q24
+  category: join
+  question: "What is the order count by country and segment?"
+
+- id: q25
+  category: time
+  question: "What is our gross revenue by month?"
+- id: q26
+  category: time
+  question: "What is our gross revenue by quarter?"
+- id: q27
+  category: time
+  question: "How many orders did we have between January and March 2026?"
+- id: q28
+  category: time
+  question: "How many paid orders do we have?"
+- id: q29
+  category: time
+  question: "What is the order count by year?"
+- id: q30
+  category: time
+  question: "What is the order count for shipped orders only?"

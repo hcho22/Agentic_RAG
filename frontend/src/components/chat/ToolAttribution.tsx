@@ -15,11 +15,16 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import type {
+  PlanQueryArgs,
+  PlanQueryResultPayload,
+  PlanSpec,
   QueryDatabaseResultPayload,
   SearchDocumentsResult,
   SearchDocumentsResultPayload,
   SpawnDocumentAgentArgs,
   SpawnDocumentAgentResultPayload,
+  SqlSearchArgs,
+  SqlSearchResultPayload,
   SubAgentActivityEntry,
   ToolInvocation,
   WebSearchHit,
@@ -33,6 +38,12 @@ type Props = {
 const TOOL_LABELS: Record<string, { icon: string; label: string }> = {
   search_documents: { icon: '📄', label: 'Docs' },
   query_database: { icon: '🗄️', label: 'SQL' },
+  // US-030: plan_query (🧭 Plan) precedes sql_search (🗄️ SQL) in the
+  // trace; we reuse the SQL icon for both Module 7's query_database and
+  // Module 9's sql_search since the underlying card renders the same shape
+  // (SQL string + result table).
+  plan_query: { icon: '🧭', label: 'Plan' },
+  sql_search: { icon: '🗄️', label: 'SQL' },
   web_search: { icon: '🌐', label: 'Web' },
   spawn_document_agent: { icon: '🤖', label: 'Sub-agent' },
 }
@@ -101,6 +112,18 @@ function invocationCount(inv: ToolInvocation): number | null {
   if (inv.kind === 'query_database') {
     return inv.result?.row_count ?? inv.result?.rows?.length ?? null
   }
+  if (inv.kind === 'plan_query') {
+    // Show the metric count for matched plans, undefined otherwise.
+    // no_match plans surface as the badge without a subscript.
+    const r = inv.result
+    if (r && 'status' in r && r.status === 'matched') {
+      return r.plan?.metrics?.length ?? null
+    }
+    return null
+  }
+  if (inv.kind === 'sql_search') {
+    return inv.result?.row_count ?? inv.result?.rows?.length ?? null
+  }
   if (inv.kind === 'web_search') {
     return inv.result?.results?.length ?? inv.result?.count ?? null
   }
@@ -119,6 +142,12 @@ function ToolDetails({ invocation }: { invocation: ToolInvocation }) {
   }
   if (invocation.kind === 'query_database') {
     return <QueryDatabaseDetails result={invocation.result} />
+  }
+  if (invocation.kind === 'plan_query') {
+    return <PlanQueryDetails args={invocation.args} result={invocation.result} />
+  }
+  if (invocation.kind === 'sql_search') {
+    return <SqlSearchDetails args={invocation.args} result={invocation.result} />
   }
   if (invocation.kind === 'web_search') {
     return <WebSearchDetails result={invocation.result} />
@@ -239,6 +268,139 @@ function QueryDatabaseDetails({
       )}
     </div>
   )
+}
+
+// US-030: plan_query details. Renders the structured plan (metrics /
+// dimensions / filters as chips, time grain badge) or the no_match reason
+// + suggested fallback. The compiled SQL appears in the adjacent sql_search
+// card; this panel is intentionally compact — its job is to show *what the
+// planner decided*, not run a query.
+function PlanQueryDetails({
+  args,
+  result,
+}: {
+  args: PlanQueryArgs
+  result: PlanQueryResultPayload | null
+}) {
+  if (!result || ('error' in result && result.error)) {
+    return <ErrorRow message={(result && 'error' in result && result.error) || 'No result captured.'} />
+  }
+
+  if ('status' in result && result.status === 'no_match') {
+    return (
+      <div className="space-y-1">
+        {args.question && (
+          <div className="text-neutral-400">
+            question: <code className="text-neutral-200">{args.question}</code>
+          </div>
+        )}
+        <div className="text-amber-300">no_match — {result.reason}</div>
+        <div className="text-neutral-500">
+          suggested_fallback: <code className="text-neutral-300">{result.suggested_fallback}</code>
+        </div>
+      </div>
+    )
+  }
+
+  if ('status' in result && result.status === 'matched') {
+    return <PlanSpecBlock question={args.question} plan={result.plan} />
+  }
+
+  return <ErrorRow message="Unrecognised plan_query result shape." />
+}
+
+function PlanSpecBlock({
+  question,
+  plan,
+}: {
+  question?: string
+  plan: PlanSpec
+}) {
+  const metrics = plan.metrics ?? []
+  const dimensions = plan.dimensions ?? []
+  const filters = plan.filters ?? []
+  return (
+    <div className="space-y-2">
+      {question && (
+        <div className="text-neutral-400">
+          question: <code className="text-neutral-200">{question}</code>
+        </div>
+      )}
+      <PlanChipRow label="metrics" tone="emerald" items={metrics} />
+      {dimensions.length > 0 && (
+        <PlanChipRow label="dimensions" tone="sky" items={dimensions} />
+      )}
+      {plan.time_grain && (
+        <div className="text-neutral-400">
+          time grain:{' '}
+          <code className="text-neutral-200">{plan.time_grain}</code>
+        </div>
+      )}
+      {filters.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[11px] uppercase tracking-wide text-neutral-500">filters</div>
+          <ul className="space-y-1">
+            {filters.map((f, i) => (
+              <li key={i} className="rounded border border-neutral-800 bg-neutral-950/60 px-2 py-1">
+                <code className="text-neutral-200">{f.dimension}</code>{' '}
+                <span className="text-neutral-500">{f.op}</span>{' '}
+                <code className="text-neutral-300">{formatFilterValue(f.value)}</code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PlanChipRow({
+  label,
+  tone,
+  items,
+}: {
+  label: string
+  tone: 'emerald' | 'sky'
+  items: string[]
+}) {
+  if (items.length === 0) return null
+  const toneCls =
+    tone === 'emerald'
+      ? 'border-emerald-700 bg-emerald-950/40 text-emerald-200'
+      : 'border-sky-700 bg-sky-950/40 text-sky-200'
+  return (
+    <div className="flex flex-wrap items-baseline gap-1.5">
+      <span className="text-[11px] uppercase tracking-wide text-neutral-500">{label}:</span>
+      {items.map((it) => (
+        <span
+          key={it}
+          className={cn('inline-flex rounded-full border px-2 py-0.5 text-[11px]', toneCls)}
+        >
+          {it}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function formatFilterValue(v: unknown): string {
+  if (v === null || v === undefined) return ''
+  if (Array.isArray(v)) return JSON.stringify(v)
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
+
+// US-030: sql_search uses the same result shape as query_database; reuse
+// the existing details panel. We accept `args` only to satisfy the union
+// types — the panel itself just renders the compiled SQL + rows.
+function SqlSearchDetails({
+  args: _args,
+  result,
+}: {
+  args: SqlSearchArgs
+  result: SqlSearchResultPayload | null
+}) {
+  return <QueryDatabaseDetails result={result} />
 }
 
 function WebSearchDetails({

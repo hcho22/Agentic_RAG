@@ -21,3 +21,7 @@ numpy<2
 # path uses PostgREST through Supabase for RLS-scoped reads; this is the only
 # place we open a raw connection (under a read-only role).
 asyncpg>=0.29
+# US-029: parse backend/semantic_layer.yaml on startup. PyYAML is the de
+# facto standard; we use safe_load to keep arbitrary !python/object tags
+# out of the configuration surface.
+pyyaml>=6.0

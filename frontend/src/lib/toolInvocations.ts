@@ -46,6 +46,44 @@ export type QueryDatabaseResultPayload = {
   error?: string
 }
 
+// US-030: plan_query + sql_search shapes. Mirrors the Pydantic models in
+// backend/planner.py and backend/sql_compiler.py field-for-field so any
+// backend rename surfaces as a TypeScript compile error.
+export type PlanFilter = {
+  dimension: string
+  op: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'between'
+  value: unknown
+}
+
+export type PlanSpec = {
+  metrics: string[]
+  dimensions?: string[]
+  filters?: PlanFilter[]
+  time_grain?: 'day' | 'week' | 'month' | 'quarter' | 'year' | null
+}
+
+export type PlanQueryArgs = {
+  question?: string
+}
+
+export type PlanQueryResultPayload =
+  | { status: 'matched'; plan: PlanSpec }
+  | {
+      status: 'no_match'
+      reason: string
+      suggested_fallback: 'file_search' | 'web_search' | 'none'
+    }
+  | { error: string }
+
+export type SqlSearchArgs = {
+  plan?: PlanSpec
+  row_limit?: number
+}
+
+// sql_search returns the same shape as query_database — the same SQL card
+// renders both, just under a different badge.
+export type SqlSearchResultPayload = QueryDatabaseResultPayload
+
 export type WebSearchArgs = {
   query?: string
   top_k?: number
@@ -104,6 +142,18 @@ export type ToolInvocation =
       toolCallId: string
       args: QueryDatabaseArgs
       result: QueryDatabaseResultPayload | null
+    }
+  | {
+      kind: 'plan_query'
+      toolCallId: string
+      args: PlanQueryArgs
+      result: PlanQueryResultPayload | null
+    }
+  | {
+      kind: 'sql_search'
+      toolCallId: string
+      args: SqlSearchArgs
+      result: SqlSearchResultPayload | null
     }
   | {
       kind: 'web_search'
@@ -167,6 +217,22 @@ function buildInvocation(
       toolCallId: call.id,
       args: (args ?? {}) as WebSearchArgs,
       result: (result ?? null) as WebSearchResultPayload | null,
+    }
+  }
+  if (name === 'plan_query') {
+    return {
+      kind: 'plan_query',
+      toolCallId: call.id,
+      args: (args ?? {}) as PlanQueryArgs,
+      result: (result ?? null) as PlanQueryResultPayload | null,
+    }
+  }
+  if (name === 'sql_search') {
+    return {
+      kind: 'sql_search',
+      toolCallId: call.id,
+      args: (args ?? {}) as SqlSearchArgs,
+      result: (result ?? null) as SqlSearchResultPayload | null,
     }
   }
   if (name === 'spawn_document_agent') {

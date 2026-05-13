@@ -1,0 +1,150 @@
+# US-029: Cube-style semantic layer for the structured-RAG path.
+#
+# Hand-authored, version-controlled. The loader in backend/semantic_layer.py
+# validates every column reference against the live `crm` schema on startup
+# so a typo here fails fast instead of producing wrong SQL at query time.
+#
+# Each metric carries an honest aggregate `sql_fragment`. The compiler in
+# US-030 decides how to splice the fragment into a final SELECT — single-
+# entity metrics inline; multi-entity metrics (e.g. net_revenue, which
+# references both orders and refunds) compile via per-metric subqueries so
+# joins don't fan out cardinality.
+
+version: 1
+
+entities:
+  customers:
+    table: crm.customers
+    primary_key: id
+    description: People (or businesses) who place orders.
+  products:
+    table: crm.products
+    primary_key: id
+    description: Catalog of items available for sale. Cost is the unit cost; list_price is the catalog price (orders snapshot their own unit_price at sale time).
+  orders:
+    table: crm.orders
+    primary_key: id
+    description: One row per checkout. `total` is the billed amount; refunds reduce net revenue but not `total`.
+  order_items:
+    table: crm.order_items
+    primary_key: id
+    description: Line items belonging to an order. `unit_price` is a snapshot at order time and may differ from `products.list_price`.
+  refunds:
+    table: crm.refunds
+    primary_key: id
+    description: One row per refund event. Multiple refunds against the same order are allowed.
+
+dimensions:
+  customer_country:
+    entity: customers
+    column: country
+    description: Two-letter country code of the customer.
+    synonyms: [country, customer country, region, geography, geo, market]
+  customer_segment:
+    entity: customers
+    column: segment
+    description: Sales segment — enterprise, smb, or consumer.
+    synonyms: [segment, customer segment, tier, customer tier]
+  product_category:
+    entity: products
+    column: category
+    description: Top-level product category.
+    synonyms: [category, product category, product type, product line]
+  order_status:
+    entity: orders
+    column: status
+    description: Lifecycle state of the order (paid, shipped, refunded, cancelled, pending).
+    synonyms: [status, order status, state, order state]
+  order_created_at:
+    entity: orders
+    column: created_at
+    kind: time
+    description: Timestamp when the order was created (cart submitted). Default time dimension for "when did this order happen?".
+    synonyms: [created at, order date, order created, ordered at]
+  order_paid_at:
+    entity: orders
+    column: paid_at
+    kind: time
+    description: Timestamp when payment cleared. Null for cancelled or pending orders.
+    synonyms: [paid at, payment date, paid date]
+  order_shipped_at:
+    entity: orders
+    column: shipped_at
+    kind: time
+    description: Timestamp when the order shipped. Null for unshipped orders.
+    synonyms: [shipped at, shipped date, fulfillment date]
+
+metrics:
+  gross_revenue:
+    description: Total billed amount across non-cancelled orders. Does NOT subtract refunds — use net_revenue when "revenue" should be after-refunds.
+    sql_fragment: "SUM(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled')"
+    grain: order
+    entities: [orders]
+    synonyms: [revenue, gross revenue, total revenue, billed revenue, sales, total sales]
+
+  net_revenue:
+    description: Gross revenue minus the sum of refund amounts. The canonical "what we actually earned" figure. Scalar — cannot be combined with dimensions.
+    sql_fragment: "(SELECT COALESCE(SUM(o.total), 0) FROM crm.orders o WHERE o.status <> 'cancelled') - (SELECT COALESCE(SUM(r.amount), 0) FROM crm.refunds r)"
+    grain: order
+    entities: [orders, refunds]
+    kind: scalar
+    synonyms: [net revenue, revenue net of refunds, net sales, earnings, take-home revenue]
+
+  subtotal_revenue:
+    description: Sum of pre-tax, pre-shipping, pre-discount order subtotals. Diverges from gross_revenue when discounts and shipping move.
+    sql_fragment: "SUM(crm.orders.subtotal) FILTER (WHERE crm.orders.status <> 'cancelled')"
+    grain: order
+    entities: [orders]
+    synonyms: [subtotal, subtotal revenue, pre-tax revenue, merchandise revenue]
+
+  order_count:
+    description: Count of non-cancelled orders.
+    sql_fragment: "COUNT(*) FILTER (WHERE crm.orders.status <> 'cancelled')"
+    grain: order
+    entities: [orders]
+    synonyms: [order count, number of orders, orders, transactions, transaction count]
+
+  aov:
+    description: Average order value — gross_revenue divided by order_count. Computed at query time so it composes with dimensions.
+    sql_fragment: "AVG(crm.orders.total) FILTER (WHERE crm.orders.status <> 'cancelled')"
+    grain: order
+    entities: [orders]
+    synonyms: [aov, average order value, average order, order average, mean order value]
+
+  gross_margin:
+    description: Margin on order line items — (line revenue minus unit cost) divided by line revenue. Excludes refunds; uses per-line snapshots so historical price/cost moves are preserved.
+    sql_fragment: "(SUM(crm.order_items.line_total) - SUM(crm.order_items.quantity * crm.products.cost)) / NULLIF(SUM(crm.order_items.line_total), 0)"
+    grain: order_item
+    entities: [order_items, products]
+    synonyms: [gross margin, margin, profit margin, gross margin rate, gross margin percentage]
+
+  active_customers_90d:
+    description: Distinct customers whose most recent order was within the last 90 days. Uses customers.last_order_at, which is maintained from the orders table.
+    sql_fragment: "COUNT(DISTINCT crm.customers.id) FILTER (WHERE crm.customers.last_order_at >= NOW() - INTERVAL '90 days')"
+    grain: customer
+    entities: [customers]
+    synonyms: [active customers, active customer count, monthly active, mau-90, customers active in last 90 days]
+
+  repeat_customers:
+    description: Distinct customers with more than one non-cancelled order. Scalar — cannot be combined with dimensions.
+    sql_fragment: "(SELECT COUNT(*) FROM (SELECT customer_id FROM crm.orders WHERE status <> 'cancelled' GROUP BY customer_id HAVING COUNT(*) > 1) sub)"
+    grain: customer
+    entities: [orders]
+    kind: scalar
+    synonyms: [repeat customers, returning customers, retained customers, customers with multiple orders]
+
+# `predicate` (not `on`) — PyYAML 1.1's safe_load coerces a bare `on:` key
+# to the boolean True. `predicate` is the SQL ON-clause expression.
+joins:
+  - from: orders
+    to: customers
+    predicate: "crm.orders.customer_id = crm.customers.id"
+  - from: order_items
+    to: orders
+    predicate: "crm.order_items.order_id = crm.orders.id"
+  - from: order_items
+    to: products
+    predicate: "crm.order_items.product_id = crm.products.id"
+  - from: refunds
+    to: orders
+    predicate: "crm.refunds.order_id = crm.orders.id"

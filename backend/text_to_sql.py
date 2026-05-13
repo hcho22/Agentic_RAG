@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 
 log = logging.getLogger("agentic_rag.backend.text_to_sql")
 
-DEFAULT_ALLOWED_SCHEMAS = ("analytics",)
+DEFAULT_ALLOWED_SCHEMAS = ("analytics", "crm")
 DEFAULT_QUERY_TIMEOUT_MS = 10_000
 DEFAULT_ROW_LIMIT = 100
 MAX_ROW_LIMIT = 1000
@@ -281,13 +281,22 @@ Return JSON in the form: {{"sql": "<sql>"}}.
 """
 
 
-async def _generate_sql(
+async def generate_sql_naive(
+    *,
     openai_client: AsyncOpenAI,
     question: str,
     schemas: tuple[str, ...],
     row_limit: int,
     schema_snapshot: str,
 ) -> str:
+    """Public, naive text-to-SQL generator. Once the agent tool registry
+    switched to plan_query + sql_search in US-030, this stayed available as
+    a library function so the US-031 eval can score "naive vs semantic"
+    on the same 30 questions without re-implementing the prompt.
+
+    Same behaviour as before — raises SqlSafetyError on a missing or
+    malformed JSON response. Validation + execution are the caller's
+    responsibility."""
     schema_block = (
         f"\n{schema_snapshot}\n"
         if schema_snapshot
@@ -336,12 +345,16 @@ async def _execute_select(
     sql: str,
     timeout_ms: int,
     row_limit: int,
+    params: list[Any] | None = None,
 ) -> tuple[list[str], list[dict[str, Any]], bool]:
     """Run `sql` as a single READ ONLY transaction with statement_timeout.
 
     Returns (column_names, rows_as_dicts, truncated). Connection-level
     cancellation timeout is `timeout_ms + 2s` so a runaway query doesn't hang
-    the request indefinitely if the server-side timeout misfires."""
+    the request indefinitely if the server-side timeout misfires. `params`
+    are bound positionally via asyncpg's `$1`, `$2`, ... — US-030's compiler
+    uses this to keep filter values out of the SQL text (and out of the
+    safety check's keyword scan)."""
     cancel_after = (timeout_ms / 1000.0) + 2.0
     conn = await asyncpg.connect(database_url, timeout=10.0)
     try:
@@ -349,7 +362,10 @@ async def _execute_select(
         # leak to the next caller if the connection is somehow reused.
         async with conn.transaction(readonly=True):
             await conn.execute(f"set local statement_timeout = {int(timeout_ms)}")
-            records = await conn.fetch(sql, timeout=cancel_after)
+            if params:
+                records = await conn.fetch(sql, *params, timeout=cancel_after)
+            else:
+                records = await conn.fetch(sql, timeout=cancel_after)
     finally:
         await conn.close()
 
@@ -392,7 +408,7 @@ async def query_database(
     timeout = timeout_ms if timeout_ms is not None else get_query_timeout_ms()
     snapshot = schema_snapshot if schema_snapshot is not None else await get_schema_snapshot(db_url, schemas)
 
-    sql = await _generate_sql(
+    sql = await generate_sql_naive(
         openai_client=openai_client,
         question=question,
         schemas=schemas,
