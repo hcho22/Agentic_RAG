@@ -1,0 +1,16 @@
+# US-035 PR CI: minimal install for the retrieval workflow.
+#
+# evals/retrieval/requirements.txt inherits from backend/requirements.txt,
+# which drags in torch / transformers / docling / nvidia-cudnn — many GB
+# of ML deps the runner never touches. That blew past the GitHub
+# ubuntu-latest runner's ~14 GB free space and broke the workflow.
+#
+# This file lists ONLY what runner.py + corpus_seed.py + diff_results.py
+# actually import on the retrieval-only path the PR workflow exercises
+# (no --include-generation, so no anthropic). Versions pinned to match
+# backend/requirements.txt so the runtime behaviour is identical.
+asyncpg>=0.29
+httpx==0.27.2
+openai>=1.70.0
+pyyaml>=6.0
+tiktoken==0.8.0
