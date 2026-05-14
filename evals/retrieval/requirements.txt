@@ -1,0 +1,12 @@
+# US-033 retrieval eval: reuses backend deps directly. Listed as its own
+# requirements file so US-035's CI workflow can `pip install -r
+# evals/retrieval/requirements.txt` as a real install and so eval-only
+# deps (e.g., the Anthropic judge below, a future visualisation library)
+# can accrue here without touching backend/requirements.txt.
+-r ../../backend/requirements.txt
+
+# US-036: the generation eval uses a cross-family LLM as judge to avoid
+# same-model bias. Generator is OpenAI's gpt-4o-mini (already in backend
+# deps); judge is Anthropic's Claude. Only loaded when the runner is
+# invoked with --include-generation.
+anthropic>=0.40.0
