@@ -88,17 +88,33 @@ The runner is deterministic for fixed input + fixed model version. In practice t
 
 ## 4. Example: detecting a regression
 
-_This section will be filled in once the CI workflow lands in US-035. The plan, labelled honestly as a staged demonstration rather than an organic catch:_
+To prove the CI workflow actually surfaces a meaningful retrieval regression — rather than just claim it does — a throwaway PR ([#14](https://github.com/hcho22/Agentic_RAG/pull/14), closed without merging) flipped `DEFAULT_CHUNK_SIZE` in `backend/chunking.py` from 500 to 100. Smaller chunks split answer spans across many chunks, dropping `recall@5` sharply. The workflow ran on PR head and on `main`, diffed the results, and posted [this comment](https://github.com/hcho22/Agentic_RAG/pull/14#issuecomment-4454219095):
 
-The intent is to open a throwaway PR that flips `CHUNK_SIZE_TOKENS` in `backend/chunking.py` from 500 to 100 (titled `test: reduce CHUNK_SIZE_TOKENS from 500 to 100 (do not merge)`), let the CI workflow run the retrieval eval against the changed chunking, and capture the comment it posts on the PR. Short chunks split answer spans across many chunks, dropping `recall@5` meaningfully — expected to be in the ~0.82 → ~0.55 region depending on which mode you look at. The PR is then closed without merging; the closed PR + the captured comment serve as the artifact embedded here.
+> ## Retrieval eval — PR vs `main`
+>
+> n = **50** questions × 3 modes (`vector, keyword, hybrid`) on a 73-chunk corpus. PR ran in 41.21s; `main` in 28.78s.
+>
+> ### Headline (each cell: PR value, Δ vs `main`)
+>
+> | Mode | recall@5 | MRR | nDCG@5 |
+> |---|---|---|---|
+> | vector | 0.350 (🔴 -0.510) | 0.194 (🔴 -0.578) | 0.198 (🔴 -0.581) |
+> | keyword | 0.040 (🔴 -0.070) | 0.040 (🔴 -0.080) | 0.040 (🔴 -0.072) |
+> | hybrid | 0.350 (🔴 -0.510) | 0.208 (🔴 -0.551) | 0.208 (🔴 -0.561) |
+>
+> ### Per-category recall@5
+>
+> | Mode | single_chunk | multi_hop | adversarial | paraphrase |
+> |---|---|---|---|---|
+> | vector | 0.600 (🔴 -0.300) | 0.167 (🔴 -0.767) | 0.200 (🔴 -0.400) | 0.200 (🔴 -0.800) |
+> | keyword | 0.100 (🔴 -0.150) | 0.000 (🔴 -0.033) | 0.000 (±0.000) | 0.000 (±0.000) |
+> | hybrid | 0.600 (🔴 -0.300) | 0.167 (🔴 -0.767) | 0.200 (🔴 -0.400) | 0.200 (🔴 -0.800) |
 
-The point of including this in the writeup isn't to brag about catching a problem — it's to make concrete what a regression *looks like* in the CI comment, so a reviewer evaluating the repo sees both the happy-path numbers (section 3) and the unhappy-path mechanic in one place.
+**What it tells us.** Vector and hybrid lost the most absolute recall (Δ -0.510 on headline `recall@5`); keyword barely moved because it was already near zero. The category split is the more telling cut: **multi-hop and paraphrase dropped the most** (Δ -0.767 and -0.800 on vector/hybrid). Both depend on a chunk being large enough to cover the answer span — paraphrase because the semantic match has to land on a chunk that actually contains the answer, multi-hop because two facts must co-occur in retrieved context. Shrinking chunks 5× breaks both. Single-chunk questions were affected least (Δ -0.300): they only need *one* chunk containing the answer, and 5× more chunks gives the retriever 5× more candidates to find one. Adversarial sat in the middle (Δ -0.400), consistent with adversarial questions targeting lexical-vs-semantic confusion rather than chunk-size sensitivity.
 
-Once US-035 lands, this section will contain:
+The earlier draft of this section predicted the drop would land in the `~0.82 → ~0.55` region; the actual drop was sharper (`0.860 → 0.350` on vector). Two notes on that. First, the prediction guessed *keyword* would lose the most because shorter chunks fragment phrasal matches; that's true relatively (keyword fell ~64% of its already-tiny recall) but absolutely meaningless — vector and hybrid lost five times more raw recall. Second, the sharpness of the drop suggests `CHUNK_SIZE_TOKENS=500` is closer to a cliff than a plateau on this corpus; a follow-up sweep at 250, 350, 750, 1000 would be more informative than rebaselining at the current default.
 
-- A link to the closed regression PR.
-- The auto-posted CI comment as a quoted markdown block.
-- A short paragraph on which mode lost the most recall (likely keyword, since shorter chunks fragment phrasal matches), and what that tells you about the relationship between chunk size and retrieval quality.
+The point of staging this rather than waiting for an organic regression is to keep the demonstration honest. The regression is real (CI flagged it sharply, in 4 minutes, end-to-end) but the cause is contrived. What's not contrived is the workflow's ability to catch and post it without a human intervening.
 
 ## 5. Limitations
 
