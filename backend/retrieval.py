@@ -55,7 +55,7 @@ DEFAULT_RRF_K = 60
 # degenerates to "whichever side ranked first".
 HYBRID_POOL_MULTIPLIER = 4
 
-RetrievalMode = Literal["hybrid", "vector", "keyword"]
+RetrievalMode = Literal["hybrid", "vector"]
 
 
 class DateRange(BaseModel):
@@ -173,15 +173,11 @@ def get_rrf_k() -> int:
 
 
 def get_retrieval_mode() -> RetrievalMode:
-    """`RETRIEVAL_MODE` env: `hybrid` (default) | `vector` | `keyword`.
-
-    `keyword` was added in US-033 so the retrieval eval can sweep all three
-    modes through the same env switch the production path uses.
-    """
+    """`RETRIEVAL_MODE` env: `hybrid` (default) | `vector`."""
     raw = (os.environ.get("RETRIEVAL_MODE") or "hybrid").strip().lower()
-    if raw not in ("hybrid", "vector", "keyword"):
+    if raw not in ("hybrid", "vector"):
         raise ValueError(
-            f"RETRIEVAL_MODE must be 'hybrid', 'vector', or 'keyword', got {raw!r}"
+            f"RETRIEVAL_MODE must be 'hybrid' or 'vector', got {raw!r}"
         )
     return raw  # type: ignore[return-value]
 
@@ -302,33 +298,6 @@ async def keyword_search(
     )
     r.raise_for_status()
     return [SearchDocumentsResult(**row) for row in r.json()]
-
-
-async def keyword_only_search(
-    openai_client: AsyncOpenAI,  # noqa: ARG001 — accepted for signature parity
-    http: httpx.AsyncClient,
-    supabase_url: str,
-    supabase_headers: dict[str, str],
-    query: str,
-    top_k: int = DEFAULT_TOP_K,
-    filters: MetadataFilters | None = None,
-) -> list[SearchDocumentsResult]:
-    """Keyword-only retrieval (US-033). Thin wrapper over `keyword_search`.
-
-    The wrapper exists so the dispatcher in `_retrieve_for_agent` (and the
-    US-033 eval runner) can route to all three modes through a uniform
-    function signature — `search_documents` / `keyword_only_search` /
-    `hybrid_search` all take the same arguments. `openai_client` is
-    accepted but ignored; keyword retrieval doesn't need embeddings.
-    """
-    return await keyword_search(
-        http=http,
-        supabase_url=supabase_url,
-        supabase_headers=supabase_headers,
-        query=query,
-        top_k=top_k,
-        filters=filters,
-    )
 
 
 def _rrf_fuse(

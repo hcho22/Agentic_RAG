@@ -54,7 +54,6 @@ from retrieval import (
     get_rrf_k,
     get_similarity_threshold,
     hybrid_search,
-    keyword_only_search,
     keyword_search,
     search_documents,
     search_documents_tool_schema,
@@ -658,16 +657,6 @@ async def _retrieve_for_agent(
 
     if mode == "hybrid":
         candidates = await hybrid_search(
-            openai_client=openai_client,
-            http=http,
-            supabase_url=SUPABASE_URL,
-            supabase_headers=_supabase_headers(user),
-            query=query,
-            top_k=pool_k,
-            filters=filters,  # type: ignore[arg-type]
-        )
-    elif mode == "keyword":
-        candidates = await keyword_only_search(
             openai_client=openai_client,
             http=http,
             supabase_url=SUPABASE_URL,

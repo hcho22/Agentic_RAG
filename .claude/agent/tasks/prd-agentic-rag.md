@@ -2,7 +2,7 @@
 
 ## Introduction
 
-An educational, production-oriented Retrieval-Augmented Generation (RAG) application built in 10 progressive modules. The system has two primary interfaces: a **Chat** view for threaded, retrieval-augmented conversations, and an **Ingestion** view for manual document upload and management.
+An educational, production-oriented Retrieval-Augmented Generation (RAG) application built in 9 progressive modules. The system has two primary interfaces: a **Chat** view for threaded, retrieval-augmented conversations, and an **Ingestion** view for manual document upload and management.
 
 The target audience is technically-minded builders who want to learn production RAG patterns (chunking, embeddings, hybrid search, reranking, agentic routing, sub-agents) by directing AI coding tools. They do not need to know Python or React—they need to understand RAG concepts and codebase structure deeply enough to direct AI to build and fix the system.
 
@@ -11,7 +11,7 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 ## Goals
 
 - Deliver a working, deployable, multi-user RAG application.
-- Progress through 10 discrete modules, each learnable in a focused session.
+- Progress through 9 discrete modules, each learnable in a focused session.
 - Teach RAG fundamentals by forcing the user to implement them (not import them from a framework).
 - Preserve architectural flexibility: support both OpenAI's managed Responses API and the standard Chat Completions API side-by-side (dual-support mode).
 - Ship with observability (LangSmith) from day one.
@@ -1031,210 +1031,6 @@ The system avoids LLM frameworks (LangChain, LlamaIndex) in favor of raw OpenAI 
 
 ---
 
-### Module 10 — Retrieval Evals
-
-Module 9 shipped a 30-question structured-RAG eval covering exactly one tool path (text-to-SQL). The other major tool path — text retrieval via `backend/retrieval.py` (`search_documents` / `keyword_search` / `hybrid_search`) — has zero quantitative quality measurement today. Module 10 builds the retrieval-evaluation subsystem so that retrieval quality is measured rather than asserted, future modules (Pinecone alternative vector store, permissions-aware indexing) can ship with honest comparison tables, and retrieval regressions are caught by CI on every PR. Out of scope for Module 10's first land: generation-quality metrics (faithfulness / helpfulness via LLM judge) ship as a deferred follow-up (US-036) once the retrieval foundation is proven.
-
-#### US-032: Deterministic chunk IDs + text corpus seed
-
-**Description:** As a developer, I need a stable, re-seedable text corpus with chunk identifiers that survive re-seeds, so that the golden YAML keys never silently break across CI runs or local re-seeds.
-
-**Acceptance Criteria:**
-
-- [x] New migration `supabase/migrations/<ts>_chunks_stable_id.sql` adds `stable_id text` column to `public.chunks` with a unique index. Purely additive — no PK change, no FK change.
-- [x] New `db_seed/corpus/` directory contains 5–10 markdown files in the CRM domain (e.g., `refund-policy.md`, `product-specs.md`, `customer-service-sop.md`, `shipping-faq.md`, `warranty-terms.md`).
-- [x] New `db_seed/corpus_seed.py` ingests each file by calling `backend.chunking.chunk_text` (unchanged), computes `stable_id = f"{filename_slug}:{chunk_index}"`, embeds via `backend.embeddings.embed_texts`, and inserts via service-role client (corpus belongs to a fixed test user).
-- [x] Seeder is re-runnable: identifies existing corpus rows via a `corpus_seed = true` flag on parent documents, truncates them before re-seed.
-- [x] Seeder is idempotent + deterministic: running it twice in a row produces byte-identical `(stable_id, content)` pairs in the `chunks` table.
-- [x] Test `db_seed/test_corpus_seed.py` verifies determinism: seed → snapshot → re-seed → diff → no changes.
-- [x] Typecheck/lint passes.
-
-**Validation Test:**
-
-- **Setup:** Clean local Supabase (`supabase db reset`). Apply all migrations through the new `stable_id` one. `OPENAI_API_KEY` available in env.
-- **Steps:**
-  1. Run `python -m db_seed.corpus_seed`.
-  2. Capture `select stable_id, md5(content) from chunks where stable_id is not null order by stable_id` into snapshot A.
-  3. Run `python -m db_seed.corpus_seed` again.
-  4. Capture the same query into snapshot B.
-  5. `diff` snapshot A and snapshot B.
-- **Expected Result:** Snapshots A and B are byte-identical. Each markdown file in `db_seed/corpus/` produces 1+ chunks with `stable_id` of shape `{filename-slug}:{N}`. The chunks `content` columns are non-empty markdown.
-- **Failure Indicator:** Diff is non-empty (non-determinism), or `stable_id` is NULL on seeded rows, or chunk counts differ between runs.
-
-**Implementation notes (US-032):**
-
-- **Migration** is `supabase/migrations/20260513130000_chunks_stable_id.sql`. Single `alter table … add column stable_id text;` plus a **partial** unique index `where stable_id is not null` so existing chunks (uploaded via the UI before this migration) remain valid with NULL stable_id and the unique-on-not-null constraint still rejects collisions for seeded rows. No PK change, no FK touch — anything that holds a chunk UUID keeps working.
-- **Corpus** lives at `db_seed/corpus/*.md`: 7 CRM-domain markdown files (`refund-policy`, `shipping-faq`, `warranty-terms`, `loyalty-program`, `customer-service-sop`, `returns-process`, `product-catalog`). Topics are deliberately interlocking so US-033 can author multi-hop questions across docs (e.g., "what's the warranty replacement process for a Gold-tier customer?" requires `warranty-terms` AND `loyalty-program`). Each doc currently produces 2 chunks at the default 500/50 tokenisation → 14 chunks total. The PRD's open-question aim of ~150 chunks remains pending: corpus expansion is intentionally deferred to US-033 authoring so question authors can grow the corpus only where the golden set demands more density. The strict US-032 acceptance criterion (1+ chunks per file) is met.
-- **Seeder** at `db_seed/corpus_seed.py`. Reuses `backend.chunking.chunk_text` and `backend.embeddings.embed_texts` unchanged so the seeder exercises the exact same code paths a production PR would change — if a future PR breaks chunking, the eval breaks. Determinism stack: file contents committed to repo + deterministic `chunk_text` + `stable_id = f"{slug}:{chunk_index}"` + `document.id = uuid5(NAMESPACE_URL, "agentic-rag/corpus/{slug}")` + `chunks.id = uuid5(NAMESPACE_URL, "agentic-rag/corpus/{slug}:{chunk_index}")`. Embeddings vary at the bit level across OpenAI calls but the validation snapshot only queries `(stable_id, md5(content))`, so embedding non-determinism does not affect the AC.
-- **Test-user bootstrap**: the corpus belongs to a fixed sentinel user `00000000-0000-0000-0000-000000000001` / `corpus-seed@local.test`. The seeder does `insert into auth.users (...) on conflict (id) do nothing` so the FK from `chunks.user_id → auth.users.id` resolves. Direct insert into `auth.users` is unusual but valid for service-role seeders against local/CI databases — corpus_seed is an eval fixture, never a production code path.
-- **Re-run / purge flow**: existing corpus rows are identified by `documents.metadata->>'corpus_seed' = 'true'` (stored as JSONB on the existing US-016 `metadata` column — no documents schema change needed). The seeder `delete from public.documents where user_id = $1 and metadata->>'corpus_seed' = 'true'` and chunks cascade via the existing FK before reinserting.
-- **Test** at `db_seed/test_corpus_seed.py` runs in two halves. The offline half always runs and asserts: `filename_slug` slugification rules, `stable_id` shape, `document_uuid` / `chunk_uuid` are deterministic and distinct, `load_corpus()` returns ≥5 files, and `chunk_text()` produces non-empty chunks for every corpus file. The DB-roundtrip half skips when `CORPUS_SEED_DATABASE_URL`/`DATABASE_URL` or `OPENAI_API_KEY` are unset, otherwise calls `seed()` twice and asserts `(stable_id, md5(content))` snapshots are byte-identical between runs. Run via `python -m db_seed.test_corpus_seed`.
-- **Verification done offline**: `py_compile` of both new modules; `python -m db_seed.test_corpus_seed` passes its offline checks (7 corpus files, all chunkable). The DB-roundtrip half requires a running Supabase + `OPENAI_API_KEY` — that's the user-side validation step matching the PRD's Step 1-5.
-
-#### US-033: Golden set + retrieval eval runner
-
-**Description:** As a developer, I want a 50-question golden set and a runner that scores retrieval quality across vector / keyword / hybrid modes, so that retrieval changes can be evaluated quantitatively against deterministic baselines.
-
-**Acceptance Criteria:**
-
-- [x] `evals/retrieval/retrieval_gold.yaml` contains 50 questions with this split: 20 single-chunk-factual, 15 multi-hop, 10 adversarial (keyword-trap), 5 paraphrase / out-of-vocabulary.
-- [x] Each question has fields: `id`, `category` (one of `single_chunk` | `multi_hop` | `adversarial` | `paraphrase`), `question`, `gold_stable_ids` (list of one or more strings), optional `notes`.
-- [x] Questions are authored LLM-drafted (Claude Opus stood in for the PRD's GPT-4o example — both are LLMs in a different family from the embedder, which is the actual bias-avoidance constraint) + human-edited. The 10 adversarial questions are additionally filtered through current retrieval so only ones where ≥1 mode fails are kept (user-side step once the runner produces real numbers; until then, the 10 adversarials are candidates ranked by lexical-vs-semantic divergence).
-- [x] `backend/retrieval.py:get_retrieval_mode()` extended to accept `"keyword"` in addition to `"hybrid"` and `"vector"`. A `keyword_only_search` thin wrapper around the existing `keyword_search()` is added so dispatch is uniform across the three modes.
-- [x] `evals/retrieval/runner.py` implements the eval. CLI shape modelled on `evals/structured_rag/runner.py`: `argparse`, flags for `--questions`, `--out`, optional `--mode` to run a single mode.
-- [x] For each question × mode ∈ {vector, keyword, hybrid}, the runner retrieves top-10 results from the real `backend/retrieval.py` functions against the seeded corpus.
-- [x] Per-question metrics computed: `recall@{1,3,5,10} = |gold_stable_ids ∩ top_k_stable_ids| / |gold_stable_ids|` (per-chunk, partial credit); `MRR` (reciprocal rank of first correct chunk in top-10, 0 if none); `nDCG@5` (binary relevance, log2 position discount).
-- [x] Aggregates computed: mean per mode, mean per (mode × category).
-- [x] Runner writes `evals/retrieval/results/<ISO-timestamp>.json` (full per-question detail + aggregates + `generated_at` + `elapsed_s`) and `evals/retrieval/summary.md` containing two markdown tables (headline mode × {recall@5, MRR, nDCG@5}; breakdown mode × category × {recall@5, MRR}) bracketed by `<!-- BEGIN EVAL_SUMMARY -->` / `<!-- END EVAL_SUMMARY -->` markers, matching the Module 9 convention in `docs/structured-rag.md`.
-- [x] Runner is deterministic: identical inputs produce byte-identical `results.json` modulo the `generated_at` timestamp.
-- [x] Typecheck/lint passes.
-
-**Validation Test:**
-
-- **Setup:** US-032 complete; corpus seeded. Run `python -m evals.retrieval.runner` once and capture output as baseline.
-- **Steps:**
-  1. Inspect `evals/retrieval/summary.md` — both tables render with 3 mode rows.
-  2. Inspect `evals/retrieval/results/<ts>.json` — 50 per-question entries, each with `recall_at_5` etc. per mode.
-  3. Run the runner again.
-  4. Diff the two JSON outputs ignoring the `generated_at` field.
-  5. Inspect headline table: confirm vector mode has highest recall on paraphrase category, keyword mode has highest recall on lexical questions (sanity check that modes differentiate).
-- **Expected Result:** Tables present and well-formed. JSON has 50 questions × 3 modes × all metrics populated. Two consecutive runs are byte-identical except for the timestamp. Headline numbers fall in plausible range (recall@5 between 0.4 and 0.95 per mode).
-- **Failure Indicator:** Non-deterministic results, missing per-category aggregates, the `keyword` mode raising errors (extension to `RETRIEVAL_MODE` incomplete), or all three modes scoring identical numbers (eval not differentiating, golden set too easy).
-
-**Implementation notes (US-033):**
-
-- **`backend/retrieval.py` changes** are minimal: `RetrievalMode` literal gains `"keyword"`; `get_retrieval_mode()` validation accepts the new value; a new `keyword_only_search` async function wraps the existing `keyword_search` with the `(openai_client, http, supabase_url, supabase_headers, query, top_k, filters)` signature shared by `search_documents` and `hybrid_search`. The `openai_client` parameter is accepted-and-ignored on the keyword path so the runner's dispatcher can route to all three modes through one uniform call shape. `backend/main.py:_retrieve_for_agent` gains an `elif mode == "keyword"` branch (existing `if mode == "hybrid"` / `else search_documents` becomes a three-arm dispatch).
-- **Golden set** at `evals/retrieval/retrieval_gold.yaml`. 50 entries with the required 20/15/10/5 category split, each with `id` / `category` / `question` / `gold_stable_ids` / optional `notes`. The `notes` field carries authoring rationale (e.g., the lexical-trap explanation for adversarial questions) and is preserved into `results.json` but not consumed by metrics. All 65 gold-chunk references resolve against the 14 corpus stable_ids produced by US-032 (verified offline). The 10 adversarial questions construct lexical-vs-semantic divergence by surfacing a keyword-heavy "wrong" chunk that competes with a semantically-correct chunk; the PRD-mandated adversarial filter step ("keep only questions where ≥1 mode fails") runs naturally the first time the user executes the runner — candidate questions where all three modes score 1.0 should be either swapped or kept as anchor cases.
-- **Runner** at `evals/retrieval/runner.py`. Re-uses the production `search_documents` / `keyword_only_search` / `hybrid_search` directly so any future PR that breaks retrieval breaks the eval. Single top-10 retrieval per (question × mode) feeds all four recall@k computations. The runner pre-fetches the `chunk_id → stable_id` map from Postgres once at startup (one `select id, stable_id from public.chunks where stable_id is not null`), then translates UUIDs returned by the RPC to stable_ids in-process — keeps the eval offline-from-the-RPC after the initial pull. CLI flags mirror US-031: `--questions` / `--out` / `--summary` / `--mode {vector|keyword|hybrid|all}`. Output JSON is written with `json.dumps(..., indent=2, sort_keys=True)` for deterministic byte-ordering; per-question entries retain insertion order from the YAML. `summary.md` carries two tables bracketed by `<!-- BEGIN EVAL_SUMMARY -->` / `<!-- END EVAL_SUMMARY -->` markers ready for US-034 to embed.
-- **Service-role auth**: the runner uses `SUPABASE_SERVICE_ROLE_KEY` to bypass RLS so it can read the corpus chunks (which live under the sentinel user `00000000-0000-0000-0000-000000000001` from US-032). In a clean CI bootstrap (US-035) only corpus chunks exist; in a mixed-user local dev DB the runner filters out any retrieved chunks whose UUIDs aren't in the stable_id map (counted as `unknown_chunks` per-mode-entry for debugging). The `unknown_chunks` count is the canary for "another user's upload bled into the eval" — should always be 0 in CI.
-- **Metric details**: `recall_at_k = |gold ∩ top_k_stable_ids| / |gold|` (per-chunk partial credit, the textbook recall@k); `mrr` iterates the full top-10 looking for the first gold hit; `ndcg_at_5` uses binary relevance with `log2(i+1)` position discount and an IDCG normalisation that caps the ideal-relevant count at 5. Verified offline: a known input (`gold = {a, b}`, `retrieved = [a, x, b, y, z, ...]`) produces recall@1=0.5, recall@3=1.0, MRR=1.0, nDCG@5≈0.920, plus edge cases (empty retrieval → 0, no hits → MRR 0).
-- **Determinism caveat**: OpenAI embeddings are not strictly bit-deterministic across calls. In practice the values agree to floating-point precision for fixed input + fixed model version, so recall/MRR/nDCG numbers are stable modulo embedding-API drift. The PRD's "byte-identical results.json" criterion holds in practice but is not a hard guarantee — US-035's CI design is comment-only delta tables so margin-of-noise at the embedding layer never blocks a PR.
-- **Verification done offline**: `py_compile` on all touched modules; `load_questions` confirms 50 entries in the required 20/15/10/5 split with unique ids and valid categories; all 65 gold stable_ids resolve against the 14 corpus chunks produced by US-032; metric functions pass hand-checked sanity inputs and edge cases. The live eval run (PRD validation Step 1–5) requires a running Supabase + seeded corpus + `OPENAI_API_KEY` — the user-side step.
-
-#### US-034: docs/evals.md writeup + staged regression demo
-
-**Description:** As a reviewer reading the repo, I want a single document that explains the eval methodology, presents the current numbers, demonstrates the eval catching a regression, and names its own limitations, so that I can assess production-RAG seriousness without running the code.
-
-**Acceptance Criteria:**
-
-- [x] `docs/evals.md` exists with four sections:
-  1. **Methodology** — describes corpus construction, golden-set authoring process (LLM-drafted + human-edited; adversarial filtering), what each metric measures, what each metric does *not* measure, and why generation/judge metrics are deferred to a follow-up story.
-  2. **Results** — embeds the two tables from `evals/retrieval/summary.md` via the `EVAL_SUMMARY` markers (no hand-typed numbers).
-  3. **Example: detecting a regression** — labelled honestly as a staged example. Links to a closed throwaway PR titled "test: reduce CHUNK_SIZE_TOKENS from 500 to 100 (do not merge)" and embeds (or screenshots) the CI comment showing recall@5 drop and recovery on revert.
-  4. **Limitations** — explicit list: small n (50 questions), LLM-drafted questions may inflate scores via author-embedder bias correlation, seeded corpus may not generalise outside the CRM domain, retrieval-only metrics do not capture generation quality (covered in US-036), no human-rater inter-annotator agreement.
-- [x] All numbers in the Results section come from `evals/retrieval/summary.md`. Updating the runner refreshes the doc via the markers.
-- [ ] The staged regression PR is opened against the repo, the CI comment is captured (as screenshot or quoted markdown), then the PR is closed (not merged). The closed PR is linked from `docs/evals.md`. _(Blocked on US-035; the doc's section 4 carries the labelled-as-staged structural placeholder until CI is live.)_
-- [x] Typecheck/lint passes (no code changes required for this story beyond docs).
-
-**Validation Test:**
-
-- **Setup:** US-033 complete; `summary.md` exists with real numbers. CI workflow from US-035 functional.
-- **Steps:**
-  1. Open `docs/evals.md` and read end to end.
-  2. Confirm all four sections present, each labelled clearly.
-  3. Confirm the Results section numbers match `evals/retrieval/summary.md` exactly.
-  4. Click the regression-PR link.
-  5. Confirm the PR is closed (not merged), the title matches the convention, and the CI delta comment is visible.
-- **Expected Result:** Document reads as a coherent piece of technical writing. No discrepancy between the numbers in the doc and the runner output. Regression PR exists, is closed, and demonstrates a real drop in recall@5 caught by the CI comment.
-- **Failure Indicator:** Numbers in the doc don't match `summary.md`; regression PR doesn't exist or is merged; limitations section is missing or generic.
-
-**Implementation notes (US-034):**
-
-- **Doc** at `docs/evals.md` with five top-level sections — an introductory "why this exists" framing followed by the four PRD-mandated sections (Methodology / Results / Example: detecting a regression / Limitations). Structurally complete; numerical content arrives via the `EVAL_SUMMARY` markers when the user runs `python -m evals.retrieval.runner`.
-- **Sentinel pattern, matching US-031**: `evals/retrieval/summary.md` is committed with a "Not yet run" sentinel between the `<!-- BEGIN EVAL_SUMMARY -->` / `<!-- END EVAL_SUMMARY -->` markers, and `docs/evals.md` section 3 carries the same marker pair with the same sentinel inside. The runner overwrites `summary.md`; the human paste-step (`summary.md` content → between the markers in `docs/evals.md`) is how the headline + per-category tables land in the doc. No script auto-syncs the two; this matches the manual-paste pattern Module 9 used and keeps the runner's responsibility scoped to producing the data, not editing the writeup prose around it.
-- **Regression-demo section (4) is structurally complete but artifact-blocked.** US-035 hasn't shipped, so there's no CI workflow to produce the delta-vs-`main` comment that the section embeds. The section explicitly labels itself as a *planned staged demonstration*, describes what will be filled in (closed PR link, quoted CI comment, short paragraph on which mode lost the most recall), and explains the rationale — the artifact's job is to make concrete what a regression *looks like* in the CI comment, not to brag about catching one. One of the four AC items is held open against US-035; the others are met.
-- **Limitations section (5) is the part hiring managers actually scan**, and it names the limits explicitly: small n (50), LLM-drafted question / embedder bias correlation, seeded-corpus generalisation risk, retrieval-only doesn't capture generation quality (covered in US-036), no human-rater inter-annotator agreement, no model-version pinning on `text-embedding-3-small`. Closes with the meta-point that the eval's value is the *delta* across PRs (which is robust to many of these biases) rather than the absolute score.
-- **Typecheck/lint**: no code changes in this story — pure docs — so passes by default. Verified offline: `summary.md` and `docs/evals.md` both render valid Markdown; their EVAL_SUMMARY markers match shape-for-shape.
-
-#### US-035: CI workflow with delta-vs-main comment
-
-**Description:** As a reviewer of a PR that touches retrieval, I want the CI to automatically post a delta-vs-`main` table on the PR so that I can see whether the change improved or regressed retrieval quality without running the eval myself.
-
-**Acceptance Criteria:**
-
-- [x] New `.github/workflows/retrieval-eval.yml` triggers on `pull_request` with `paths` filter covering: `backend/retrieval.py`, `backend/chunking.py`, `backend/embeddings.py`, `evals/retrieval/**`, `db_seed/corpus/**`, `db_seed/corpus_seed.py`, `backend/**/*prompt*` files, `supabase/migrations/**`, and the workflow file itself.
-- [x] Job steps, in order:
-  1. Checkout PR HEAD.
-  2. Install Supabase CLI; run `supabase start` to bring up the local docker stack (pgvector + PostgREST + auth + migrations applied automatically).
-  3. Install Python deps (`pip install -r backend/requirements.txt -r evals/retrieval/requirements.txt`).
-  4. Run `python -m db_seed.corpus_seed`.
-  5. Run `python -m evals.retrieval.runner --out /tmp/pr.json`.
-  6. Checkout `main` into a side directory, repeat steps 3–5 against the same DB instance, write to `/tmp/main.json`.
-  7. Run `python -m evals.retrieval.ci.diff_results /tmp/main.json /tmp/pr.json > /tmp/comment.md`.
-  8. Post `/tmp/comment.md` as a PR comment via `actions/github-script`. If a previous bot comment exists on the PR, update it in place instead of stacking new comments.
-- [x] Workflow is comment-only — never fails the build, regardless of delta sign.
-- [x] Reranker modes (Cohere / Voyage / LLM-as-reranker) are **not** run in PR CI.
-- [x] `OPENAI_API_KEY` configured as a repository secret. Reranker secrets are not configured here (only in the nightly workflow).
-- [ ] New `.github/workflows/retrieval-eval-nightly.yml` triggers on schedule (e.g., daily 02:00 UTC) and on `workflow_dispatch`. Runs the full sweep including reranker modes. Posts results to a GitHub Discussion or commits to `docs/evals-nightly.md`. _(Partial: workflow exists with correct triggers and publishes JSON + markdown snapshots to `docs/nightly/<YYYY-MM-DD>.{json,md}` — daily-stamped files in a directory rather than the single rolling file the PRD suggested. The reranker sweep is a documented TODO inside the workflow that requires a runner CLI extension `--rerankers` plus a rerank-after-hybrid path; the secrets, env-var plumbing, and publish step are all in place to absorb that extension cleanly.)_
-- [x] New `evals/retrieval/ci/diff_results.py` computes a delta table (PR − main) per (mode × metric) and emits a markdown table.
-- [x] Typecheck/lint passes.
-
-**Validation Test:**
-
-- **Setup:** US-032, US-033 merged to `main`. `OPENAI_API_KEY` configured as a repository secret.
-- **Steps:**
-  1. Open a no-op PR that touches `backend/retrieval.py` with a comment-only change.
-  2. Wait for the workflow to complete.
-  3. Inspect the auto-posted PR comment.
-  4. Open a second PR titled "test: reduce CHUNK_SIZE_TOKENS from 500 to 100 (do not merge)" that flips the default in `backend/chunking.py`.
-  5. Wait for the workflow to complete.
-  6. Inspect the comment.
-  7. Close the second PR without merging.
-- **Expected Result:** Step 3 comment shows deltas ≈ 0 across the board (no-op). Step 6 comment shows recall@5 dropping meaningfully (expected ~0.82 → ~0.55 region; exact numbers will vary). The build does not fail on either PR. Updating the PR re-runs the workflow and updates the same comment rather than stacking.
-- **Failure Indicator:** Workflow doesn't trigger on the path-matched PR; comment is missing; comment shows no deltas on the regression PR; or build fails (it should be comment-only).
-
-**Implementation notes (US-035):**
-
-- **PR workflow** at `.github/workflows/retrieval-eval.yml`. Two `actions/checkout@v4` calls land PR HEAD under `./pr` and `main` under `./main`. `supabase/setup-cli@v1` installs the CLI; `supabase start` (run from `./pr`) brings up the Supabase docker stack and applies the PR's migrations. `supabase status -o env` is filtered through `grep -E '^(API_URL|SERVICE_ROLE_KEY|DB_URL)=' | sed -E 's/^(.*)="(.*)"$/\1=\2/' >> $GITHUB_ENV` to strip the quotes the CLI wraps values in (otherwise `$GITHUB_ENV` ingests `KEY="value"` literally). Path filters cover the union the PRD requested plus `supabase/migrations/**` (a schema change can shift retrieval behaviour even if no Python file changes) and the workflow file itself (so workflow edits trigger validation runs).
-- **PR-vs-main staging on one DB**: PR's deps install once, then the runner is invoked twice with different `working-directory` (`./pr` then `./main`). The main checkout reuses the PR's Python env on the assumption backend deps don't churn between the two snapshots; if they do, the second runner invocation surfaces an `ImportError` and the post-comment step skips (comment-only behaviour means this is observable but non-blocking). The main re-seed step has a defensive `if [ -f db_seed/corpus_seed.py ]` check so the workflow still works against `main` snapshots that predate US-032 — in that case the PR's already-seeded corpus is reused, and the comparison degrades gracefully to "main code paths vs PR-seeded data" rather than failing outright.
-- **`evals/retrieval/ci/diff_results.py`** is a pure stdlib script (no extra deps) that loads both JSON files and emits a markdown comment headed by `<!-- retrieval-eval-bot-comment -->`. The marker is the lookup key for the post-or-update step. Headline table: `recall@5 / MRR / nDCG@5` per mode; per-category table: `recall@5` per (mode × category). Each cell renders `pr_value (Δ vs main)` with 🟢/🔴 arrows when the delta exceeds the runner's `round(..., 4)` floor (0.0005), or `±0.000` when inside it — keeps the noise floor visually distinct from real movement. Verified on synthetic inputs (one regressed mode, one improved mode, one flat): output renders correctly across both tables.
-- **PR-comment update-in-place** via `actions/github-script@v7`. Lists existing comments, finds one containing the marker, calls `updateComment` if found else `createComment`. Concurrency group `retrieval-eval-${pull_request.number}` with `cancel-in-progress: true` so a push that fires while a previous run is still going kills the previous run rather than stacking up.
-- **Comment-only**: no step explicitly fails the build based on delta sign. Infrastructure failures (Supabase fails to start, embedding API down) DO fail the build because they're genuine problems worth surfacing — the PRD's "never fails the build" means "never gates on numerical regression," not "swallow all errors." This interpretation is intentional and noted in the Limitations section of `docs/evals.md`.
-- **Required repo secrets**: `OPENAI_API_KEY` for the PR workflow. `COHERE_API_KEY` / `VOYAGE_API_KEY` are referenced in the nightly workflow's env block so they're available once the runner gains reranker support; they're harmless to leave unconfigured until then. Fork PRs don't get secrets and the workflow will fail at the seed step — documented as a known limitation; not a portfolio blocker.
-- **Nightly workflow** at `.github/workflows/retrieval-eval-nightly.yml`. `cron: '0 2 * * *'` daily at 02:00 UTC plus `workflow_dispatch`. Runs against `main` (no PR-vs-main diff — this is a tracking snapshot). Publishes `docs/nightly/<YYYY-MM-DD>.json` (full runner output) and `docs/nightly/<YYYY-MM-DD>.md` (`summary.md` snapshot) via a bot-committed push. Daily-stamped files in a directory rather than the PRD's suggested single rolling `docs/evals-nightly.md` — the directory layout gives a long-running historical record without unbounded file growth and makes git history readable per-day.
-- **Nightly reranker sweep** is the partially-implemented AC item. The workflow scaffold accepts `COHERE_API_KEY` and `VOYAGE_API_KEY`, runs the standard 3-mode eval today, and carries an inline TODO documenting what the runner extension needs: a `--rerankers cohere,voyage,llm` CSV flag plus a rerank-after-hybrid path (already implemented in `backend/main.py:_retrieve_for_agent` for production; can be lifted into the runner with ~30 lines that import `build_reranker` and `rerank_with_timing` from `backend.reranking`). Sequenced as a follow-up to keep US-035's main deliverable — the PR-comment delta workflow — scoped and shippable.
-- **`evals/retrieval/requirements.txt`** is `-r ../../backend/requirements.txt` so the file exists (matches the PRD's `pip install -r evals/retrieval/requirements.txt` step) but doesn't duplicate dep declarations. Eval-only deps land here if they ever accrue.
-- **Verification done offline**: `py_compile` of the diff script; YAML parse of both workflows; smoke test of the diff script with synthetic PR-vs-main JSONs (one regressed mode, one improved mode, several flat) renders the expected markdown comment with correct arrows and signs. The live workflow run requires GitHub + secrets — that's the user-side step in the PRD's validation, including the staged-regression demo PR for US-034.
-
-#### US-036: Generation eval + LLM judge
-
-**Description:** As a developer extending Module 10, I want to score generated answers for faithfulness and helpfulness via an LLM judge, so that future modules touching generation (prompts, RAG fusion answer composition) can be evaluated quantitatively too.
-
-**Acceptance Criteria:**
-
-- [x] Generation step: for each question × retrieval mode, generate an answer using the retrieved chunks as context.
-- [x] Judge step: a different model family from the generator scores the answer for faithfulness (1–5) and helpfulness (1–5) via structured output. Generation uses `gpt-4o-mini`; judge uses `claude-sonnet-4-6` (Anthropic tool-use guarantees structured output) — never same-model judging.
-- [x] New `evals/retrieval/generation_gold.yaml` carries reference answers for each of the 50 questions (the judge sees both the generated answer and the reference).
-- [x] Aggregates added to `results.json`: mean faithfulness, mean helpfulness, per-mode and per-category. Only added when at least one (question × mode) cell carries scores — retrieval-only runs are unaffected.
-- [x] `summary.md` and `docs/evals.md` gain a generation-quality table alongside the existing retrieval tables. The runner adds the table to `summary.md` automatically when generation was included; `docs/evals.md` picks it up through the existing `EVAL_SUMMARY` markers.
-- [x] Determinism: temperature 0 on both generator and judge. OpenAI `seed=42` is passed on the generator side; Anthropic's judge tool-call is bounded by temperature 0 (Anthropic doesn't accept a seed parameter as of this writing).
-- [x] Typecheck/lint passes.
-
-**Validation Test:**
-
-- **Setup:** US-032, US-033 complete and merged. Generation/judge API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) available.
-- **Steps:**
-  1. Run `python -m evals.retrieval.runner --include-generation`.
-  2. Inspect the new generation table in `summary.md`.
-  3. Run again; diff `results.json` ignoring `generated_at`.
-  4. Spot-check 5 questions: do the faithfulness/helpfulness scores qualitatively match the generated answers?
-- **Expected Result:** Two-run diff is byte-identical modulo timestamp. Scores are plausible (high-faithfulness answers are grounded in retrieved chunks; high-helpfulness answers address the question). Hybrid mode generally scores higher than vector-only on multi-hop questions.
-- **Failure Indicator:** Same-model judge bias visible (scores cluster suspiciously high), non-deterministic output, or scores uncorrelated with answer quality on the 5 spot-checks.
-
-**Implementation notes (US-036):**
-
-- **Opt-in via `--include-generation`.** The flag is off by default — retrieval-only runs (and the PR CI workflow from US-035) are unaffected, no Anthropic SDK calls happen, no `ANTHROPIC_API_KEY` is required. The flag is intentionally separate from `--mode` so cost-conscious nightlies can still skip the judge step on quick checks. When the flag is set, the runner additionally requires `ANTHROPIC_API_KEY` and instantiates `anthropic.AsyncAnthropic` lazily (the import is wrapped in a `_get_anthropic()` helper that surfaces a clear error if the package isn't installed).
-- **Generation prompt** at `evals/retrieval/runner.py:GENERATION_PROMPT_SYSTEM` / `GENERATION_PROMPT_USER_TEMPLATE`. System role instructs the model to answer only from the provided context and refuse explicitly if the context lacks the answer; user role concatenates `[stable_id]` headers above each chunk so the model can reference where it's drawing claims from. Context is the mode's top-5 retrieved chunks (`TOP_K_FOR_GENERATION`), concatenated — not the full top-10 — so the eval scores how well retrieval surfaced grounded context in the *first 5* results (the practical context budget for production answer generation).
-- **Generation determinism**: `temperature=0`, `seed=42`, `max_tokens=400` on the OpenAI Chat Completions call. OpenAI's seed parameter is best-effort — the same prompt + seed produces identical completions in the common case but isn't a strict guarantee. The eval treats generated-answer text as informative-but-not-byte-stable; the scored metrics (faithfulness, helpfulness) are what's compared run-over-run.
-- **Judge prompt** at `JUDGE_PROMPT_TEMPLATE`. The judge sees: the question, the hand-authored reference answer from `generation_gold.yaml`, the same retrieved context the generator saw, and the AI's generated answer. Anchored rubrics for both dimensions (1 = fabricated/irrelevant, 5 = grounded/correct) push the judge toward consistent calibration across questions. Structured output is enforced via Anthropic tool-use (`tool_choice={"type": "tool", "name": "submit_scores"}`) with an input schema that constrains both scores to integers in [1, 5] — Anthropic validates the tool input before returning, so the parsed `block.input` is always shape-correct.
-- **Generation gold** at `evals/retrieval/generation_gold.yaml`. Flat mapping `{question_id → reference_answer}` keyed by the same `qNN` IDs from `retrieval_gold.yaml`. 50 references authored against the actual chunk contents — each ~1–3 sentences, factually grounded, written so a competent agent could produce them from the corpus. The runner validates coverage at startup and logs a warning (not an error) when references are missing — the per-question entry then carries `generation_skipped: "no_reference_answer"` for that cell so downstream readers can see the gap.
-- **Aggregation extension**: `aggregate()` now tracks two counts per mode — `n_retrieval` (always equals the question count) and `n_generation` (only counts cells where both `faithfulness` and `helpfulness` are present). Retrieval-only and generation aggregates are computed against their respective denominators. The per-mode and per-(mode × category) means include `faithfulness` / `helpfulness` / `generation_n` keys only when generation actually ran, so retrieval-only runs produce a JSON byte-identical to the pre-US-036 schema.
-- **Summary table**: `render_summary` detects generation results by sniffing for `faithfulness` in the per-mode aggregate and emits a third table when present. The table is appended *after* the existing two retrieval tables, inside the same `EVAL_SUMMARY` markers, so `docs/evals.md` picks it up automatically through its existing embed — no doc-side changes needed beyond the methodology-section update describing how to opt into the path.
-- **Cost**: with the flag on, each run makes ~50 × 3 × 2 = 300 LLM calls (one generator + one judge per question per mode). Rough cost ~$0.50 at current `gpt-4o-mini` + `claude-sonnet-4-6` pricing — fine for nightly, not fine for every PR. The flag-off PR CI path remains zero-judge-cost.
-- **Verification done offline**: `py_compile` clean; `load_questions` + `load_generation_gold` parse 50 entries each with no missing or extra keys; `aggregate()` on synthetic per-question data with mixed `faithfulness` / `helpfulness` values produces correct per-mode and per-category means and surfaces `generation_n` correctly; `render_summary` produces the three-table layout when generation results are present, two-table when not. The live API run (generator + judge over the seeded corpus) requires `OPENAI_API_KEY` + `ANTHROPIC_API_KEY` + a running Supabase — that's the user-side validation step.
-
----
-
 ## Functional Requirements
 
 **Authentication & Authorization**
@@ -1274,15 +1070,6 @@ Module 9 shipped a 30-question structured-RAG eval covering exactly one tool pat
 - FR-25: `generate_sql_naive()` remains exported from `backend/text_to_sql.py` as a library function for the structured-RAG eval baseline after `query_database` is removed from the tool list.
 - FR-26: Structured-RAG eval harness measures naive vs semantic accuracy on 30 hand-authored questions with hand-written gold result sets; result-set match after normalization.
 
-**Retrieval Evals**
-- FR-27: `public.chunks` exposes a `stable_id text` column (additive; no PK change) populated deterministically as `f"{filename_slug}:{chunk_index}"` so golden-set references survive re-seeds and clean CI runs.
-- FR-28: `backend.retrieval.get_retrieval_mode()` accepts `"vector"`, `"keyword"`, and `"hybrid"`; `keyword` is reachable via the same env switch the other two modes use.
-- FR-29: Retrieval eval runner computes `recall@{1,3,5,10}` (per-chunk, partial credit), `MRR`, and `nDCG@5` (binary relevance) across vector / keyword / hybrid modes against a 50-question golden set with a fixed 20/15/10/5 category split (single_chunk / multi_hop / adversarial / paraphrase).
-- FR-30: Runner is deterministic — two consecutive runs produce byte-identical output modulo the `generated_at` timestamp — and emits both a full-detail `results/<ts>.json` and an `EVAL_SUMMARY`-bracketed `summary.md` fragment for `docs/evals.md` to embed.
-- FR-31: PR CI workflow (`retrieval-eval.yml`) runs vector / keyword / hybrid on every PR touching retrieval-relevant paths and posts a delta-vs-`main` comment; comment-only (never fails the build).
-- FR-32: Nightly workflow (`retrieval-eval-nightly.yml`) runs the full sweep including Cohere / Voyage / LLM-as-reranker modes on a schedule and on manual dispatch.
-- FR-33: Retrieval-eval runner accepts an opt-in `--include-generation` flag that, when set, generates an answer per (question × mode) from the mode's top-5 retrieved chunks via `gpt-4o-mini` and scores it with a cross-family judge (`claude-sonnet-4-6` via tool-use structured output) for faithfulness (1–5) and helpfulness (1–5). Aggregates and a third summary table are added automatically when generation runs; retrieval-only invocations produce identical JSON shape to pre-US-036 runs.
-
 **Observability & Config**
 - FR-19: LangSmith traces every LLM call and tool call with user_id/thread_id metadata.
 - FR-20: All configuration (model names, thresholds, providers, keys) via environment variables — no admin UI.
@@ -1304,11 +1091,6 @@ Module 9 shipped a 30-question structured-RAG eval covering exactly one tool pat
 - ❌ Auto-generated or LLM-authored semantic layer (Module 9 YAML is hand-written and version-controlled)
 - ❌ Write operations against the `crm` schema (read-only role; structured RAG is query-only)
 - ❌ Multi-step / decomposed SQL plans within a single turn (Module 9 plans are single-query specs)
-- ❌ Generation-quality metrics in PR CI. The faithfulness / helpfulness judge from US-036 runs only on opt-in `--include-generation` invocations (e.g., nightly or manual) — the PR comment workflow stays retrieval-only so per-PR cost stays at the embedding-API floor.
-- ❌ Full agent-loop eval in Module 10 — retrieval functions are measured in isolation; tool-routing eval is a separate concern
-- ❌ Graded relevance (primary vs supporting chunks) in the golden set — binary relevance only
-- ❌ PR-blocking on retrieval regressions — CI is comment-only to avoid false-positive flake from RRF ties and reranker variance
-- ❌ Retrieval eval against community-fork PRs — GitHub Actions does not pass secrets to fork PRs (limitation documented in the workflow)
 
 ## Design Considerations
 
@@ -1332,11 +1114,10 @@ Module 9 shipped a 30-question structured-RAG eval covering exactly one tool pat
 
 ## Success Metrics
 
-- **Build completion:** User finishes all 10 modules and has a deployed app at a public URL.
+- **Build completion:** User finishes all 9 modules and has a deployed app at a public URL.
 - **Learning outcomes:** User can explain (verbally or in writing) chunking, embeddings, hybrid search, reranking, and sub-agent delegation, pointing to the exact code that implements each.
 - **Retrieval quality (post-Module 6):** On a small hand-curated eval set (20 Q/A pairs), top-5 hybrid + reranked recall ≥ 80%.
 - **Structured-RAG accuracy (post-Module 9):** On the 30-question structured-RAG eval, the semantic-layer path beats naive text-to-SQL by ≥ 30 percentage points overall, with the largest gap on the metric-ambiguity subset.
-- **Retrieval eval coverage (post-Module 10):** A 50-question golden set is scored on vector / keyword / hybrid modes with deterministic results, the headline table is published in `docs/evals.md`, and the PR CI workflow posts delta-vs-`main` comments. A staged regression PR demonstrably moves recall@5 in the expected direction.
 - **Performance:** P50 first-token latency < 2s; P50 ingestion latency < 5s per MB of text.
 - **Cost discipline:** Embedding and completion costs visible in LangSmith per-trace.
 - **Multi-user correctness:** RLS tests pass — User B never sees User A's data under any code path.
@@ -1351,7 +1132,3 @@ Module 9 shipped a 30-question structured-RAG eval covering exactly one tool pat
 - **Rate limiting:** Per-user limits on ingestion and chat to prevent cost blowups — needed for v1 or deferred?
 - **Module 9 headline target:** Aim for ≥30 pp naive→semantic delta. If first eval run shows <15 pp, investigate whether the planner is under-constraining or whether the eval questions don't actually trigger metric ambiguity — do not p-hack the questions to inflate the gap.
 - **Module 9 frontend polish:** Separate-cards rendering for `plan_query` and `sql_search` is the floor. A combined "Structured Query" card linking plan + compiled SQL + results visually could be a later polish item if demo time permits.
-- **Module 10 corpus topics:** Final list of 5–10 CRM-domain markdown documents to be selected during US-032 authoring; aim for ~150 chunks total at default 500/50 tokenisation.
-- **Module 10 results retention:** Whether `evals/retrieval/results/*.json` is committed to the repo (reproducible historical comparisons, more diff churn) or gitignored except for a single `latest.json` checkpoint. Resolve during US-033.
-- **Module 10 nightly output venue:** GitHub Discussions (cleaner, no commit noise) vs. committing `docs/evals-nightly.md` (easier to grep historically). Decide during US-035.
-- **Module 10 PR bot comment update strategy:** Use `actions/github-script` with a hidden marker to update the existing bot comment in place across PR re-pushes, rather than stacking new comments.
