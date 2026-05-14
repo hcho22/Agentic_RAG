@@ -83,7 +83,7 @@ CATEGORY_ORDER = ("single_chunk", "multi_hop", "adversarial", "paraphrase")
 # (reading the question, reference, context, and answer to score two
 # dimensions).
 GENERATION_MODEL = "gpt-4o-mini"
-JUDGE_MODEL = "claude-sonnet-4-6"
+JUDGE_MODEL = "claude-haiku-4-5"
 GENERATION_SEED = 42
 GENERATION_MAX_TOKENS = 400
 JUDGE_MAX_TOKENS = 200
