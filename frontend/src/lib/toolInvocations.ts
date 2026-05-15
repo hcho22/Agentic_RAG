@@ -15,6 +15,14 @@ export type SearchDocumentsResult = {
   content: string
   similarity: number
   filename: string
+  // US-041: optional because the keyword-only retrieval RPC doesn't yet
+  // populate them. For chunks that came through match_chunks (vector or the
+  // vector half of hybrid), `granting_principal_display` is one of:
+  //   - "owner"         — viewer owns the chunk
+  //   - viewer's email  — direct user grant
+  //   - group name      — group grant
+  granting_principal_id?: string | null
+  granting_principal_display?: string | null
 }
 
 export type SearchDocumentsArgs = {

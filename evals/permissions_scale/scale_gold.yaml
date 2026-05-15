@@ -1,0 +1,95 @@
+# US-043: Scale-benchmark configuration.
+#
+# Single source of truth for the wikipedia_seed.py seeder AND the
+# permissions_scale runner. Keeping both sides keyed off this YAML means
+# the visible-chunks set the seeder writes into chunk_acl is *the same*
+# set the runner uses to compute selectivity — no drift between code and
+# data is possible.
+#
+# `seed_version` bumps when the deterministic-mapping function changes
+# (e.g. salt swap). It is recorded into the wikipedia_seed.py output
+# metadata so a stale ACL set is recognisable.
+
+seed_version: 1
+
+corpus:
+  # The HuggingFace dataset the seeder pulls from. `revision` pins the
+  # dataset to a specific commit so the chunk content is reproducible
+  # across runs. Defaulted to "main" rather than a SHA to keep the seeder
+  # working when HF rotates the canonical branch; bump to a SHA once the
+  # nightly's first run records one in its summary.
+  hf_repo_id: Salesforce/wikitext
+  hf_config: wikitext-103-raw-v1
+  hf_split: train
+  hf_revision: main
+  total_chunks: 10000
+  chunks_per_document: 1000
+
+# The three permission selectivity buckets used by the scale benchmark.
+# Each viewer sees `visible_chunks` chunks of the 10k Wikipedia corpus,
+# chosen deterministically as the chunks with the lowest blake2b hash of
+# `(seed_salt || viewer_id || chunk_index)`. Hash-and-take-lowest-K gives
+# *exactly* `visible_chunks` chunks, deterministic, and any viewer's set
+# is independent of the others.
+viewers:
+  - id: 00000000-0000-0000-0000-000000005000
+    name: viewer_50pct
+    visible_chunks: 5000
+    email: scale-50pct@local.test
+  - id: 00000000-0000-0000-0000-000000001000
+    name: viewer_10pct
+    visible_chunks: 1000
+    email: scale-10pct@local.test
+  - id: 00000000-0000-0000-0000-000000000100
+    name: viewer_1pct
+    visible_chunks: 100
+    email: scale-1pct@local.test
+
+# Salt prepended to the hash input. Changing this re-shuffles every
+# viewer's visible set; bump `seed_version` above when you do.
+seed_salt: "agentic-rag/permissions-scale/v1"
+
+# The runner pulls these question IDs from evals/retrieval/retrieval_gold.yaml.
+# US-043 calls for the existing 15 multi_hop questions (q21..q35). Their
+# semantic content is Acme-corpus-shaped, but they're being used here as
+# *synthetic vector queries* against the Wikipedia corpus — the eval
+# measures HNSW behaviour under selective filters, not retrieval quality.
+question_ids:
+  - q21
+  - q22
+  - q23
+  - q24
+  - q25
+  - q26
+  - q27
+  - q28
+  - q29
+  - q30
+  - q31
+  - q32
+  - q33
+  - q34
+  - q35
+
+# HNSW knob sweep. The runner calls match_chunks once per (question ×
+# viewer × ef_search), so this list directly drives the column count of
+# summary.md's table. The reference value used to compute "gold" is the
+# largest (ef_search_for_gold).
+ef_search_values: [40, 80, 200, 500]
+ef_search_for_gold: 500
+top_k: 5
+
+# Failure floor for the nightly workflow. recall@5 at (selectivity=1%,
+# ef_search=40) below this floor fails the workflow. Empirically — at
+# the v0 10k-chunk scale — this cell is 1.000 because the Postgres
+# planner uses an exact NN sort over the 100 visible chunks rather than
+# walking the HNSW index (see docs/permissions-aware-rag.md §5b). The
+# floor is set well below the observed value so the alarm fires on a
+# real regression, not on planner-choice noise. When (and if) we add a
+# >100k corpus benchmark and the planner actually walks HNSW, this floor
+# will need rethinking — at that point recall@5 < 1.0 is expected and
+# the floor should reflect the empirical curve, not the current 1.000.
+recall_floor:
+  ef_search: 40
+  viewer_name: viewer_1pct
+  min_recall_at_5: 0.10

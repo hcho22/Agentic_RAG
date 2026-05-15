@@ -22,6 +22,37 @@
 #                     each gold chunk that appears in top_k (partial credit)
 #   notes           — optional authoring rationale; not consumed by the runner
 
+# US-042: viewer parameterization. Each question is replayed under three
+# permission setups so the eval can demonstrate three independent claims:
+#   - SECURITY: pre-filter SQL never returns gold to a viewer with no_access
+#   - RECALL TRADE-OFF: post-filter (no SQL filter, drop in Python) collapses
+#     recall as permissions sparsen — pre-filter does not
+#   - NON-REGRESSION: under full_access the pre-filter behaves identically
+#     to the pre-Module-11 path (no recall loss for owners)
+#
+# The construction rule lives here, not in the runner — that way the YAML
+# is the audit trail for what each viewer setup actually saw. The random
+# choice for `partial_access` is seeded by `question.id` so two runs of the
+# eval produce the same visible-set per question.
+viewer_construction:
+  full_access:
+    # The corpus owner — sees every chunk via chunks.user_id ownership.
+    # Implemented in the runner by reusing the existing service-role path
+    # (same JWT used by the pre-Module-11 baseline).
+    type: owner
+  partial_access:
+    # Visible set = gold_stable_ids ∪ N random non-gold corpus chunks.
+    # Random.seed(question.id) -> sample N non-gold stable_ids without
+    # replacement. Materialised as chunk_acl rows for a fixed test viewer.
+    type: gold_plus_n_extra
+    n_extra_chunks: 5
+  no_access:
+    # Visible set = corpus chunks ∖ gold_stable_ids — the viewer holds
+    # ACL grants for every non-gold chunk and zero gold chunks. A correctly
+    # pre-filtering SQL surface should therefore *never* return a gold
+    # chunk for this viewer; the Security table proves that invariant.
+    type: all_non_gold
+
 questions:
   # ── single_chunk (20) ─────────────────────────────────────────────────
   - id: q01

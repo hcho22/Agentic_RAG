@@ -1,0 +1,65 @@
+# Agentic RAG — Context glossary
+
+Terms that have a precise meaning in this codebase. Resolved during design sessions; update inline as decisions are made.
+
+## Permissions / access control (Module 11, in design)
+
+- **Owner** — the user identified by `chunks.user_id` / `documents.user_id`. Set at ingestion time; never null. Always has access to the row regardless of [[chunk-acl]] state. Distinct from "viewer".
+- **Principal-set resolution** — happens inside `match_chunks` (SECURITY INVOKER) using `auth.uid()`. The function looks up `principal_membership` itself; callers do **not** pass `principal_ids`. The trust boundary is the database, not the backend. The query-time predicate is `c.user_id = auth.uid() OR EXISTS (chunk_acl row …)` — owner OR ACL.
+- **Viewer** — the authenticated user issuing a retrieval query. May or may not be the owner. A viewer has access to a chunk iff they are the owner OR a principal in their resolved set has an entry in [[chunk-acl]].
+- **chunk-acl** — the `chunk_acl(chunk_id, principal_type, principal_id)` table. **Sole source of truth** for non-owner access. Holds *additive* grants on top of ownership; an empty ACL list does **not** mean "no one can see this row" — it means "only the owner can." Existing chunks need no backfill when this table is introduced. There is no `document_acl` table — doc-level grants are an *operation* the backend performs by inserting one row per chunk in a transaction. Overrides are performed by deleting the inherited rows for the affected chunks and inserting the override rows in their place.
+- **Principal** — any entity that can appear on the right-hand side of a grant. In v0, principal types are `user` and `group`. A `user` is a row in `auth.users`. A `group` is a named bag of users with no other semantics. Roles (in the RBAC sense) are deferred — if needed later, they layer on as a separate permission-bundle table orthogonal to the ACL.
+- **Group membership** — `principal_membership(principal_id, member_user_id)`. Maps a group to its member users — flat only in v0. A group cannot contain another group. Forward-compatible: a future `member_type` column can add `'group'` and a recursive CTE without breaking existing rows. Production deployments typically get the *flattened* membership from an IdP (Okta SCIM, Google Directory); deferring nesting until an IdP integration exists is consistent with how real systems are built. Also single-namespace in v0 (no workspace/tenant scoping) — a known caveat for production credibility, not a v0 blocker.
+- **Doc-level share** — there is no persisted `document_acl` table. "Share this doc with finance" is a backend operation that opens a transaction and inserts one `chunk_acl` row per chunk in the document. Doc-level intent is *not stored* — it can be reconstructed by aggregating `chunk_acl` ("every chunk in doc X grants finance" → "doc X is shared with finance"). The UI's share dialog uses this aggregation to render current state.
+- **Re-chunking caveat** — because `chunk_acl` is the sole source of truth and grants are denormalized onto chunk UUIDs, any operation that re-chunks a document (different chunk size, chunker-version bump, content edit) loses all grants on the destroyed chunks. The operator (or a re-chunk handler we add later) must snapshot the doc-level intent from the old chunks before re-chunking and replay it onto the new ones. Document this as a known limitation in `docs/permissions-aware-rag.md`.
+
+## Permissions eval design (Module 11)
+
+- **Suite shape**: 50 golden questions × 3 viewer setups = 150 runs per eval mode. The three viewer setups are *Full-access*, *Partial-access*, and *No-access*; each is a deterministic function of the question's gold chunks (defined in the YAML, not hand-picked per question).
+- **Three independent claims, three tables**: Security (no-access viewer should retrieve zero gold under both modes), Recall trade-off (partial-access viewer is where post-filter recall collapses and pre-filter recovers — the headline number), Non-regression (full-access viewer matches the unfiltered Module-10 baseline within tolerance).
+- **Selectivity policy**: For the 14-chunk *correctness eval*, partial-access = "gold chunks + N random others" with N fixed. For the 10k-chunk *scale benchmark*, partial-access = "gold chunks + k% of filler" for k ∈ {50, 10, 1}.
+
+## Frontend share UX (Module 11)
+
+- **Scope (single dialog, ~80 lines of React using existing shadcn Dialog + Badge):**
+  - One input + "Grant" button. Accepts email (resolves to user) or group name (resolves to group). Free-text — **no autocomplete**.
+  - List of current grants, one row per principal, "x" button revokes.
+  - Owner row, always present, never removable. Display-only — the owner's access comes from `chunks.user_id`, not from a `chunk_acl` row.
+  - Disabled while the document's `status != 'ready'`.
+- **Retrieval-side reveal (the load-bearing UI):** existing tool-attribution panel (Module 7/8 `ToolAttribution`) gains a per-chunk badge showing which principal granted access: "via engineering" or "via direct grant." This is what makes the demo convincing — without it, the demo is "watch results change"; with it, the demo is "watch *why* the results changed."
+- **Three API endpoints**, all gated on `documents.user_id = auth.uid()` (only the doc owner can share):
+  - `POST   /api/documents/{id}/share` — body `{ principal_email_or_name }` → resolves, then inserts one `chunk_acl` row per chunk in a transaction. Idempotent.
+  - `DELETE /api/documents/{id}/share/{principal_id}` — deletes all `chunk_acl` rows for the doc × principal.
+  - `GET    /api/documents/{id}/shares` — aggregates `chunk_acl` over the doc's chunks to render the dialog.
+- **Two columns added to `chunk_acl`** beyond the (chunk_id, principal_type, principal_id) primary key: `granted_by uuid references auth.users(id)` and `created_at timestamptz default now()`. No UI for either in v0; they exist so a future audit-log view is possible without a backfill.
+- **Explicit non-goals in v0** (call out each in the writeup with a one-line reason): per-chunk override UI, autocomplete, bulk operations, "what would Sarah see" preview, role/permission distinction (binary grant only), audit-log UI.
+- **Edge cases:**
+  - Non-existent email → backend returns 4xx, frontend toasts "No user with that email. They have to sign up first." No auto-create.
+  - Same principal granted twice → idempotent no-op, no error.
+  - Owner cannot be revoked → revoke button absent on owner row.
+  - Doc still ingesting → share button disabled.
+
+## Share-UX implementation concerns (still open — pin before build)
+
+- **Email-to-user UUID resolution.** `auth.users` is not directly queryable by authenticated callers without service-role. Three options: (i) create `public.profiles(id, email)` mirrored from `auth.users` via a trigger and an RLS policy allowing authenticated reads, (ii) use the Supabase admin SDK from the backend with service-role, (iii) write a SECURITY DEFINER RPC `lookup_user_by_email(text) returns uuid` that returns NULL for non-existent emails. Recommend (i) — cleanest reuse, no new service-role surface in the backend. Pin during US authoring.
+- **`match_chunks` must return the granting principal per row** to populate the badge. The current `EXISTS (...)` predicate doesn't surface this. Need to restructure as a join with `DISTINCT ON (c.id)` picking a representative principal per chunk (precedence: direct user grant > group grant; tiebreak deterministic). Non-trivial SQL change — flag in the SQL diff in the writeup.
+- **Group-name registry.** v0 spec accepts "group name" as the share input, but there's no `principals` table named yet. Either (a) add a `principals(id uuid, name text unique, kind text default 'group')` table that the seed script populates, or (b) treat groups as having UUIDs only and the share dialog requires the group UUID (worse UX). Recommend (a). Pin during US authoring.
+- **Doc-owner authorization on the share API.** The three endpoints check `documents.user_id = auth.uid()` server-side (the share API has its own permission model — only owners can share). Worth a line in the writeup; this is the kind of thing reviewers look for.
+
+## Rollout (Module 11)
+
+- **No feature flag.** Module 11 is a correctness migration, not a tool-availability gate. Owner-OR-ACL falls back to owner-only when `chunk_acl` is empty, so existing single-user behavior is preserved without a flag. Convention in this repo is that flags gate *tool availability* (e.g., `crm_tool_enabled`), not data-path behavior.
+- **No backfill.** Empty `chunk_acl` rows for existing chunks + the additive predicate = owner-only behavior, identical to today.
+- **Three migrations**: `principal_membership`, `chunk_acl`, `match_chunks` replacement. The load-bearing perf index is `chunk_acl(principal_id, chunk_id)` (principal-leading so the EXISTS subquery is index-served).
+- **CI split**: per-PR runs the **correctness eval** (50 × 3 viewer setups = 150 runs). The **scale benchmark** (10k Wikipedia filler + `ef_search` sweep) runs **nightly + manual `workflow_dispatch`**, never per-PR. Nightly workflow must fail loudly (notification) on threshold breach, since nobody reads nightly artifacts unless something pages them.
+
+## HNSW + selective-filter mitigation (Module 11)
+
+- **Demonstrated lever**: `ef_search` tuning. `match_chunks` gains an optional `ef_search int` parameter; when set, the function calls `perform set_config('hnsw.ef_search', ef_search::text, true)` before the SELECT. The scale benchmark sweeps it across a fixed grid (e.g., 40 / 80 / 200 / 500) per selectivity bucket and writes the recall-vs-`ef_search` curve.
+- **Discussed only (not implemented in v0)**: partial indexes per principal group (only useful if some groups are hot — has real operational cost and doesn't generalize); IVFFlat (lower unfiltered ceiling, better filtered behavior — a trade-off, not a free upgrade). Justify both in the writeup; do not ship.
+
+## Evals (Module 10 + Module 11)
+
+- **Correctness eval** — the existing 50-question golden set against the 7-doc / 14-chunk corpus in `db_seed/corpus/`. Demonstrates *correctness* dynamics (pre-filter vs post-filter recall under sparse permissions). Stays in PR CI.
+- **Scale benchmark** — a separate synthetic harness on ~10k Wikipedia-derived chunks. Demonstrates *HNSW × selective-filter* dynamics (`ef_search` tuning, IVFFlat comparison). Runs out of PR CI — nightly or manual `workflow_dispatch`. The 10k size is chosen as ~10× pgvector's default `ef_search`=40; below that, the HNSW walk is essentially exhaustive and the phenomenon is invisible.
+- **Filler corpus** — the Wikipedia-derived chunks exist to populate the HNSW neighborhood, NOT to be answered about. Golden questions remain anchored to the original 7 docs. The writeup must be explicit that filler chunks are never gold.

@@ -7,6 +7,7 @@ type Props = {
   loading: boolean
   deletingIds: Set<string>
   onDelete: (doc: DocumentRow) => void
+  onShare: (doc: DocumentRow) => void
 }
 
 const STATUS_STYLES: Record<DocumentStatus, string> = {
@@ -16,7 +17,7 @@ const STATUS_STYLES: Record<DocumentStatus, string> = {
   error: 'bg-red-950/60 text-red-200',
 }
 
-export function DocumentsTable({ documents, loading, deletingIds, onDelete }: Props) {
+export function DocumentsTable({ documents, loading, deletingIds, onDelete, onShare }: Props) {
   if (loading) {
     return <p className="py-6 text-sm text-neutral-500">Loading documents…</p>
   }
@@ -60,14 +61,25 @@ export function DocumentsTable({ documents, loading, deletingIds, onDelete }: Pr
                 {new Date(doc.uploaded_at).toLocaleString()}
               </td>
               <td className="px-4 py-2 text-right">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onDelete(doc)}
-                  disabled={deletingIds.has(doc.id)}
-                >
-                  {deletingIds.has(doc.id) ? 'Deleting…' : 'Delete'}
-                </Button>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onShare(doc)}
+                    disabled={doc.status !== 'ready'}
+                    title={doc.status !== 'ready' ? 'Document must be ready to share' : undefined}
+                  >
+                    Share
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onDelete(doc)}
+                    disabled={deletingIds.has(doc.id)}
+                  >
+                    {deletingIds.has(doc.id) ? 'Deleting…' : 'Delete'}
+                  </Button>
+                </div>
               </td>
             </tr>
           ))}

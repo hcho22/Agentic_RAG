@@ -14,3 +14,8 @@ httpx==0.27.2
 openai>=1.70.0
 pyyaml>=6.0
 tiktoken==0.8.0
+# US-042: viewer-parameterized eval mints HS256 JWTs locally for the
+# partial / no_access viewers so their pre-filter calls hit match_chunks
+# under a real auth.uid() rather than service-role (which bypasses the
+# permission predicate entirely and would return zero rows post-US-037).
+pyjwt>=2.8

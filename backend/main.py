@@ -29,7 +29,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from langsmith import traceable
 from langsmith.run_helpers import get_current_run_tree
 from langsmith.wrappers import wrap_openai
@@ -40,6 +40,16 @@ from chunking import chunk_text, get_chunk_config
 from embeddings import embed_texts, get_embedding_model, to_pgvector
 from metadata import extract_document_metadata, get_metadata_model
 from parsing import UnsupportedFormatError, parse_document, warmup as warmup_parsing
+from permissions import (
+    AclGrant,
+    PrincipalType,
+    ShareSummary,
+    grant_doc_to_principal,
+    list_doc_shares,
+    replay_doc_acls,
+    revoke_doc_from_principal,
+    snapshot_doc_acls,
+)
 from reranking import (
     build_reranker,
     get_rerank_input_k,
@@ -120,6 +130,13 @@ if _missing:
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
+# US-039: optional. Used only for the doc-owner authorization check on the
+# share endpoints — it lets the backend distinguish "you're not the owner"
+# (403) from "doc doesn't exist" (404) without depending on whether the
+# caller has any RLS-visible row. If unset, the share endpoints fall back
+# to the user-JWT lookup, which collapses 403 → 404 for callers who can't
+# see the doc at all (still secure, just less precise).
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or None
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_VECTOR_STORE_ID = os.environ.get("OPENAI_VECTOR_STORE_ID") or None
@@ -270,7 +287,7 @@ app = FastAPI(title="Agentic RAG backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
-    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_methods=["POST", "GET", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -346,6 +363,20 @@ async def get_user(authorization: str | None = Header(default=None)) -> AuthedUs
         raise HTTPException(status_code=401, detail="invalid supabase session")
     data = r.json()
     return AuthedUser(id=data["id"], access_token=token)
+
+
+def _service_role_headers() -> dict[str, str] | None:
+    """Headers that bypass RLS — used only by the doc-owner authorization
+    check on the share endpoints (US-039). Returns None when no service role
+    key is configured so callers can fall back to user-scoped reads."""
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return None
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
 
 
 def _supabase_headers(user: AuthedUser) -> dict[str, str]:
@@ -1307,6 +1338,37 @@ async def ingest_document(
                 )
 
             chunks = chunk_text(text)
+
+            # US-038: re-chunking caveat. Deleting chunks cascades and drops
+            # every chunk_acl row, so we'd silently lose doc-level grants on
+            # re-ingest. Snapshot the current grants per principal, journal
+            # the snapshot to documents.metadata.pending_acl_replay so a
+            # crash mid-flight is recoverable, run the chunk reconcile, then
+            # re-grant per principal against the new chunks. On entry, prefer
+            # an existing journal — that means a prior ingest crashed between
+            # delete and replay and this run is the recovery path.
+            doc_metadata = doc.get("metadata") or {}
+            journaled = doc_metadata.get("pending_acl_replay")
+            if journaled is not None:
+                to_replay = [AclGrant(**g) for g in journaled]
+                log.info(
+                    "ingest.acl_recover document_id=%s grants=%d",
+                    document_id,
+                    len(to_replay),
+                )
+            else:
+                to_replay = await snapshot_doc_acls(
+                    http, SUPABASE_URL, _supabase_headers(user), document_id
+                )
+                if to_replay:
+                    journal_metadata = {
+                        **doc_metadata,
+                        "pending_acl_replay": [g.model_dump() for g in to_replay],
+                    }
+                    await _patch_document(
+                        http, user, document_id, metadata=journal_metadata
+                    )
+
             # US-015: reconcile by content_hash so only new/changed chunks
             # hit the OpenAI embeddings API; unchanged chunks reuse the
             # embedding already in the DB. _reconcile_chunks is the
@@ -1323,6 +1385,33 @@ async def ingest_document(
                 metrics["chunks_unchanged"],
                 chunk_count,
             )
+
+            if to_replay:
+                replayed = await replay_doc_acls(
+                    http,
+                    SUPABASE_URL,
+                    _supabase_headers(user),
+                    document_id,
+                    to_replay,
+                )
+                # Clear the journal so a future ingest doesn't think it's
+                # still recovering. Re-fetch metadata so we don't clobber any
+                # other writes that happened in this request.
+                fresh = await _fetch_document(http, user, document_id)
+                fresh_metadata = (fresh.get("metadata") or {}).copy()
+                fresh_metadata.pop("pending_acl_replay", None)
+                await _patch_document(
+                    http,
+                    user,
+                    document_id,
+                    metadata=fresh_metadata if fresh_metadata else None,
+                )
+                log.info(
+                    "ingest.acl_replay document_id=%s principals=%d rows_inserted=%d",
+                    document_id,
+                    len(to_replay),
+                    replayed,
+                )
 
             # US-016: LLM-extracted structured metadata. Non-fatal by
             # design — a None return (network / parse / refusal) leaves
@@ -1375,6 +1464,208 @@ async def ingest_document(
         "chunk_overlap_tokens": overlap,
         "embedding_model": get_embedding_model(),
         "metadata_model": get_metadata_model(),
+    }
+
+
+# -----------------------------------------------------------------------------
+# US-039: share endpoints. Thin REST layer over backend/permissions.py so the
+# US-040 frontend share dialog has POST/GET/DELETE endpoints to call. Owner-
+# only authorization is enforced by `_assert_doc_owner` below; the underlying
+# operations all run via PostgREST under the caller's JWT so chunk_acl writes
+# remain RLS-checked end-to-end (the doc-owner policies from US-038 cover the
+# write path).
+# -----------------------------------------------------------------------------
+
+
+class ShareRequest(BaseModel):
+    """Body for POST /api/documents/{id}/share — one identifier, two paths.
+
+    The backend resolves `principal_email_or_name` against profiles.email
+    first (user grant), then principals.name (group grant). 404 if neither
+    matches. Free-text input — no autocomplete combobox.
+    """
+
+    principal_email_or_name: str = Field(
+        ..., min_length=1,
+        description="Email of an existing user, or name of an existing group.",
+    )
+
+
+async def _assert_doc_owner(
+    http: httpx.AsyncClient, user: AuthedUser, doc_id: str
+) -> dict:
+    """Returns the doc when caller owns it; raises 403/404 otherwise.
+
+    Uses service-role to read `documents.user_id` so the 403/404 distinction
+    holds regardless of whether the caller has any RLS-visible row on the
+    doc. Falls back to a user-scoped read when no service role key is
+    configured — that path collapses 403 → 404 for callers who can't see
+    the doc at all (still secure, just less precise).
+    """
+    service_headers = _service_role_headers()
+    if service_headers is not None:
+        r = await http.get(
+            f"{SUPABASE_URL}/rest/v1/documents",
+            params={"id": f"eq.{doc_id}", "select": "id,user_id,status"},
+            headers=service_headers,
+        )
+        r.raise_for_status()
+        rows = r.json()
+        if not rows:
+            raise HTTPException(status_code=404, detail="document not found")
+        doc = rows[0]
+        if doc["user_id"] != user.id:
+            raise HTTPException(
+                status_code=403, detail="not the document owner"
+            )
+        return doc
+    # No service role: best we can do is the user-scoped read.
+    r = await http.get(
+        f"{SUPABASE_URL}/rest/v1/documents",
+        params={"id": f"eq.{doc_id}", "select": "id,user_id,status"},
+        headers=_supabase_headers(user),
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        raise HTTPException(status_code=404, detail="document not found")
+    doc = rows[0]
+    if doc["user_id"] != user.id:
+        raise HTTPException(status_code=403, detail="not the document owner")
+    return doc
+
+
+async def _resolve_principal(
+    http: httpx.AsyncClient,
+    supabase_headers: dict[str, str],
+    identifier: str,
+) -> tuple[PrincipalType, str, str] | None:
+    """Try profiles.email, then principals.name. None → 404 at the endpoint.
+
+    Returns (principal_type, principal_id, display_name). Reads under the
+    caller's JWT — both tables have permissive select RLS (US-037) so any
+    authenticated reader can resolve.
+    """
+    r = await http.get(
+        f"{SUPABASE_URL}/rest/v1/profiles",
+        params={"email": f"eq.{identifier}", "select": "id,email", "limit": "1"},
+        headers=supabase_headers,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if rows:
+        return ("user", rows[0]["id"], rows[0]["email"])
+
+    r = await http.get(
+        f"{SUPABASE_URL}/rest/v1/principals",
+        params={"name": f"eq.{identifier}", "select": "id,name", "limit": "1"},
+        headers=supabase_headers,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if rows:
+        return ("group", rows[0]["id"], rows[0]["name"])
+
+    return None
+
+
+@app.post("/api/documents/{document_id}/share")
+async def grant_share(
+    document_id: str,
+    req: ShareRequest,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        doc = await _assert_doc_owner(http, user, document_id)
+        if doc.get("status") != "ready":
+            raise HTTPException(
+                status_code=409, detail="Document is still ingesting"
+            )
+
+        headers = _supabase_headers(user)
+        resolved = await _resolve_principal(
+            http, headers, req.principal_email_or_name.strip()
+        )
+        if resolved is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No user or group with that identifier",
+            )
+        principal_type, principal_id, display_name = resolved
+
+        await grant_doc_to_principal(
+            http, SUPABASE_URL, headers, document_id,
+            principal_type, principal_id, granted_by=user.id,
+        )
+        # The grant call returns 0 on a re-grant (idempotent). For the
+        # response we want the canonical share row regardless, so re-read
+        # via list_doc_shares and project this principal's row.
+        shares = await list_doc_shares(http, SUPABASE_URL, headers, document_id)
+        match = next(
+            (
+                s for s in shares
+                if s.principal_type == principal_type
+                and s.principal_id == principal_id
+            ),
+            None,
+        )
+        granted_at = match.granted_at if match else ""
+        return {
+            "principal_id": principal_id,
+            "principal_type": principal_type,
+            "display_name": display_name,
+            "granted_at": granted_at,
+        }
+
+
+@app.get("/api/documents/{document_id}/shares")
+async def get_shares(
+    document_id: str,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        await _assert_doc_owner(http, user, document_id)
+        shares = await list_doc_shares(
+            http, SUPABASE_URL, _supabase_headers(user), document_id
+        )
+    return {"shares": [_share_to_dict(s) for s in shares]}
+
+
+@app.delete(
+    "/api/documents/{document_id}/share/{principal_type}/{principal_id}",
+    status_code=204,
+    response_class=Response,
+)
+async def delete_share(
+    document_id: str,
+    principal_type: str,
+    principal_id: str,
+    user: AuthedUser = Depends(get_user),
+) -> Response:
+    if principal_type not in ("user", "group"):
+        raise HTTPException(
+            status_code=400, detail="principal_type must be 'user' or 'group'"
+        )
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        await _assert_doc_owner(http, user, document_id)
+        removed = await revoke_doc_from_principal(
+            http, SUPABASE_URL, _supabase_headers(user), document_id,
+            principal_type,  # type: ignore[arg-type]
+            principal_id,
+        )
+        if removed == 0:
+            raise HTTPException(
+                status_code=404, detail="No shares for that principal"
+            )
+    return Response(status_code=204)
+
+
+def _share_to_dict(s: ShareSummary) -> dict:
+    return {
+        "principal_type": s.principal_type,
+        "principal_id": s.principal_id,
+        "display_name": s.display_name,
+        "granted_at": s.granted_at,
     }
 
 

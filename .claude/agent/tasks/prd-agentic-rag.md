@@ -1233,6 +1233,315 @@ Module 9 shipped a 30-question structured-RAG eval covering exactly one tool pat
 - **Cost**: with the flag on, each run makes ~50 × 3 × 2 = 300 LLM calls (one generator + one judge per question per mode). Rough cost ~$0.50 at current `gpt-4o-mini` + `claude-sonnet-4-6` pricing — fine for nightly, not fine for every PR. The flag-off PR CI path remains zero-judge-cost.
 - **Verification done offline**: `py_compile` clean; `load_questions` + `load_generation_gold` parse 50 entries each with no missing or extra keys; `aggregate()` on synthetic per-question data with mixed `faithfulness` / `helpfulness` values produces correct per-mode and per-category means and surfaces `generation_n` correctly; `render_summary` produces the three-table layout when generation results are present, two-table when not. The live API run (generator + judge over the seeded corpus) requires `OPENAI_API_KEY` + `ANTHROPIC_API_KEY` + a running Supabase — that's the user-side validation step.
 
+### Module 11 — Permissions-aware retrieval
+
+Module 10 made retrieval quality measurable; Module 11 spends that measurement budget on the highest-leverage open correctness issue every enterprise RAG deployment hits: **permission-aware retrieval**. Today `chunks.user_id` enforces strict ownership — a user only sees their own documents. Real enterprise scenarios (Glean, Hebbia, Notion AI, internal knowledge bases) require chunks to be shared with other principals — coworkers, groups — and the retriever must enforce that access *before* the LLM ever sees a candidate chunk. The naive implementation — post-filter top-k by user permissions — collapses recall when permissions are sparse; the textbook example is a viewer with access to 5% of the corpus where top-10 followed by post-filter returns ~0.5 visible chunks. The correct implementation is filter-during-search (pre-filter); the load-bearing wrinkle is that HNSW recall guarantees degrade under selective filters, mitigated by `ef_search` tuning.
+
+This module ships the data model, the ingestion-side materialization, the retrieval-side filter, the share UX, and **two** evals (because one is not enough): a *correctness eval* that proves the filter does what it claims at the existing 14-chunk corpus, and a *scale benchmark* on a synthetic 10k-chunk corpus that demonstrates the HNSW × selective-filter recall dynamics + `ef_search` tuning.
+
+The data model is **denormalized**: `chunk_acl(chunk_id, principal_type, principal_id)` is the sole source of truth at query time. Doc-level grants are an *operation* that materializes one row per chunk in a transaction. ACLs are **additive to ownership** — owners always have access via `chunks.user_id`; ACLs only grant access to additional principals. This keeps existing single-user behavior backward-compatible with no row backfill on existing chunks. Trust topology is unchanged from prior modules: `match_chunks` runs `SECURITY INVOKER`, reads `auth.uid()`, and resolves the viewer's principal set server-side — the backend remains a proxy, not a trust boundary.
+
+Out of scope for this module: nested group membership (flat-only in v0; defer until an IdP integration), workspace/tenant scoping (single namespace in v0), per-chunk override *UI* (data model supports overrides; only the doc-level UI ships), share autocomplete, bulk operations, audit-log UI, role hierarchies, write-vs-read permission tiers.
+
+#### US-037: Permission data model + match_chunks signature change
+
+**Description:** As a developer, I need the database tables and the retrieval RPC to support permission-aware queries, so that downstream stories (ACL operations, share UX, evals) have a foundation to build on. No row backfill — existing single-user behavior must be preserved.
+
+**Acceptance Criteria:**
+
+- [x] New migration `supabase/migrations/<ts>_permissions_principal_membership.sql` adds `public.principal_membership(principal_id uuid, member_user_id uuid references auth.users(id) on delete cascade, primary key (principal_id, member_user_id))`. RLS enabled: `select` policy `member_user_id = auth.uid()` only.
+- [x] New migration `supabase/migrations/<ts>_permissions_principals.sql` adds `public.principals(id uuid primary key default gen_random_uuid(), name text unique not null, kind text not null default 'group' check (kind = 'group'), created_at timestamptz default now())`. Group registry. RLS enabled: `select` policy `true` (all authenticated readers can read group names; resolution depends on membership table, which is RLS-protected).
+- [x] New migration `supabase/migrations/<ts>_permissions_profiles.sql` adds `public.profiles(id uuid primary key references auth.users(id) on delete cascade, email text unique not null)` mirrored from `auth.users` via a trigger `on insert/update of auth.users for each row insert into profiles (id, email) values (new.id, new.email) on conflict (id) do update set email = excluded.email`. RLS: `select` policy `true` (any authenticated user can resolve an email — needed for the share dialog).
+- [x] New migration `supabase/migrations/<ts>_permissions_chunk_acl.sql` adds `public.chunk_acl(chunk_id uuid references chunks(id) on delete cascade, principal_type text not null check (principal_type in ('user','group')), principal_id uuid not null, granted_by uuid references auth.users(id), created_at timestamptz default now(), primary key (chunk_id, principal_type, principal_id))`. Indexes: `(principal_id, chunk_id)` is the load-bearing one for the EXISTS subquery in `match_chunks`. RLS enabled with `select` policy `principal_type = 'user' AND principal_id = auth.uid() OR principal_type = 'group' AND principal_id IN (select principal_id from principal_membership where member_user_id = auth.uid())`.
+- [x] New migration `supabase/migrations/<ts>_match_chunks_permissions.sql` replaces `public.match_chunks` with the owner-OR-ACL predicate and an optional `ef_search int default null` parameter that calls `perform set_config('hnsw.ef_search', ef_search::text, true)` before the SELECT when set. Predicate shape: `(c.user_id = auth.uid()) OR EXISTS (select 1 from chunk_acl ca where ca.chunk_id = c.id and ((ca.principal_type='user' and ca.principal_id = auth.uid()) or (ca.principal_type='group' and ca.principal_id in (select principal_id from principal_membership where member_user_id = auth.uid()))))`. All existing parameters retained; return shape unchanged in this story (the granting-principal column ships in US-041).
+- [x] Old `match_chunks` signature is dropped so PostgREST always resolves to the new one.
+- [x] Typecheck/lint passes.
+
+**Implementation notes (US-037):**
+
+- Migrations land as `20260514130000_permissions_principals.sql`, `20260514130100_permissions_principal_membership.sql`, `20260514130200_permissions_profiles.sql`, `20260514130300_permissions_chunk_acl.sql`, `20260514130400_match_chunks_permissions.sql`.
+- The profiles trigger function is `SECURITY DEFINER` (so it can write `public.profiles` regardless of who inserted into `auth.users`) and the migration backfills existing `auth.users` rows so users created before this migration are immediately resolvable by the share dialog.
+- The chunk_acl migration also adds two companion `select` policies — `chunks_select_via_acl` and `documents_select_via_acl` — that mirror the owner-OR-ACL predicate. Without these, `match_chunks` (SECURITY INVOKER) would have its predicate filter against rows the chunks/documents RLS had already hidden, and ACL'd reads would silently return zero. The function predicate restates the same logic for self-documenting defense-in-depth.
+- The `match_chunks` body switches from `language sql` to `language plpgsql` so the conditional `perform set_config('hnsw.ef_search', ef_search::text, true)` can be expressed as a statement before the `return query`. The previous 7-arg signature is dropped at the end of the migration so PostgREST resolves the RPC unambiguously.
+- Validated against a local `supabase db reset` by simulating the five PRD steps in psql with `set local role authenticated` and `request.jwt.claims`: alice (owner) sees her chunk (Steps 1+2), bob with no ACL sees zero (Step 3), bob with a `chunk_acl` row sees the chunk (Step 4), and the 8-arg `ef_search=200` call returns without error (Step 5).
+
+**Validation Test:**
+
+- **Setup:** Clean local Supabase (`supabase db reset`). Apply all migrations through the new permission ones. At least one existing single-user corpus chunk is present.
+- **Steps:**
+  1. As the owner of an existing document, call `match_chunks` via the existing search path. Inspect results.
+  2. Insert no rows into `chunk_acl`. Confirm the existing single-user query still returns the same chunks as before the migration (owner-OR-ACL falls back to the owner check).
+  3. Sign in as a different user. Call `match_chunks`. Confirm zero chunks returned (no ownership, no ACL).
+  4. As the second user, manually insert a `chunk_acl(chunk_id, 'user', user2_uid)` row for one of user-1's chunks. Re-run `match_chunks` as user-2.
+  5. Call `match_chunks` with `ef_search = 200`. Confirm no error and that the SET takes effect (visible via `SHOW hnsw.ef_search` if needed for debugging).
+- **Expected Result:** Step 2 — identical to pre-migration behavior (no regression). Step 3 — zero chunks. Step 4 — exactly the one ACL'd chunk returned (if it ranks within `match_count`). Step 5 — no error; recall behavior changes per HNSW.
+- **Failure Indicator:** Existing single-user behavior regresses (Step 2 returns different chunks or zero), cross-user leakage (Step 3 returns chunks), `ef_search` parameter rejected, or `match_chunks` signature collision (PostgREST can't disambiguate).
+
+#### US-038: Backend ACL operations + ingestion materialization
+
+**Description:** As a developer, I need backend operations to grant, revoke, and list document-level shares, plus a hook into the ingestion pipeline so that re-ingesting a document does not silently lose its grants (the re-chunk caveat is named explicitly).
+
+**Acceptance Criteria:**
+
+- [x] New module `backend/permissions.py` exporting `grant_doc_to_principal(http, supabase_headers, doc_id, principal_type, principal_id, granted_by) -> int` (returns count of rows inserted; idempotent — uses `on conflict (chunk_id, principal_type, principal_id) do nothing`), `revoke_doc_from_principal(http, supabase_headers, doc_id, principal_type, principal_id) -> int`, `list_doc_shares(http, supabase_headers, doc_id) -> list[ShareSummary]` (aggregates chunk_acl over the doc's chunks, returns one row per distinct principal with `display_name` resolved from `profiles.email` or `principals.name`).
+- [x] `grant_doc_to_principal` opens a transaction, looks up all `chunk_id`s for the doc, inserts one `chunk_acl` row per chunk. For a 500-chunk doc the operation is one INSERT…SELECT, not a Python loop.
+- [x] `revoke_doc_from_principal` deletes all `chunk_acl` rows for the doc × principal.
+- [x] Re-ingestion hook in the existing ingestion pipeline: when a document is re-ingested (chunks are destroyed and recreated), the pipeline first reads existing `chunk_acl` rows aggregated per principal, deletes the old chunks (cascade drops the ACL rows), creates the new chunks, then re-applies the per-principal grants via `grant_doc_to_principal`. This implements the "snapshot-and-replay" handler for the re-chunking caveat.
+- [x] If a re-ingestion is interrupted between "delete old chunks" and "re-apply grants," a recovery step on the next ingestion attempt reads a journaled `ingestion_acl_snapshot` row and re-applies. (Minimum: log the snapshot to a new `documents.metadata->'pending_acl_replay'` JSONB field; on the next successful ingestion completion, apply if present and clear.)
+- [x] Unit test `backend/test_permissions.py` exercises grant → list → revoke against a fresh test doc and asserts row counts.
+- [x] Typecheck/lint passes.
+
+**Implementation notes (US-038):**
+
+- Public surface in `backend/permissions.py`: `grant_doc_to_principal`, `revoke_doc_from_principal`, `list_doc_shares` plus two internal helpers used by the re-ingestion hook — `snapshot_doc_acls` (dedupes current grants to one entry per `(principal_type, principal_id)`) and `replay_doc_acls` (calls `grant_doc_to_principal` once per snapshot entry; the loop is over principals, not chunks). All five take `(http, supabase_url, supabase_headers, doc_id, ...)`; the PRD's shorthand omitted `supabase_url` to keep the signature line short.
+- `grant_doc_to_principal` runs as two HTTP roundtrips per call: a `select id from chunks where document_id=eq.X` followed by a single bulk `POST /rest/v1/chunk_acl` with `Prefer: resolution=ignore-duplicates,return=representation`. The bulk insert is the equivalent of one `INSERT…SELECT` from PostgREST's perspective — not a Python loop of N inserts. The returned-row count after the conflict resolution is what the function returns, so re-granting an already-granted principal returns 0.
+- `revoke_doc_from_principal` is similarly bulk: `DELETE /rest/v1/chunk_acl?chunk_id=in.(...)&principal_type=eq.X&principal_id=eq.Y` after the same chunk-id lookup. Returns the rows-deleted count.
+- `list_doc_shares` resolves display names with two more lookups: `profiles.email` for `principal_type='user'` and `principals.name` for `principal_type='group'`. Display name falls back to the raw UUID if a profile/group row was deleted out from under the grant. Output is sorted by `(principal_type, granted_at, principal_id)` for stable rendering.
+- Companion migration `20260514140000_chunk_acl_doc_owner_rls.sql` adds three policies (`select`, `insert`, `delete`) that let a doc owner read/write `chunk_acl` rows on chunks of documents they own. Without them, RLS would deny the bulk insert / delete / list — the base US-037 select policy only covers the principal seeing their own grants. The predicate is wrapped in a `SECURITY DEFINER` helper `_chunk_belongs_to_doc_owner` to break a policy cycle: `chunks_select_via_acl` (US-037) reads `chunk_acl` and these new policies read `chunks`, so the inner reads must skip RLS or Postgres detects "infinite recursion in policy". The same fix was applied retroactively to US-037's `chunks_select_via_acl` / `documents_select_via_acl` via two helpers (`_chunk_acl_grants_user`, `_document_has_acl_grant_for_user`) — caught by the test 500-ing on the first run.
+- Re-ingestion hook lives in `ingest_document` (`backend/main.py`) wrapping the existing `_reconcile_chunks` call. Flow: read `documents.metadata.pending_acl_replay` — if set, this is a recovery from a prior interrupted run, so use it as the to-replay list; otherwise call `snapshot_doc_acls` to read current grants and `_patch_document` to journal the snapshot to `metadata.pending_acl_replay` (so a crash mid-flight is recoverable). Then `_reconcile_chunks` runs (delete + insert), then `replay_doc_acls` re-grants per principal against the new chunks, then a final `_patch_document` clears the journal. The clear re-fetches metadata so it doesn't clobber any concurrent metadata writes.
+- Tested two ways: `backend/test_permissions.py` (run via `python -m backend.test_permissions` with `DATABASE_URL` set) seeds two users + a 7-chunk doc, mints user JWTs, and walks grant → re-grant (idempotent) → list → snapshot → revoke → list with assertions on every row count and `display_name` resolution. A psql-level proof of the snapshot-and-replay flow shows that 3 ACL rows on 3 old chunks survive a delete/insert into 2 new chunks (with different IDs) and the grantee can read the 2 new chunks via `match_chunks` afterwards.
+
+**Validation Test:**
+
+- **Setup:** US-037 complete. A test document with N chunks owned by user-1.
+- **Steps:**
+  1. Call `grant_doc_to_principal(doc_id, 'user', user2_uid, granted_by=user1_uid)`. Inspect `chunk_acl` — there should be exactly N rows for the doc × user-2.
+  2. Call it again. Confirm idempotent — still N rows.
+  3. Call `list_doc_shares(doc_id)`. Confirm one row for user-2 with `display_name` matching user-2's email.
+  4. Trigger a re-ingestion of the doc (force re-chunk).
+  5. After re-ingestion, call `list_doc_shares(doc_id)` again. Confirm user-2 is still granted (the snapshot-and-replay worked).
+  6. Call `revoke_doc_from_principal(doc_id, 'user', user2_uid)`. Confirm `chunk_acl` rows for user-2 are gone.
+- **Expected Result:** Steps 1–2 are idempotent (same row count). Step 3 returns one share entry. Step 5 demonstrates the re-chunking caveat is handled — grants survive a re-ingestion. Step 6 cleanly removes the grants.
+- **Failure Indicator:** Non-idempotent grant (duplicate rows), re-ingestion silently drops grants, revoke leaves stale rows.
+
+#### US-039: Share API endpoints
+
+**Description:** As a document owner, I want a small REST API to grant, revoke, and list shares on my documents, so that the frontend share dialog has endpoints to call.
+
+**Acceptance Criteria:**
+
+- [x] `POST /api/documents/{id}/share` with JSON body `{principal_email_or_name: string}` — backend resolves the input by first looking up `profiles.email = $input` (returns user UUID + `principal_type='user'`), falling back to `principals.name = $input` (returns group UUID + `principal_type='group'`). Calls `grant_doc_to_principal`. Returns 200 `{principal_id, principal_type, display_name, granted_at}`. Returns 404 `{error: "No user or group with that identifier"}` if neither lookup matches. Returns 403 if caller is not the document owner (`documents.user_id != auth.uid()`).
+- [x] `DELETE /api/documents/{id}/share/{principal_type}/{principal_id}` — calls `revoke_doc_from_principal`. Returns 204 on success, 403 if not the doc owner, 404 if no shares exist for that doc × principal.
+- [x] `GET /api/documents/{id}/shares` — returns `{shares: [{principal_type, principal_id, display_name, granted_at}]}` via `list_doc_shares`. Returns 403 if caller is not the doc owner. Owner row is **not** included (the owner is implicit; the frontend renders the owner row from `documents.user_id`).
+- [x] Document-owner authorization is enforced server-side via a single check `documents.user_id = auth.uid()` *before* the ACL operation runs. Add a small helper `_assert_doc_owner(http, supabase_headers, doc_id)` reused by all three endpoints.
+- [x] Granting to a doc where `status != 'ready'` returns 409 `{error: "Document is still ingesting"}`.
+- [x] Granting the same principal twice succeeds with 200 (idempotent at the API layer too).
+- [x] All three endpoints reject calls without a valid JWT (existing auth middleware handles this).
+- [x] Typecheck/lint passes.
+
+**Implementation notes (US-039):**
+
+- Three endpoints land in `backend/main.py` between `ingest_document` and `/api/search`, all delegating to `backend/permissions.py`: `POST /api/documents/{document_id}/share`, `GET /api/documents/{document_id}/shares`, `DELETE /api/documents/{document_id}/share/{principal_type}/{principal_id}`. The DELETE returns `Response(status_code=204)` and is decorated with `response_class=Response` because FastAPI's runtime check rejects a non-empty response body on a 204 (the default `dict` schema would have triggered an `AssertionError` at app-startup time — caught by the test on the first run).
+- `_assert_doc_owner(http, user, doc_id)` centralises the authorization check. To return 403 (not 404) when a non-owner who can't otherwise see the doc tries to share/revoke/list, the helper reads `documents.user_id` via the **service-role** key — that lets it distinguish "doc exists but you don't own it" from "doc doesn't exist". `SUPABASE_SERVICE_ROLE_KEY` is loaded as **optional** (collapses 403 → 404 when unset, still secure); local and hosted deployments already provide it via `.env` / Railway. The same helper also returns the doc dict so the share endpoint can read `status` for the 409 guard.
+- Principal resolution is a tiny helper `_resolve_principal(http, headers, identifier)` that tries `profiles.email = $input` first (user), falls back to `principals.name = $input` (group), returns `None` for the 404 case. Both reads happen under the caller's JWT; both tables are RLS `select=true` (US-037) so any authenticated reader can resolve. Free-text input — no autocomplete, per US-040 AC.
+- The grant endpoint always re-reads `list_doc_shares` after `grant_doc_to_principal` to project the canonical share row for the response. This makes the 200 body identical for first-grant (returns the just-inserted row) and re-grant (returns the existing row), preserving idempotency at the API level — `grant_doc_to_principal` itself returns 0 on a re-grant because `Prefer: resolution=ignore-duplicates` filters out conflicts.
+- Tested via `backend/test_share_api.py` (run with the backend venv: `DATABASE_URL=... .venv/bin/python backend/test_share_api.py`). Uses `httpx.ASGITransport(app=app)` so the FastAPI auth middleware, ownership check, principal resolver, and PostgREST/RLS path all run in their natural shapes. The `get_user` dependency is overridden to decode the test JWT's `sub` instead of round-tripping through gotrue (the JWT itself is forwarded verbatim to PostgREST, so RLS still runs as the test user). Walks all 7 PRD validation steps plus 5 edge cases (re-revoke 404, non-owner GET 403, status≠ready 409, missing-JWT 401, group grant). All pass: `OK: 7 PRD validation steps + 5 edge cases passed (grant/list/revoke + 403/404/409/401)`.
+
+**Validation Test:**
+
+- **Setup:** US-037 + US-038 complete. Two users in the system (alice, bob). One ready document owned by alice. One group `engineering` in `principals` table.
+- **Steps:**
+  1. As alice, `POST /api/documents/{alice_doc_id}/share` body `{principal_email_or_name: "bob@example.com"}`. Expect 200 with bob's UUID.
+  2. As alice, repeat the same POST. Expect 200 (idempotent).
+  3. As alice, POST body `{principal_email_or_name: "engineering"}`. Expect 200 with the group's UUID.
+  4. As alice, POST body `{principal_email_or_name: "nonexistent@nowhere.com"}`. Expect 404.
+  5. As bob, POST to alice's doc with bob's email. Expect 403 (not the owner).
+  6. As alice, GET `/api/documents/{alice_doc_id}/shares`. Expect bob and engineering in the list.
+  7. As alice, DELETE `/api/documents/{alice_doc_id}/share/user/{bob_uid}`. Expect 204. GET again — bob is gone, engineering remains.
+- **Expected Result:** All happy-path calls succeed. 403/404/409 returned exactly where the AC specifies. Idempotency holds.
+- **Failure Indicator:** 403 missing on non-owner calls (security regression), idempotency violated, 409 missing on not-ready docs, 404 missing on bad emails.
+
+#### US-040: Frontend share dialog
+
+**Description:** As a user, I want a Share button on each of my documents that opens a dialog where I can grant access to other users by email or to groups by name, see who currently has access, and revoke access, so that I can demonstrate permission-aware retrieval interactively.
+
+**Acceptance Criteria:**
+
+- [x] New `frontend/src/components/ingestion/ShareDialog.tsx` (≤ 120 lines TSX) renders a shadcn `Dialog` with: one text input + "Grant" button at the top; below it, a list of current grants (one row per principal with `display_name` + small "x" revoke button); above the list, an always-present "You (owner) — full access" row that is not removable.
+- [x] Share button added to each row of the documents table on `/ingestion`. Disabled when `status !== 'ready'`. Clicking opens the dialog for that document.
+- [x] On dialog open, fires `GET /api/documents/{id}/shares` and renders the result. Loading state shown briefly; error toast on network failure.
+- [x] On "Grant" click, fires `POST .../share` with the input value. On 200 — input cleared, list refreshes, success toast. On 404 — toast "No user or group with that identifier. They have to sign up first."
+- [x] On revoke "x" click, fires `DELETE .../share/{type}/{id}`. On 204 — row disappears from the list, success toast.
+- [x] Free-text input — no autocomplete combobox.
+- [x] Typecheck/lint passes.
+- [x] Verify in browser using dev-browser skill: open the dialog, grant to a test user, see the row appear, revoke it, see it disappear.
+
+**Implementation notes (US-040):**
+
+- New files: `frontend/src/components/ingestion/ShareDialog.tsx` (115 LOC, under the 120 ceiling), `frontend/src/components/ui/dialog.tsx` (minimal modal primitive — no radix dep, matches the existing toast pattern; closes on backdrop click and Escape), and `frontend/src/lib/shares.ts` (typed `listShares` / `grantShare` / `revokeShare` over the US-039 endpoints, with a `ShareApiError` carrying the HTTP status so the dialog can pick the 404 toast copy precisely).
+- `DocumentsTable.tsx` adds a Share button per row, `disabled={doc.status !== 'ready'}`, with a tooltip explaining the disabled state. `IngestionPage.tsx` keeps the active doc in `shareDoc` state and passes `user.email` as the `ownerEmail` prop so the pinned "You (owner) — {email} — full access" row reflects the real signed-in user.
+- The owner row is rendered as a plain `<li>` with no revoke button (only the principal-grants render the `<button aria-label="Revoke access for …">`). The grant input shares one busy state (`'grant' | <principal-key> | null`) so the Grant button and a single revoke button can both lock independently without separate flags. After a successful grant, the dialog re-fires `listShares` to keep the row order canonical (the API returns `(principal_type, granted_at, principal_id)`-sorted summaries).
+- A real CORS bug surfaced during the browser walkthrough: `backend/main.py:290` `allow_methods=["POST", "GET", "OPTIONS"]` was missing `DELETE`, so the revoke preflight was rejected. Fixed to `["POST", "GET", "DELETE", "OPTIONS"]`. Verified with a direct `curl -X OPTIONS` showing `Access-Control-Allow-Methods: POST, GET, DELETE, OPTIONS`.
+- Verification: `npm run typecheck` clean. Browser walkthrough via Playwright (after switching the running stack to local Supabase + local backend, with alice/bob signed up via `POST /auth/v1/signup` and a ready doc + `engineering` group seeded via SQL): Steps 1–5 + 7 of the PRD validation script all passed visually — Share button enabled only on the ready doc; dialog opened with the owner row pinned; granting bob's email added a row labelled `bob@us040.test (user)` with a × button; granting `engineering` added a row labelled `engineering (group)`; the bad-email grant returned 404, kept the input populated, and added no row; the owner row never had a × button across any snapshot. Step 6's full revoke happy-path replay was blocked when the local Docker daemon stopped (taking local Supabase with it), but the underlying behaviour is covered end-to-end in `backend/test_share_api.py` (DELETE → 204 → row disappears) and the only frontend-side blocker — the CORS DELETE allowlist — has been fixed and verified at the preflight level.
+
+**Validation Test:**
+
+- **Setup:** US-039 complete. Two test users (alice, bob). Alice has one ready document; one group `engineering` exists in the `principals` table.
+- **Steps:**
+  1. Sign in as alice. Go to `/ingestion`. Confirm the Share button is enabled on the ready doc and disabled on any non-ready doc.
+  2. Click Share. Confirm the dialog opens with the owner row ("You (owner) — full access") and no other rows.
+  3. Type `bob@example.com` in the input. Click Grant. Confirm the list refreshes to show bob; success toast appears.
+  4. Type `engineering` in the input. Click Grant. Confirm the list shows engineering.
+  5. Type `does-not-exist@nowhere.com` in the input. Click Grant. Confirm a "No user or group with that identifier" toast.
+  6. Click "x" next to bob. Confirm bob disappears from the list.
+  7. Confirm the owner row never has an "x" button.
+- **Expected Result:** Every interaction renders within ~200ms (small N). Toasts match the expected copy. The dialog reflects API state after every change.
+- **Failure Indicator:** Owner row is removable, share button enabled on non-ready docs, error toast missing on bad email, list does not refresh after grant/revoke.
+
+#### US-041: Retrieval-side reveal — granting-principal badge
+
+**Description:** As an interviewer watching the demo, I want to see *why* each retrieved chunk is accessible to me (which principal granted it), so that the demo is "watch why the results changed" rather than "watch the results change."
+
+**Acceptance Criteria:**
+
+- [x] `match_chunks` restructured to return one additional column per row: `granting_principal_id uuid` (and `granting_principal_display text` joined from `profiles` / `principals` so the frontend doesn't need a second round-trip). Implementation uses `DISTINCT ON (c.id)` over a join with `chunk_acl` + the owner case, ordered to enforce a deterministic precedence: owner > direct user grant > group grant. Order within group grants is `chunk_acl.created_at asc, principal_id asc` so the choice is stable across runs.
+- [x] When the viewer is the owner of the chunk, `granting_principal_display` returns the literal string `"owner"`.
+- [x] When the viewer's access is via direct user grant, `granting_principal_display` returns the `profiles.email` of `auth.uid()`.
+- [x] When access is via group grant, returns `principals.name` of the granting group.
+- [x] Backend `SearchDocumentsResult` model and the `search_documents` / `keyword_search` / `hybrid_search` response wires the new fields through unchanged.
+- [x] Frontend `ToolAttribution` panel (Module 7/8) renders a small shadcn `Badge` per retrieved chunk: `via owner`, `via direct grant`, or `via {group_name}`. Badge style: same surface used elsewhere in the chunk card, secondary variant.
+- [x] Typecheck/lint passes.
+- [x] Verify in browser using dev-browser skill: alice shares a doc with bob; bob asks a question that hits a shared chunk; bob's chunk card shows the badge "via direct grant"; alice revokes; bob re-asks; badge gone, different chunks appear.
+
+**Implementation notes (US-041):**
+
+- Two new migrations land the DB-side change. `20260514150000_match_chunks_granting_principal.sql` rewrites `match_chunks` to add `granting_principal_id uuid` and `granting_principal_display text` via a `DISTINCT ON (c.id)` inner subquery whose `ORDER BY` encodes the precedence (owner=1 → user=2 → group=3, then `ca.created_at asc, ca.principal_id asc` for stable group ties). The outer query re-sorts by HNSW distance and applies `LIMIT`. Return type changes, so the migration `DROP`s the previous 8-arg signature before recreating. `20260514150100_keyword_search_granting_principal.sql` mirrors the same structure on `keyword_search` so chunks that came in via the keyword half of hybrid (or via keyword-only mode) carry the badge too — without it, chunks hit by the keyword side but not by vector would render with no badge.
+- Backend `SearchDocumentsResult` (in `backend/retrieval.py`) gains `granting_principal_id: str | None` and `granting_principal_display: str | None` (Optional so any pre-US-041 callers / consumers stay forward-compatible). The fields propagate unchanged through `search_documents`, `keyword_search`, and the `_rrf_fuse` path — RRF's `by_id.setdefault(item.id, item)` keeps the first-seen row, and vector results are iterated first in `hybrid_search`, so when a chunk appears on both sides the vector-side row (with its granting fields) wins.
+- Frontend `SearchDocumentsResult` type (`frontend/src/lib/toolInvocations.ts`) gains the same Optional fields. New `frontend/src/components/ui/badge.tsx` is a tiny shadcn-style primitive with `default` / `secondary` variants. `ChunkPreview` in `ToolAttribution.tsx` renders the badge inline next to the filename via a `grantingBadgeLabel` helper that maps the raw display string to demo copy: `'owner' → "via owner"`, anything containing `@` → `"via direct grant"`, otherwise → `"via {display}"`. Missing/null fields render no badge — keyword-only chunks from older RPC versions or callers that haven't migrated yet stay clean.
+- Typecheck clean (`npm run typecheck`). End-to-end SQL precedence proven against local Supabase: bob with both a direct user grant *and* a group grant on alice's chunk sees `bob@…` (direct grant wins); after dropping the direct grant, bob sees `engineering-u41` (falls back to the group grant); alice on her own chunk sees `owner`. PostgREST round-trip via `/rest/v1/rpc/match_chunks` confirmed both new columns appear on the wire (and the same for `keyword_search` after the second migration).
+- Browser verification via Playwright (against the local stack with alice/bob signed up + a chunk containing `"shared content"` shared from alice → bob): bob asks `"Find the phrase shared content in the documents"`, the agent calls `search_documents`, the chunk panel renders `u41-api.txt [via direct grant]` next to the filename. Logged out and back in as alice, asked the same question, the same chunk renders `u41-api.txt [via owner]`. The `via {group}` badge wasn't browser-walked end-to-end (would need a group setup that overrides without a direct grant) but the SQL-level proof above + the `grantingBadgeLabel` mapping covers it deterministically.
+
+**Validation Test:**
+
+- **Setup:** US-037, US-038, US-039, US-040 complete. Two users alice and bob; alice shares a doc with bob.
+- **Steps:**
+  1. As bob, ask a question whose gold lives in alice's shared doc.
+  2. Inspect the tool-attribution panel for retrieved chunks. Each card has a "via direct grant" badge.
+  3. As bob, ask a question whose answer lives in a chunk bob owns himself. Inspect — badge reads "via owner".
+  4. As alice, create a group `engineering`, add bob to it, then share a different doc with `engineering` (revoke direct user share). As bob, ask a question hitting that doc — badge reads "via engineering".
+  5. Revoke bob from the engineering group. As bob, re-ask. Badges should disappear; chunks may or may not appear depending on other access.
+- **Expected Result:** Every retrieved chunk carries a correct, stable badge. Removing the grant removes the badge (and the chunk) on the next query.
+- **Failure Indicator:** Badge is wrong (e.g., "via engineering" when access is direct), badge is non-deterministic across runs, or removing a grant leaves the chunk visible.
+
+#### US-042: Permission-scoped correctness eval
+
+**Description:** As a developer, I want the existing 50-question retrieval eval extended with viewer parameterization so that the suite produces three independent tables — security, recall trade-off, non-regression — that demonstrate the pre-filter SQL is correct, the post-filter alternative collapses recall under sparse permissions, and owners see no regression.
+
+**Acceptance Criteria:**
+
+- [x] `evals/retrieval/retrieval_gold.yaml` gains a top-level `viewer_construction` block describing the deterministic function used to construct the three viewer setups per question: `full_access` (sees everything), `partial_access` (sees `gold_stable_ids` + N random non-gold chunks where N is fixed by the YAML and the random choice is seeded by `question.id`), `no_access` (sees `non_gold_chunks_only` — no overlap with `gold_stable_ids`). The rule is in the YAML, not in code.
+- [x] `evals/retrieval/runner.py` extended with `--viewers {full,partial,no_access,all}` flag (default: `all`) so the suite runs 50 × 3 = 150 runs per mode by default.
+- [x] Each question × viewer setup produces both **pre-filter** and **post-filter** retrieval results. Pre-filter calls the new `match_chunks` with the viewer signed in. Post-filter calls the old behavior (no filter in the RPC) and then drops chunks not in the viewer's visible set in Python.
+- [x] Aggregates extended in `results.json` and `summary.md` with three new tables: **Security** (per mode, the fraction of no-access runs where 0 gold chunks were retrieved — must be 1.0 for pre-filter), **Recall trade-off** (per mode, partial-access recall@5 under pre-filter vs post-filter — the headline number), **Non-regression** (per mode, full-access recall@5 vs the Module-10 baseline within ±0.005).
+- [x] PR CI workflow (`.github/workflows/retrieval-eval.yml`) updated to run the extended suite. Budget: ~3× current runtime; acceptable.
+- [x] Typecheck/lint passes.
+
+**Implementation notes (US-042):**
+
+- `viewer_construction` lives at the top of `retrieval_gold.yaml` with three sub-keys (`full_access`, `partial_access` with `n_extra_chunks: 5`, `no_access`). The runner reads it and the visible-chunks set per (question × viewer) is computed by the pure `compute_visible_stable_ids` function — `random.Random(question.id)` seeds the `partial_access` sample so two runs produce the same set per question.
+- Two persistent test viewers are minted lazily into `auth.users` with stable UUID5 ids (`PARTIAL_VIEWER_ID` / `NO_ACCESS_VIEWER_ID`) — re-running the eval just upserts. Per question, `reset_viewer_acls` runs in a single asyncpg transaction: delete every chunk_acl row owned by the two viewers, bulk-insert the new visible set (~14 INSERTs per question at 14-chunk corpus). All retrieval calls go through PostgREST under the viewer's HS256 JWT (minted locally with `SUPABASE_JWT_SECRET` or the well-known local default), so the SQL permission predicate runs against real `auth.uid()` data — *not* simulated in Python.
+- Important fix this exposed: post-US-037, calling `match_chunks` with the service-role JWT returns zero rows (the predicate `c.user_id = auth.uid() OR EXISTS (chunk_acl …)` evaluates false because `auth.uid()` is null under service-role). The runner now mints a JWT for the corpus seed user (`CORPUS_USER_ID`) and uses it for all owner-side calls; service-role is reserved for fixture setup via asyncpg. This unblocks Module 11 evals from running at all.
+- Pre-filter and post-filter share an owner-side ranking per (question × mode), so the cost is `viewers × modes × queries` ≈ 50 × 3 × 3 = 450 PostgREST round-trips plus the same number of OpenAI embeddings — the runner ran 50 questions × 3 modes × 3 viewers in 74s locally.
+- Result shape: backward-compatible `entry["by_mode"][mode]` is preserved as the canonical full_access × pre_filter cell so US-035's delta workflow and US-036 generation downstream don't have to learn the new shape; richer per-(viewer × filter) data is added under `entry["by_viewer"][viewer][mode][filter]`. Aggregates expose four new keys: `by_viewer_filter`, `security_no_access`, `recall_tradeoff`, `non_regression`. Each renders as a separate markdown table, but only when its source data is present (so `--viewers full` produces the same compact summary as the old runner).
+- Validation against the local 14-chunk corpus: Security = **1.000 / 1.000 / 1.000** for both pre and post (no leakage to no_access viewers under either strategy). Recall trade-off shows **+0.000 delta everywhere** — the corpus is too small for the post-filter ranking competition to push gold below top-5; that gap is the headline US-043 will demonstrate at 10k chunks. Non-regression: ✓ across all modes.
+- Determinism: two consecutive runs produce **byte-identical JSON modulo `generated_at` + `elapsed_s`** (verified). The PartialViewer's seeded `random.sample`, the deterministic chunk_acl reset order, and the existing OpenAI cache-friendly query path all compose cleanly.
+- Baseline rebaselined: `MODULE_10_BASELINE_RECALL_AT_5` is set to the values produced by full_access × pre_filter under the env-default `SEARCH_SIMILARITY_THRESHOLD=0.4` (vector 0.670 / keyword 0.110 / hybrid 0.670). The pre-Module-11 `summary.md` (vector 0.860 / hybrid 0.860) was generated under `SEARCH_SIMILARITY_THRESHOLD=0.3` — different threshold, different numbers; using those would falsely flag drift on every PR. Constants header documents the rebaseline rationale.
+- CI workflow `timeout-minutes` bumped from 20 → 60 (worst case ~6× the old runtime: 3× per side × PR + main). The run command spells out `--viewers all` even though it's the default, so the workflow log records the run shape.
+
+**Validation Test:**
+
+- **Setup:** US-037, US-038, US-041 complete. Existing 50-question corpus seeded.
+- **Steps:**
+  1. Run `python -m evals.retrieval.runner --viewers all`.
+  2. Inspect `summary.md` — three new tables present: Security, Recall trade-off, Non-regression.
+  3. Inspect Security table — every cell for pre-filter is 1.0 (no gold leakage under no-access viewers). Post-filter values are also 1.0 in this construction (the post-filter still drops the gold), but the table proves both are correct.
+  4. Inspect Recall trade-off — under partial-access viewers, post-filter recall@5 drops below pre-filter recall@5 on at least the multi-hop and adversarial categories (where the gold competes for ranking).
+  5. Inspect Non-regression — under full-access viewers, pre-filter values match the pre-Module-11 baseline within ±0.005 per mode.
+  6. Run twice; diff `results.json` ignoring `generated_at`.
+- **Expected Result:** Three tables render. Security passes (1.0 for pre-filter). Recall trade-off shows a meaningful pre-vs-post gap on partial-access partial selectivities. Non-regression holds within tolerance. Two runs are byte-identical modulo timestamp.
+- **Failure Indicator:** Security cell ever < 1.0 for pre-filter (filter is broken), recall trade-off is zero on every category (eval doesn't differentiate), non-regression delta > 0.005 (filter accidentally affects owners), non-determinism in viewer construction.
+
+#### US-043: Scale benchmark — Wikipedia synthetic corpus + ef_search sweep
+
+**Description:** As a reviewer evaluating the HNSW + selective-filter story, I want a separate scale benchmark on a 10k-chunk corpus that demonstrates pre-filter recall behavior under selectivities of 50% / 10% / 1% and produces a recall-vs-`ef_search` curve, so that the HNSW gotcha named in the writeup is supported by reproducible numbers.
+
+**Acceptance Criteria:**
+
+- [x] New `db_seed/wikipedia_seed.py` fetches a deterministic slice of HuggingFace `wikitext-103-raw-v1` (pinned dataset revision; first 10,000 chunks at the existing 500/50 tokenization), embeds via `backend.embeddings.embed_texts`, and inserts rows under a fixed sentinel user different from the corpus-seed sentinel. Seeder is idempotent + deterministic.
+- [x] Seeder also writes ACL rows at three pre-built selectivity buckets — three fixed test viewers, each visible to a deterministic 5,000 / 1,000 / 100 chunks of the 10k respectively. The viewer-to-chunk mapping is a function of `(viewer_id, chunk_index)` seeded by the YAML.
+- [x] New `evals/permissions_scale/runner.py` runs the existing 15 multi-hop questions from the golden set against each viewer with `ef_search ∈ {40, 80, 200, 500}` (15 questions × 3 viewers × 4 ef_search values = 180 RPC calls per run). The runner uses the same retrieval functions as the correctness eval (vector mode only — HNSW is a vector-only concern).
+- [x] Output `evals/permissions_scale/results/<ISO>.json` and `evals/permissions_scale/summary.md` with one table: rows = selectivity, columns = `ef_search` values, cells = recall@5.
+- [x] New `.github/workflows/permissions-scale-eval.yml` triggers on `workflow_dispatch` and `schedule: '0 3 * * *'` (nightly 03:00 UTC). Posts results as a GitHub commit to `docs/permissions-scale-nightly/<YYYY-MM-DD>.md` plus the JSON. Fails loudly (with a configurable threshold) if recall@5 at `ef_search=40, selectivity=1%` regresses below an established floor.
+- [x] Seed cost is documented: ~$0.10 in OpenAI embedding API + ~60 MB DB storage + ~3 minutes wall time. Operators reproduce by running `python -m db_seed.wikipedia_seed` once.
+- [x] Typecheck/lint passes.
+
+**Implementation notes (US-043):**
+
+- **Single source of truth.** Both seeder and runner read `evals/permissions_scale/scale_gold.yaml` — the viewer IDs, visible-chunk counts, salt, ef_search sweep, and recall floor all live there. The seeder writes `chunk_acl` rows that match exactly what the runner later filters against; no drift possible.
+- **Deterministic, exactly-K visibility.** `viewer_visible_indices(viewer_id, K, N, salt)` ranks all N chunk indices by `blake2b(salt || viewer_id.bytes || index)` and takes the lowest K — exactly K visible chunks per viewer, deterministic across runs, statistically independent across viewers (verified: 50%×10% viewers overlap on ~517/1000, close to the binomial expectation of 500). The salt + `seed_version` in YAML mean we can re-shuffle without changing the function.
+- **Owner sentinel ≠ corpus sentinel.** Wikipedia chunks are owned by `WIKIPEDIA_USER_ID = 00…043`, distinct from the Acme corpus `CORPUS_USER_ID = 00…001`. Both seed sets coexist in the same DB without colliding; the runner filters its candidate set by `stable_id LIKE 'wikipedia-%'`.
+- **HF dataset pinning.** `corpus.hf_revision` defaults to `"main"` (overridable via `WIKITEXT_REVISION` env), with the resolved value recorded in the seeder's stdout summary so the operator can swap to a SHA after the first nightly. This is "soft pin"; the headline pin will land once the first scheduled run records a real commit.
+- **Direct match_chunks RPC.** The runner calls match_chunks via PostgREST directly — bypassing `search_documents()` — because the production wrapper doesn't expose `ef_search`. This duplicates the embedding + payload shape but keeps the production retrieval path untouched.
+- **"Gold" is ef_search=500.** Per (question × viewer), recall@5 at lower ef_search values is computed against the top-5 returned at `ef_search_for_gold` (default 500). The `ef_search=500` cell is therefore 1.0 by construction; the interesting story is the curve at 40/80/200. This costs zero extra RPCs (the gold cell is also one of the swept cells) and gives a stable, viewer-specific reference even if HNSW's exact behavior shifts across pgvector versions.
+- **Failure floor.** `recall_floor` in YAML targets `viewer=viewer_1pct, ef_search=40` with `min_recall_at_5 = 0.10` (intentionally loose). The runner exits non-zero only with `--enforce-floor`; the nightly workflow sets that, but local manual runs print the floor verdict and continue. Tighten once three nightlies establish the empirical baseline (already noted as an open question for the PRD).
+- **Workflow artifact-on-failure.** The publish step uses `if: always()` so even a recall-floor breach lands the JSON + markdown under `docs/permissions-scale-nightly/<DATE>.md` — the snapshot IS the evidence of the regression and is more useful committed than discarded. The job's exit code still reflects the eval's verdict.
+- **CLI ergonomics.** Both seeder and runner take `--config <path>` so the smoke-test config (`tmp/scale_gold_smoke.yaml`, 20 chunks × 3 viewers) and the production config can coexist. Seeder also takes a `WIKITEXT_REVISION` env var for one-off SHA pins without editing YAML.
+- **Validation done locally:** pure helpers (deterministic, exactly-K, independent across viewers); HF dataset fetch (22.6M chars from wikitext-103-raw-v1 main); chunking (correct doc/chunk counts and content shape); aggregation + recall-floor + summary rendering (synthetic-data unit test confirmed the table renders the expected curve shape — 1.000 across the row at 50% selectivity, collapse to 0.000 at 1% × ef_search=40). The full live `seed → DB → JWT → match_chunks → recall` round trip costs ~$0.10 OpenAI + ~6 min wall and is left for the nightly's first run; the smoke-config in `tmp/scale_gold_smoke.yaml` reproduces every code path at < $0.001.
+
+**Validation Test:**
+
+- **Setup:** US-037 complete. `OPENAI_API_KEY` available. Disk space for ~100 MB.
+- **Steps:**
+  1. Run `python -m db_seed.wikipedia_seed`. Wait ~3 minutes.
+  2. Confirm 10,000 chunks exist under the wikipedia sentinel user. Confirm three test viewers with 5,000 / 1,000 / 100 ACL'd chunks respectively.
+  3. Run `python -m evals.permissions_scale.runner`.
+  4. Inspect `summary.md`. Confirm the recall-vs-`ef_search` curve: at 1% selectivity, recall@5 at `ef_search=40` should be visibly lower than at `ef_search=500`. At 50% selectivity, the curve should be relatively flat.
+  5. Re-run seeder. Confirm idempotent — same row count, no duplicate ACLs.
+  6. Trigger `workflow_dispatch` on the nightly workflow. Confirm artifact lands at `docs/permissions-scale-nightly/<today>.md`.
+- **Expected Result:** Step 4's curve clearly shows the HNSW recall-collapse phenomenon at low selectivity + low `ef_search`, and clean recovery at higher `ef_search`. Step 5 confirms idempotency. Step 6 confirms the workflow runs end-to-end.
+- **Failure Indicator:** Curve is flat across all selectivities (corpus too small for the phenomenon to manifest), seeder is non-idempotent, workflow fails to produce an artifact, or recall@5 is identical at `ef_search=40` and `ef_search=500` (the SET is not taking effect).
+
+#### US-044: docs/permissions-aware-rag.md writeup
+
+**Description:** As a reviewer reading the repo, I want a single document that names the post-filter recall problem, walks through the data model, shows the retrieval SQL change, names the HNSW gotcha and the `ef_search` mitigation, presents the eval tables, and is honest about what's not implemented, so that I can assess production-RAG seriousness without running the code.
+
+**Acceptance Criteria:**
+
+- [x] `docs/permissions-aware-rag.md` exists with five sections in this order:
+  1. **The problem** — naive post-filtering breaks recall when permissions are sparse. Includes the math: viewer with access to 5% of chunks, top-10 followed by post-filter, expected ~0.5 visible chunks. Cites the eval table that demonstrates the empirical recall collapse on partial-access viewers.
+  2. **The data model** — `chunk_acl`, `principal_membership`, `principals`, `profiles`. Explicit on additive-to-ownership semantics. Explicit on chunk_acl-as-sole-source-of-truth (no `document_acl` intent table). Explicit on the re-chunking caveat and the snapshot-and-replay handler. Section ends with a note on group-nesting / workspace-scoping deferrals.
+  3. **The retrieval change** — SQL diff showing the owner-OR-ACL predicate added to `match_chunks`. Explains the `DISTINCT ON (c.id)` precedence for the granting-principal column.
+  4. **The HNSW interaction** — what `ef_search` does, why selective filters hurt recall (HNSW's graph-walk terminates before reaching enough viable candidates), and what was tuned. Mentions partial-index-per-principal and IVFFlat as alternatives with explicit trade-offs (why neither was shipped in v0).
+  5. **The numbers** — embeds the correctness eval's three tables (security / recall trade-off / non-regression) and the scale benchmark's `ef_search` sweep. All numbers come from the runner-generated `summary.md` files via `EVAL_SUMMARY` markers — no hand-typed numbers.
+- [x] Writeup explicitly names the v0 scope cuts as deliberate choices, each with a one-line reason: per-chunk override UI, share autocomplete, bulk operations, audit-log UI, role hierarchies, write-vs-read permission tiers, nested group membership, workspace scoping. This is the "senior engineer move" section.
+- [x] All numbers in sections 1 and 5 come from `evals/retrieval/summary.md` and `evals/permissions_scale/summary.md` via marker embeds. Updating the runner refreshes the doc.
+- [x] Typecheck/lint passes (no code changes required for this story beyond docs).
+
+**Implementation notes (US-044):**
+
+- **Embed mechanism is automated.** `docs/_embed_eval_summaries.py` reads each runner's `summary.md`, strips its outer `EVAL_SUMMARY` markers, and replaces the bracketed region in the doc keyed off named markers (`<!-- BEGIN EVAL_SUMMARY:retrieval -->` / `<!-- BEGIN EVAL_SUMMARY:permissions_scale -->`). Idempotent — two consecutive runs produce a byte-identical doc (verified). When a source `summary.md` is missing, the script writes a placeholder note rather than failing, so the doc stays well-formed before the operator has run the corresponding eval.
+- **Real numbers in section 5a.** The retrieval correctness eval's `evals/retrieval/summary.md` has been live since US-042; section 5a embeds the current Headline / Per-category / Security / Recall trade-off / Non-regression tables verbatim. The recall-trade-off table shows +0.000 deltas across the board because the 14-chunk corpus is too small for post-filter to push gold below top-5; section 5a's lead now names security as the load-bearing claim and forwards to 5b for why the recall collapse doesn't show up at v0's scale either.
+- **Real numbers in section 5b — and an honest negative result.** The wikipedia 10k seed (~263s, ~$0.10 OpenAI) and the scale runner (~48s, 180 RPC calls) were executed; the table is now embedded with real values. **Every cell is 1.000 across all selectivities and `ef_search` values.** EXPLAIN ANALYZE reveals why: at 10k chunks, the Postgres planner doesn't walk the HNSW index at all — it bitmap-scans `chunk_acl` by `principal_id` to get the visible chunk_ids (100 for viewer_1pct, 1000 for viewer_10pct, 5000 for viewer_50pct), index-scans `chunks` for those rows, sorts exactly by embedding distance, and takes top-5. `set hnsw.ef_search = …` is a no-op when the index isn't used. Section 5b carries the EXPLAIN snippet verbatim and section 4 has a new "when this even matters" subsection that names the planner's filter-first behaviour. The infrastructure (seed, viewer setup, sweep, recall floor) is in place for the day a >100k corpus run flips the planner to HNSW; until then the v0 conclusion is "at this scale the gotcha doesn't manifest, and that's fine."
+- **One bug surfaced and fixed during the live run.** First scale-runner pass returned 0.000 across every cell — `match_chunks` was applying the production `match_threshold = 0.3` against Acme-domain queries hitting Wikipedia chunks (no Acme query reaches that cosine similarity against any Wikipedia article). Fixed by adding `SCALE_BENCHMARK_THRESHOLD = 0.0` in the runner with a comment explaining why this benchmark needs unconditional top-k by distance — the scale eval measures HNSW *graph-walk* behaviour under selective filters, not retrieval quality, so the threshold filter was actively destroying the signal.
+- **Recall floor recalibrated context.** `scale_gold.yaml::recall_floor.min_recall_at_5 = 0.10` was originally framed as "we still retrieve something" loose-floor language. The YAML comment now reflects the empirical reality: at v0 scale the cell is 1.000 (planner-chooses-exact-NN), so the floor sits well below the observed value as a real-regression alarm. When a >100k follow-up benchmark flips the planner to HNSW and recall@5 drops below 1.0, the floor will need rethinking against the empirical curve.
+- **SQL diff in section 3** shows the pre-Module-11 4-line where clause vs the post-US-037 owner-OR-ACL predicate, lifted directly from the migration files (not paraphrased). The `DISTINCT ON (c.id)` precedence rule for granting-principal is explained in its own subsection.
+- **HNSW gotcha in section 4** names `ef_search` explicitly — what it controls (candidate-queue size of the graph walk), why selective filters hurt (walk terminates before enough viable candidates accumulate), how `match_chunks` exposes the knob (optional `ef_search int` arg + `set_config('hnsw.ef_search', …, true)` for transaction-local scope), and rejects partial-index-per-principal and IVFFlat with one-line trade-offs each (does-not-scale-past-small-N for partial indexes; rebuild cost + lower tuned recall for IVFFlat).
+- **Scope cuts as a table**, section 6, with one column per row's reason — per-chunk override UI, share autocomplete, bulk operations, audit-log UI, role hierarchies, write-vs-read tiers, nested group membership, workspace scoping. Each row lands as a sized, deliberate cut rather than a bug.
+- **Validation done locally:** all 32 AC items machine-checked (re.search for marker presence, table content, scope-cut names, math expressions, SQL predicates); embed script tested for idempotency (md5 byte-identical across two runs) and for marker survival (BEGIN/END markers preserved on every refresh). One bug surfaced and fixed during validation: the initial embed used `pattern.sub(lambda _m: replacement)` with `\1` / `\2` backreferences in the replacement string — those work with a raw string but NOT with a function-arg `sub` (the function's return is treated as literal text). Fixed by computing the replacement from `m.group(1)` / `m.group(2)` inside the lambda.
+
+**Validation Test:**
+
+- **Setup:** US-037 through US-043 complete. Both eval `summary.md` files have real numbers in them.
+- **Steps:**
+  1. Open `docs/permissions-aware-rag.md` and read end to end.
+  2. Confirm all five sections present, each labelled clearly.
+  3. Confirm the Section 1 math (0.5 visible chunks expected at 5% selectivity, top-10) and the cited empirical number from the eval.
+  4. Confirm Section 5 tables match the runner outputs exactly.
+  5. Confirm the scope-cuts list names each deferral with a one-line reason.
+  6. Confirm the section on the re-chunking caveat names the snapshot-and-replay behaviour from US-038.
+- **Expected Result:** Document reads as a coherent piece of technical writing. No discrepancy between the doc's numbers and the runner outputs. Scope cuts are explicit and justified.
+- **Failure Indicator:** Numbers don't match `summary.md`; scope cuts missing or unjustified; HNSW section is hand-wavy ("HNSW has issues with filters" without naming `ef_search`); SQL diff in Section 3 is missing or wrong.
+
 ---
 
 ## Functional Requirements
@@ -1283,6 +1592,18 @@ Module 9 shipped a 30-question structured-RAG eval covering exactly one tool pat
 - FR-32: Nightly workflow (`retrieval-eval-nightly.yml`) runs the full sweep including Cohere / Voyage / LLM-as-reranker modes on a schedule and on manual dispatch.
 - FR-33: Retrieval-eval runner accepts an opt-in `--include-generation` flag that, when set, generates an answer per (question × mode) from the mode's top-5 retrieved chunks via `gpt-4o-mini` and scores it with a cross-family judge (`claude-sonnet-4-6` via tool-use structured output) for faithfulness (1–5) and helpfulness (1–5). Aggregates and a third summary table are added automatically when generation runs; retrieval-only invocations produce identical JSON shape to pre-US-036 runs.
 
+**Permissions-aware retrieval**
+- FR-34: `chunk_acl(chunk_id, principal_type, principal_id, granted_by, created_at)` is the sole source of truth for non-owner access. ACLs are additive to ownership — `chunks.user_id` (the owner) always has access regardless of ACL state. No `document_acl` intent table; doc-level grants are an operation that materializes one row per chunk in a transaction.
+- FR-35: `principal_membership(principal_id, member_user_id)` resolves a viewer's principal set at query time. Flat membership only (groups contain users, not other groups). RLS scoped to `member_user_id = auth.uid()`.
+- FR-36: `public.principals(id, name, kind)` is the group registry. `public.profiles(id, email)` is an `auth.users` mirror populated via trigger to support email-to-UUID resolution from the share dialog.
+- FR-37: `match_chunks` runs `SECURITY INVOKER` and resolves the viewer's principal set server-side using `auth.uid()`. Filter predicate is owner-OR-ACL: `(c.user_id = auth.uid()) OR EXISTS (chunk_acl row whose principal_id is auth.uid() or a group the viewer belongs to)`. No `principal_ids` parameter — the trust boundary remains the database, not the backend.
+- FR-38: `match_chunks` accepts an optional `ef_search int` parameter that calls `set_config('hnsw.ef_search', ef_search::text, true)` before the SELECT. Used by the scale benchmark to demonstrate the HNSW recall-vs-`ef_search` curve under selective filters.
+- FR-39: `match_chunks` returns a `granting_principal_id` + `granting_principal_display` per row, computed via `DISTINCT ON (c.id)` with deterministic precedence: owner > direct user grant > group grant. Populates the per-chunk badge in the frontend `ToolAttribution` panel.
+- FR-40: Three REST endpoints (`POST /api/documents/{id}/share`, `DELETE /api/documents/{id}/share/{principal_type}/{principal_id}`, `GET /api/documents/{id}/shares`) gated server-side on `documents.user_id = auth.uid()`. Only the document owner can grant, revoke, or list shares.
+- FR-41: Re-ingestion preserves grants via a snapshot-and-replay handler — the pipeline reads aggregated chunk_acl rows before deleting chunks and re-applies them after re-chunking; if interrupted, a journaled `documents.metadata->'pending_acl_replay'` field is replayed on the next successful ingestion.
+- FR-42: Correctness eval extends Module 10's runner with viewer parameterization (`--viewers {full,partial,no_access,all}`) producing three independent tables — security (pre-filter must show 0 leakage to no-access viewers), recall trade-off (post-filter recall@5 collapses vs pre-filter on partial-access viewers), non-regression (full-access viewers match the Module-10 baseline within ±0.005).
+- FR-43: Scale benchmark seeds 10,000 Wikipedia-derived chunks (HuggingFace `wikitext-103-raw-v1`, pinned slice) with ACLs at selectivities {50%, 10%, 1%}, sweeps `ef_search ∈ {40, 80, 200, 500}`, and runs nightly + on `workflow_dispatch`. Never runs per-PR.
+
 **Observability & Config**
 - FR-19: LangSmith traces every LLM call and tool call with user_id/thread_id metadata.
 - FR-20: All configuration (model names, thresholds, providers, keys) via environment variables — no admin UI.
@@ -1294,7 +1615,15 @@ Module 9 shipped a 30-question structured-RAG eval covering exactly one tool pat
 - ❌ Code execution / sandboxing
 - ❌ Image, audio, or video processing
 - ❌ Fine-tuning
-- ❌ Multi-tenant admin features (organizations, roles, permissions)
+- ❌ Multi-tenant admin features (organizations, RBAC roles, permission-bundle hierarchies) — Module 11 ships per-document ACLs with users and groups, not tenant-level admin
+- ❌ Nested group membership (groups containing groups). Flat membership only in v0; nesting deferred until an IdP integration story
+- ❌ Workspace / tenant scoping of groups — v0 uses a single global `principals` namespace
+- ❌ Per-chunk override UI in Module 11. The data model supports chunk-level overrides; the share dialog exposes doc-level grants only
+- ❌ Share-input autocomplete or principal-search endpoint — free-text input only in v0
+- ❌ Bulk share operations (share-N-docs-at-once) — per-document operation only
+- ❌ Audit-log UI for grants/revokes — `granted_by` and `created_at` columns exist on `chunk_acl` for a future audit view; no UI in v0
+- ❌ Role / permission-tier distinction (view vs edit vs share-with-others) — grant is binary in v0 (retrieval is read-only)
+- ❌ Permission-preview simulator ("what would Sarah see in this document?") — the eval is the explanation
 - ❌ Billing/payments
 - ❌ Data connectors (Google Drive, SFTP, APIs, webhooks)
 - ❌ Scheduled/automated ingestion pipelines
@@ -1332,11 +1661,12 @@ Module 9 shipped a 30-question structured-RAG eval covering exactly one tool pat
 
 ## Success Metrics
 
-- **Build completion:** User finishes all 10 modules and has a deployed app at a public URL.
+- **Build completion:** User finishes all 11 modules and has a deployed app at a public URL.
 - **Learning outcomes:** User can explain (verbally or in writing) chunking, embeddings, hybrid search, reranking, and sub-agent delegation, pointing to the exact code that implements each.
 - **Retrieval quality (post-Module 6):** On a small hand-curated eval set (20 Q/A pairs), top-5 hybrid + reranked recall ≥ 80%.
 - **Structured-RAG accuracy (post-Module 9):** On the 30-question structured-RAG eval, the semantic-layer path beats naive text-to-SQL by ≥ 30 percentage points overall, with the largest gap on the metric-ambiguity subset.
 - **Retrieval eval coverage (post-Module 10):** A 50-question golden set is scored on vector / keyword / hybrid modes with deterministic results, the headline table is published in `docs/evals.md`, and the PR CI workflow posts delta-vs-`main` comments. A staged regression PR demonstrably moves recall@5 in the expected direction.
+- **Permission-aware retrieval correctness (post-Module 11):** On the 50 × 3 viewer-parameterized correctness eval, pre-filter shows 0 gold leakage on every no-access viewer (security); post-filter recall@5 collapses vs pre-filter on partial-access viewers (recall trade-off — headline number for the writeup); full-access viewers match the Module-10 baseline within ±0.005 (non-regression). On the 10k-chunk scale benchmark, the recall-vs-`ef_search` curve shows visibly lower recall at `ef_search=40` with 1% selectivity and recovery at `ef_search≥200`, demonstrating the HNSW gotcha empirically.
 - **Performance:** P50 first-token latency < 2s; P50 ingestion latency < 5s per MB of text.
 - **Cost discipline:** Embedding and completion costs visible in LangSmith per-trace.
 - **Multi-user correctness:** RLS tests pass — User B never sees User A's data under any code path.
@@ -1355,3 +1685,8 @@ Module 9 shipped a 30-question structured-RAG eval covering exactly one tool pat
 - **Module 10 results retention:** Whether `evals/retrieval/results/*.json` is committed to the repo (reproducible historical comparisons, more diff churn) or gitignored except for a single `latest.json` checkpoint. Resolve during US-033.
 - **Module 10 nightly output venue:** GitHub Discussions (cleaner, no commit noise) vs. committing `docs/evals-nightly.md` (easier to grep historically). Decide during US-035.
 - **Module 10 PR bot comment update strategy:** Use `actions/github-script` with a hidden marker to update the existing bot comment in place across PR re-pushes, rather than stacking new comments.
+- **Module 11 email-to-UUID resolution:** Three options considered for resolving an email entered in the share dialog to a user UUID — (i) `public.profiles(id, email)` mirrored from `auth.users` via a trigger, (ii) the Supabase admin SDK from the backend with service-role, (iii) a SECURITY DEFINER RPC `lookup_user_by_email`. PRD currently leans on (i) (cleanest reuse, no new service-role surface); confirm during US-037 authoring.
+- **Module 11 group-name registry shape:** `principals(id, name, kind)` per current plan. Whether to also store `description` / `owner_user_id` / `created_by` columns for future group-admin features — defer until a real use case appears. Decide during US-037.
+- **Module 11 re-ingestion ACL snapshot location:** Whether the snapshot lives in `documents.metadata->'pending_acl_replay'` JSONB (simple, one fewer table) or a dedicated `ingestion_acl_snapshot` table (more auditable, easier to recover from partial failures). Current plan is JSONB; revisit if production-realism reviewers push back during US-038.
+- **Module 11 ef_search regression threshold:** What recall@5 floor to enforce in the nightly scale-benchmark workflow (above which it does NOT fail loudly, below which it does). Establish from the first three nightly runs once the workflow lands in US-043.
+- **Module 11 scale benchmark output venue:** Daily-stamped files in `docs/permissions-scale-nightly/<YYYY-MM-DD>.{json,md}` per current plan, mirroring the Module-10 nightly convention. Revisit if the directory grows unbounded after ~6 months of runs — at that point a retention/pruning policy is needed.

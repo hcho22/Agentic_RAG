@@ -1,0 +1,14 @@
+# US-043: scale-benchmark deps. Used by both:
+#   - db_seed/wikipedia_seed.py     — fetches HuggingFace wikitext-103-raw-v1
+#   - evals/permissions_scale/runner.py  — runs the recall-vs-ef_search sweep
+#
+# The seeder needs `datasets` (which pulls pyarrow + huggingface_hub +
+# fsspec). Everything else mirrors evals/retrieval/requirements-ci.txt
+# so the runner shares the same retrieval code path.
+asyncpg>=0.29
+httpx==0.27.2
+openai>=1.70.0
+pyyaml>=6.0
+tiktoken==0.8.0
+pyjwt>=2.8
+datasets>=2.18,<3
