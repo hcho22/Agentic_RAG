@@ -141,6 +141,15 @@ class SearchDocumentsResult(BaseModel):
     content: str
     similarity: float
     filename: str
+    # US-041: explains *why* the viewer can see the chunk. Owner chunks carry
+    # `granting_principal_id=None, granting_principal_display='owner'`. Direct
+    # user grants surface the viewer's own email; group grants surface the
+    # group name. Both keyword_search and the RRF fuser pass these through
+    # unchanged — keyword_search returns `None` for both because the keyword
+    # RPC doesn't yet wire them up (its predicate is owner-only via RLS), and
+    # the agent-facing tool description glosses these as "for UI badges only".
+    granting_principal_id: str | None = None
+    granting_principal_display: str | None = None
 
 
 def get_similarity_threshold() -> float:

@@ -4,6 +4,7 @@ import { useToast } from '@/components/ui/toast'
 import { AppHeader } from '@/components/AppHeader'
 import { DropZone } from '@/components/ingestion/DropZone'
 import { DocumentsTable } from '@/components/ingestion/DocumentsTable'
+import { ShareDialog } from '@/components/ingestion/ShareDialog'
 import {
   ACCEPTED_EXTENSIONS,
   deleteDocument,
@@ -22,6 +23,7 @@ export function IngestionPage() {
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set())
+  const [shareDoc, setShareDoc] = useState<DocumentRow | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -165,8 +167,18 @@ export function IngestionPage() {
           loading={loading}
           deletingIds={deletingIds}
           onDelete={handleDelete}
+          onShare={setShareDoc}
         />
       </main>
+      {shareDoc && (
+        <ShareDialog
+          open={!!shareDoc}
+          onOpenChange={(open) => !open && setShareDoc(null)}
+          documentId={shareDoc.id}
+          filename={shareDoc.filename}
+          ownerEmail={user?.email ?? ''}
+        />
+      )}
     </div>
   )
 }

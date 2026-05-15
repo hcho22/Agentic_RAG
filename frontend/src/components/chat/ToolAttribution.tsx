@@ -13,6 +13,7 @@
 // thread on summary turns that read many chunks.
 
 import { useState } from 'react'
+import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import type {
   PlanQueryArgs,
@@ -203,10 +204,14 @@ function SearchDocumentsDetails({
 }
 
 function ChunkPreview({ chunk }: { chunk: SearchDocumentsResult }) {
+  const badgeLabel = grantingBadgeLabel(chunk.granting_principal_display ?? null)
   return (
     <li className="rounded border border-neutral-800 bg-neutral-950/60 p-2">
       <div className="mb-1 flex items-baseline justify-between gap-2 text-[11px] text-neutral-500">
-        <span className="truncate text-neutral-300">{chunk.filename}</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate text-neutral-300">{chunk.filename}</span>
+          {badgeLabel && <Badge variant="secondary">{badgeLabel}</Badge>}
+        </span>
         <span>
           chunk #{chunk.chunk_index} · score {chunk.similarity.toFixed(3)}
         </span>
@@ -214,6 +219,20 @@ function ChunkPreview({ chunk }: { chunk: SearchDocumentsResult }) {
       <div className="line-clamp-3 whitespace-pre-wrap text-neutral-300">{chunk.content}</div>
     </li>
   )
+}
+
+// US-041: map the raw `granting_principal_display` from the API onto the
+// short demo-friendly badge copy. Hidden entirely when the field is missing
+// (keyword-only chunks) — that avoids surfacing a misleading badge for rows
+// where the badge isn't actually computed yet.
+function grantingBadgeLabel(display: string | null): string | null {
+  if (!display) return null
+  if (display === 'owner') return 'via owner'
+  // If the display looks like an email it came from a direct user grant
+  // (the SQL returns profiles.email of auth.uid()). Otherwise treat it as
+  // a group name.
+  if (display.includes('@')) return 'via direct grant'
+  return `via ${display}`
 }
 
 function QueryDatabaseDetails({

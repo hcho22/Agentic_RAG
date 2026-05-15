@@ -42,15 +42,18 @@ import json
 import logging
 import math
 import os
+import random
 import sys
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import asyncpg
 import httpx
+import jwt as pyjwt
 import yaml
 from openai import AsyncOpenAI
 
@@ -75,6 +78,54 @@ MODES = ("vector", "keyword", "hybrid")
 TOP_K = 10  # Retrieve 10; metrics at k ∈ {1,3,5,10} are computed from this list.
 RECALL_KS = (1, 3, 5, 10)
 CATEGORY_ORDER = ("single_chunk", "multi_hop", "adversarial", "paraphrase")
+
+# US-042: viewer parameterization. The runner replays each question under
+# three permission setups and two filter strategies so the eval can prove:
+#   * SECURITY     — pre-filter SQL never returns gold to no_access viewers
+#   * RECALL       — post-filter (no SQL filter, drop in Python) collapses
+#                    recall as permissions sparsen; pre-filter does not
+#   * NON-REGRESS  — under full_access the pre-filter behaves identically
+#                    to the pre-Module-11 baseline
+ViewerKind = Literal["full_access", "partial_access", "no_access"]
+FilterStrategy = Literal["pre_filter", "post_filter"]
+VIEWER_ORDER: tuple[ViewerKind, ...] = ("full_access", "partial_access", "no_access")
+FILTER_ORDER: tuple[FilterStrategy, ...] = ("pre_filter", "post_filter")
+
+# Corpus chunks are owned by this sentinel user (db_seed.corpus_seed.CORPUS_USER_ID).
+# Duplicated here rather than imported so the runner stays decoupled from
+# the seeder when it runs in CI (the corpus may be seeded by a different
+# code path, e.g. fixtures).
+CORPUS_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+CORPUS_USER_EMAIL = "corpus-seed@local.test"
+
+# Two persistent test viewers — UUID5 keeps them stable across runs so the
+# auth.users + chunk_acl rows can be upserted idempotently without
+# accumulating cruft. Their visible-chunks set is reset per question.
+EVAL_VIEWER_NAMESPACE = uuid.UUID("00000000-0000-0000-0000-000000000042")
+PARTIAL_VIEWER_ID = uuid.uuid5(EVAL_VIEWER_NAMESPACE, "eval-viewer-partial-access")
+NO_ACCESS_VIEWER_ID = uuid.uuid5(EVAL_VIEWER_NAMESPACE, "eval-viewer-no-access")
+PARTIAL_VIEWER_EMAIL = "eval-partial@local.test"
+NO_ACCESS_VIEWER_EMAIL = "eval-no-access@local.test"
+
+# Local-dev default; production / CI overrides via SUPABASE_JWT_SECRET.
+LOCAL_JWT_SECRET = "super-secret-jwt-token-with-at-least-32-characters-long"
+
+# Non-regression baseline (full_access × pre_filter recall@5). Frozen at the
+# numbers produced by full_access × pre_filter on a clean US-042 run with
+# the .env-default SEARCH_SIMILARITY_THRESHOLD=0.4 (the threshold CI uses).
+# The pre-Module-11 summary.md (vector 0.860 / hybrid 0.860) was generated
+# under SEARCH_SIMILARITY_THRESHOLD=0.3 — different threshold, different
+# numbers, not a regression — so those values would falsely flag drift on
+# every PR. Rebaselining at 0.4 keeps the test apples-to-apples with the
+# environment the eval actually runs in. Bump these numbers when the
+# corpus, chunker, threshold, or embedding model legitimately shifts and
+# the new baseline is the agreed-upon truth going forward.
+MODULE_10_BASELINE_RECALL_AT_5: dict[str, float] = {
+    "vector": 0.670,
+    "keyword": 0.110,
+    "hybrid": 0.670,
+}
+NON_REGRESSION_TOLERANCE = 0.005
 
 # US-036: generation + judge.
 # Generator and judge MUST be different model families to avoid same-model
@@ -141,7 +192,12 @@ JUDGE_PROMPT_TEMPLATE = (
 # ---------------------------------------------------------------------------
 
 
-def load_questions(path: Path) -> list[dict[str, Any]]:
+def load_questions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return (questions, viewer_construction).
+
+    `viewer_construction` is an empty dict when the YAML lacks the block
+    (legacy format); the runner then falls back to full_access only.
+    """
     with path.open() as f:
         data = yaml.safe_load(f)
     if not isinstance(data, dict) or "questions" not in data:
@@ -164,7 +220,8 @@ def load_questions(path: Path) -> list[dict[str, Any]]:
         gold = q.get("gold_stable_ids")
         if not isinstance(gold, list) or not gold:
             raise RuntimeError(f"{qid}: gold_stable_ids must be a non-empty list")
-    return questions
+    viewer_construction = data.get("viewer_construction", {}) or {}
+    return questions, viewer_construction
 
 
 def load_generation_gold(path: Path) -> dict[str, str]:
@@ -190,6 +247,146 @@ async def fetch_stable_id_map(database_url: str) -> dict[str, str]:
     finally:
         await conn.close()
     return {str(r["id"]): r["stable_id"] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# US-042: viewer construction + setup
+# ---------------------------------------------------------------------------
+
+
+def compute_visible_stable_ids(
+    viewer: ViewerKind,
+    question: dict[str, Any],
+    all_corpus_stable_ids: list[str],
+    construction: dict[str, Any],
+) -> set[str]:
+    """Compute the visible-chunks set for a (question × viewer) pair.
+
+    Pure / deterministic. The random choice in `partial_access` is seeded
+    by `question["id"]` so two runs of the eval produce identical visible
+    sets per question. The construction rules come from the YAML's
+    `viewer_construction` block — keeping them out of code makes the YAML
+    the audit trail for what each viewer setup was allowed to see.
+    """
+    gold = set(question["gold_stable_ids"])
+    qid = question["id"]
+    if viewer == "full_access":
+        return set(all_corpus_stable_ids)
+    if viewer == "partial_access":
+        cfg = construction.get("partial_access") or {}
+        n_extra = int(cfg.get("n_extra_chunks", 0))
+        non_gold = sorted(set(all_corpus_stable_ids) - gold)
+        rng = random.Random(qid)
+        sample = set(rng.sample(non_gold, min(n_extra, len(non_gold))))
+        return gold | sample
+    if viewer == "no_access":
+        return set(all_corpus_stable_ids) - gold
+    raise ValueError(f"unknown viewer: {viewer!r}")
+
+
+def mint_user_jwt(user_id: uuid.UUID, email: str, secret: str) -> str:
+    """HS256 JWT shaped like a Supabase auth token (sub, role, aud, exp).
+
+    Long expiry (1 day) so the same JWT is reused across the entire run.
+    """
+    now = int(time.time())
+    payload = {
+        "iss": "agentic-rag-eval",
+        "sub": str(user_id),
+        "email": email,
+        "role": "authenticated",
+        "aud": "authenticated",
+        "iat": now,
+        "exp": now + 86400,
+    }
+    return pyjwt.encode(payload, secret, algorithm="HS256")
+
+
+def user_headers(jwt_token: str, anon_or_service_key: str) -> dict[str, str]:
+    """PostgREST headers for a user-JWT request.
+
+    The `apikey` header is the project's anon (or service) key — required
+    by Supabase's edge router; PostgREST itself looks at Authorization to
+    set the role.
+    """
+    return {
+        "apikey": anon_or_service_key,
+        "Authorization": f"Bearer {jwt_token}",
+        "Content-Type": "application/json",
+    }
+
+
+async def ensure_viewer_users(database_url: str) -> None:
+    """Idempotently insert the corpus user + the two eval viewers.
+
+    Direct insert into auth.users bypasses the normal Supabase Auth flow;
+    only acceptable here because the runner is a service-role-equipped
+    eval against a local / CI database.
+    """
+    conn = await asyncpg.connect(database_url)
+    try:
+        await conn.executemany(
+            """
+            insert into auth.users (
+                id, instance_id, aud, role, email, encrypted_password,
+                email_confirmed_at, raw_app_meta_data, raw_user_meta_data,
+                created_at, updated_at
+            ) values (
+                $1, '00000000-0000-0000-0000-000000000000',
+                'authenticated', 'authenticated', $2, '',
+                now(),
+                '{"provider":"eval","providers":["eval"]}'::jsonb,
+                '{}'::jsonb,
+                now(), now()
+            )
+            on conflict (id) do nothing
+            """,
+            [
+                (CORPUS_USER_ID, CORPUS_USER_EMAIL),
+                (PARTIAL_VIEWER_ID, PARTIAL_VIEWER_EMAIL),
+                (NO_ACCESS_VIEWER_ID, NO_ACCESS_VIEWER_EMAIL),
+            ],
+        )
+    finally:
+        await conn.close()
+
+
+async def reset_viewer_acls(
+    conn: asyncpg.Connection,
+    visible_chunk_ids: dict[ViewerKind, set[uuid.UUID]],
+) -> None:
+    """Per-question ACL replacement for the two non-full viewers.
+
+    Single transaction: delete all chunk_acl rows owned by the test
+    viewers, then bulk-insert the new visible-set. ~50 DELETE + ~50
+    INSERTs per question is well under the budget.
+    """
+    async with conn.transaction():
+        await conn.execute(
+            """
+            delete from public.chunk_acl
+             where principal_type = 'user'
+               and principal_id = any($1::uuid[])
+            """,
+            [PARTIAL_VIEWER_ID, NO_ACCESS_VIEWER_ID],
+        )
+        rows: list[tuple[uuid.UUID, str, uuid.UUID, uuid.UUID]] = []
+        for viewer_id, ids in (
+            (PARTIAL_VIEWER_ID, visible_chunk_ids["partial_access"]),
+            (NO_ACCESS_VIEWER_ID, visible_chunk_ids["no_access"]),
+        ):
+            for cid in ids:
+                rows.append((cid, "user", viewer_id, CORPUS_USER_ID))
+        if rows:
+            await conn.executemany(
+                """
+                insert into public.chunk_acl
+                  (chunk_id, principal_type, principal_id, granted_by)
+                values ($1, $2, $3, $4)
+                on conflict do nothing
+                """,
+                rows,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -385,25 +582,94 @@ async def judge_answer(
 # ---------------------------------------------------------------------------
 
 
+def _metrics_block(
+    gold: set[str],
+    retrieved_stable_ids: list[str],
+    unknown: int,
+) -> dict[str, Any]:
+    """Build the canonical metrics dict for one (question × mode × viewer × filter)."""
+    block: dict[str, Any] = {
+        "top_10_stable_ids": retrieved_stable_ids,
+        "mrr": mrr(gold, retrieved_stable_ids),
+        "ndcg_at_5": ndcg_at_5(gold, retrieved_stable_ids),
+    }
+    for k in RECALL_KS:
+        block[f"recall_at_{k}"] = recall_at_k(gold, retrieved_stable_ids, k)
+    if unknown:
+        block["unknown_chunks"] = unknown
+    return block
+
+
+def _project_to_corpus(
+    results: list[Any],
+    stable_id_map: dict[str, str],
+    visible_set: set[str] | None,
+) -> tuple[list[str], list[Any], int]:
+    """Map RPC rows to (retrieved_stable_ids, corpus_chunks, unknown_count).
+
+    `visible_set` is the post-filter visible-chunks set in stable_id form;
+    when set, chunks not in it are dropped *after* retrieval (post-filter
+    semantics). When None, no post-filter drop happens.
+    """
+    retrieved: list[str] = []
+    corpus_chunks: list[Any] = []
+    unknown = 0
+    for r in results:
+        sid = stable_id_map.get(r.id)
+        if sid is None:
+            unknown += 1
+            continue
+        if visible_set is not None and sid not in visible_set:
+            continue
+        retrieved.append(sid)
+        corpus_chunks.append(r)
+    return retrieved, corpus_chunks, unknown
+
+
 async def run_eval(
     questions: list[dict[str, Any]],
     modes: tuple[str, ...],
+    viewers: tuple[ViewerKind, ...],
+    viewer_construction: dict[str, Any],
+    viewer_headers: dict[ViewerKind, dict[str, str]],
     stable_id_map: dict[str, str],
     openai_client: AsyncOpenAI,
     http: httpx.AsyncClient,
     supabase_url: str,
-    supabase_headers: dict[str, str],
+    owner_headers: dict[str, str],
+    db_conn: asyncpg.Connection | None,
     generation_gold: dict[str, str] | None = None,
     anthropic_client: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Run retrieval (always) and optionally generation+judge (US-036).
+    """Run retrieval per (question × mode × viewer × filter_strategy).
 
-    When `generation_gold` and `anthropic_client` are both provided, for
-    each (question × mode) the runner additionally generates an answer
-    grounded in the mode's top-`TOP_K_FOR_GENERATION` retrieved chunks and
-    has Claude score it for faithfulness + helpfulness.
+    Every (mode × viewer) cell carries both `pre_filter` and `post_filter`
+    metric blocks. Pre-filter calls match_chunks under the viewer's own JWT
+    (so the SQL permission predicate runs against the viewer's chunk_acl
+    rows). Post-filter calls match_chunks under the corpus owner's JWT
+    (sees everything) and then drops chunks not in the viewer's visible set
+    in Python — that's the "no SQL filter, drop in Python" baseline the
+    Recall trade-off table compares against.
+
+    Generation + judge (US-036) runs only for full_access × pre_filter to
+    keep the cost bounded; that's the canonical "pretend permissions don't
+    exist" baseline the generation table is meant to characterise.
+
+    `db_conn` may be None when only `full_access` is requested — the per-
+    question chunk_acl reset is then unnecessary. The function asserts the
+    invariant.
     """
     include_generation = generation_gold is not None and anthropic_client is not None
+    needs_db = any(v != "full_access" for v in viewers)
+    if needs_db and db_conn is None:
+        raise RuntimeError(
+            "db_conn is required when partial_access / no_access viewers are enabled"
+        )
+
+    all_corpus_stable_ids = sorted(stable_id_map.values())
+    sid_to_chunk_id: dict[str, uuid.UUID] = {
+        sid: uuid.UUID(cid) for cid, sid in stable_id_map.items()
+    }
 
     per_question: list[dict[str, Any]] = []
     for q in questions:
@@ -412,12 +678,34 @@ async def run_eval(
         question = q["question"]
         gold = set(q["gold_stable_ids"])
 
+        # Compute visible sets for the non-full viewers and reset chunk_acl.
+        visible_stable: dict[ViewerKind, set[str]] = {}
+        for viewer in viewers:
+            visible_stable[viewer] = compute_visible_stable_ids(
+                viewer, q, all_corpus_stable_ids, viewer_construction
+            )
+        if needs_db and db_conn is not None:
+            visible_chunk_ids: dict[ViewerKind, set[uuid.UUID]] = {
+                "partial_access": {
+                    sid_to_chunk_id[sid]
+                    for sid in visible_stable.get("partial_access", set())
+                    if sid in sid_to_chunk_id
+                },
+                "no_access": {
+                    sid_to_chunk_id[sid]
+                    for sid in visible_stable.get("no_access", set())
+                    if sid in sid_to_chunk_id
+                },
+            }
+            await reset_viewer_acls(db_conn, visible_chunk_ids)
+
         entry: dict[str, Any] = {
             "id": qid,
             "category": category,
             "question": question,
             "gold_stable_ids": sorted(gold),
             "by_mode": {},
+            "by_viewer": {},
         }
         if q.get("notes") is not None:
             entry["notes"] = q["notes"]
@@ -427,60 +715,87 @@ async def run_eval(
         )
 
         for mode in modes:
-            results = await run_query(
-                mode, openai_client, http, supabase_url, supabase_headers, question
+            # Owner-side retrieval is the single source of truth for the
+            # post-filter ranking across all viewers — fetch it once per
+            # mode and re-project per viewer rather than calling N times.
+            owner_results = await run_query(
+                mode, openai_client, http, supabase_url, owner_headers, question
             )
-            retrieved_stable_ids: list[str] = []
-            unknown = 0
-            corpus_chunks: list[Any] = []
-            for r in results:
-                sid = stable_id_map.get(r.id)
-                if sid is None:
-                    # Non-corpus chunk (would only happen in a mixed-user DB
-                    # where another user's upload happens to match). Drop it
-                    # from the recall list so the eval measures corpus-only
-                    # retrieval, and surface the count for debugging.
-                    unknown += 1
-                    continue
-                retrieved_stable_ids.append(sid)
-                corpus_chunks.append(r)
 
-            mode_entry: dict[str, Any] = {
-                "top_10_stable_ids": retrieved_stable_ids,
-                "mrr": mrr(gold, retrieved_stable_ids),
-                "ndcg_at_5": ndcg_at_5(gold, retrieved_stable_ids),
-            }
-            for k in RECALL_KS:
-                mode_entry[f"recall_at_{k}"] = recall_at_k(gold, retrieved_stable_ids, k)
-            if unknown:
-                mode_entry["unknown_chunks"] = unknown
+            mode_by_viewer: dict[str, dict[str, Any]] = {}
 
-            if include_generation and reference_answer is not None and corpus_chunks:
-                # Context: the mode's top-5 retrieved chunks, concatenated.
-                # Doubles as a retrieval-quality signal: if the right chunks
-                # aren't here, faithfulness drops because the model has to
-                # either hallucinate or refuse.
-                context = "\n\n".join(
-                    f"[{stable_id_map.get(r.id, r.id)}]\n{r.content}"
-                    for r in corpus_chunks[:TOP_K_FOR_GENERATION]
+            for viewer in viewers:
+                viewer_set = visible_stable[viewer]
+
+                # Post-filter: same owner ranking, drop chunks not visible.
+                post_ids, _post_chunks, post_unknown = _project_to_corpus(
+                    owner_results, stable_id_map, viewer_set
                 )
-                answer = await generate_answer(openai_client, question, context)
-                scores = await judge_answer(
-                    anthropic_client,
-                    question=question,
-                    reference=reference_answer,
-                    context=context,
-                    answer=answer,
-                )
-                mode_entry["generated_answer"] = answer
-                mode_entry["faithfulness"] = scores["faithfulness"]
-                mode_entry["helpfulness"] = scores["helpfulness"]
-            elif include_generation and reference_answer is None:
-                # The question is in retrieval_gold.yaml but missing from
-                # generation_gold.yaml — flag rather than silently drop.
-                mode_entry["generation_skipped"] = "no_reference_answer"
+                post_block = _metrics_block(gold, post_ids, post_unknown)
 
-            entry["by_mode"][mode] = mode_entry
+                # Pre-filter: query as the viewer themselves. For
+                # full_access we re-use the owner ranking — same JWT.
+                if viewer == "full_access":
+                    pre_results = owner_results
+                else:
+                    pre_results = await run_query(
+                        mode,
+                        openai_client,
+                        http,
+                        supabase_url,
+                        viewer_headers[viewer],
+                        question,
+                    )
+                pre_ids, pre_corpus_chunks, pre_unknown = _project_to_corpus(
+                    pre_results, stable_id_map, None
+                )
+                pre_block = _metrics_block(gold, pre_ids, pre_unknown)
+
+                # Generation + judge runs only on the canonical cell so
+                # the cost stays at the US-036 budget regardless of how
+                # many viewers are exercised.
+                if (
+                    viewer == "full_access"
+                    and include_generation
+                    and reference_answer is not None
+                    and pre_corpus_chunks
+                ):
+                    context = "\n\n".join(
+                        f"[{stable_id_map.get(r.id, r.id)}]\n{r.content}"
+                        for r in pre_corpus_chunks[:TOP_K_FOR_GENERATION]
+                    )
+                    answer = await generate_answer(openai_client, question, context)
+                    scores = await judge_answer(
+                        anthropic_client,
+                        question=question,
+                        reference=reference_answer,
+                        context=context,
+                        answer=answer,
+                    )
+                    pre_block["generated_answer"] = answer
+                    pre_block["faithfulness"] = scores["faithfulness"]
+                    pre_block["helpfulness"] = scores["helpfulness"]
+                elif (
+                    viewer == "full_access"
+                    and include_generation
+                    and reference_answer is None
+                ):
+                    pre_block["generation_skipped"] = "no_reference_answer"
+
+                mode_by_viewer[viewer] = {
+                    "pre_filter": pre_block,
+                    "post_filter": post_block,
+                }
+
+            # Backward-compat: the canonical full_access × pre_filter cell
+            # remains accessible at entry["by_mode"][mode] so US-035's
+            # delta workflow and US-036 generation downstream don't have
+            # to learn the new shape.
+            if "full_access" in mode_by_viewer:
+                entry["by_mode"][mode] = mode_by_viewer["full_access"]["pre_filter"]
+            for viewer in viewers:
+                entry["by_viewer"].setdefault(viewer, {})[mode] = mode_by_viewer[viewer]
+
         per_question.append(entry)
     return per_question
 
@@ -565,9 +880,146 @@ def aggregate(
                     means_c["generation_n"] = float(n_gen)
                 by_mode_category_mean[mode][category] = means_c
 
-    return {
+    aggregates_out: dict[str, Any] = {
         "by_mode": by_mode_mean,
         "by_mode_category": by_mode_category_mean,
+    }
+    aggregates_out.update(_aggregate_viewer_filter(per_question, modes))
+    return aggregates_out
+
+
+def _aggregate_viewer_filter(
+    per_question: list[dict[str, Any]],
+    modes: tuple[str, ...],
+) -> dict[str, Any]:
+    """Compute the three new US-042 aggregates from per_question["by_viewer"].
+
+    Returns four keys:
+      * `by_viewer_filter`     — full mode×viewer×filter mean table
+                                 (recall@5, MRR, nDCG@5).
+      * `security_no_access`   — fraction of no_access runs that returned
+                                 ZERO gold chunks (per mode × filter).
+                                 Pre-filter must be 1.0; post-filter is
+                                 also 1.0 for this construction (the
+                                 visible_set excludes gold so the Python
+                                 drop achieves the same), but the table
+                                 keeps both for symmetry.
+      * `recall_tradeoff`      — per mode × category, partial_access
+                                 recall@5 pre-filter vs post-filter.
+      * `non_regression`       — per mode, full_access × pre-filter
+                                 recall@5 vs MODULE_10_BASELINE_RECALL_AT_5,
+                                 plus a `delta` and a `within_tolerance`
+                                 boolean (|delta| ≤ NON_REGRESSION_TOLERANCE).
+    """
+    keys = ("recall_at_5", "mrr", "ndcg_at_5")
+
+    by_viewer_filter: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
+    for viewer in VIEWER_ORDER:
+        viewer_present = any(viewer in q.get("by_viewer", {}) for q in per_question)
+        if not viewer_present:
+            continue
+        by_viewer_filter[viewer] = {}
+        for filt in FILTER_ORDER:
+            by_viewer_filter[viewer][filt] = {}
+            for mode in modes:
+                sums = dict.fromkeys(keys, 0.0)
+                n = 0
+                for q in per_question:
+                    cell = q.get("by_viewer", {}).get(viewer, {}).get(mode)
+                    if cell is None:
+                        continue
+                    block = cell.get(filt)
+                    if block is None:
+                        continue
+                    for k in keys:
+                        sums[k] += float(block[k])
+                    n += 1
+                if n > 0:
+                    by_viewer_filter[viewer][filt][mode] = {
+                        k: round(sums[k] / n, 4) for k in keys
+                    } | {"n": float(n)}
+
+    security_no_access: dict[str, dict[str, float]] = {}
+    if any("no_access" in q.get("by_viewer", {}) for q in per_question):
+        for filt in FILTER_ORDER:
+            security_no_access[filt] = {}
+            for mode in modes:
+                no_gold_runs = 0
+                total = 0
+                for q in per_question:
+                    block = (
+                        q.get("by_viewer", {})
+                        .get("no_access", {})
+                        .get(mode, {})
+                        .get(filt)
+                    )
+                    if block is None:
+                        continue
+                    total += 1
+                    # "0 gold chunks retrieved" — recall@k=0 across the board
+                    # is the simplest signal. Use recall_at_10 (widest k) so
+                    # the test catches leakage anywhere in the top-10.
+                    if float(block.get("recall_at_10", 0.0)) == 0.0:
+                        no_gold_runs += 1
+                if total > 0:
+                    security_no_access[filt][mode] = round(no_gold_runs / total, 4)
+
+    recall_tradeoff: dict[str, dict[str, dict[str, float]]] = {}
+    if any("partial_access" in q.get("by_viewer", {}) for q in per_question):
+        recall_tradeoff = {}
+        # Per (mode × category): mean recall@5 under pre vs post.
+        for mode in modes:
+            recall_tradeoff[mode] = {}
+            for category in (None,) + CATEGORY_ORDER:  # None = overall
+                pre_sum = 0.0
+                post_sum = 0.0
+                n = 0
+                for q in per_question:
+                    if category is not None and q["category"] != category:
+                        continue
+                    cell = q.get("by_viewer", {}).get("partial_access", {}).get(mode)
+                    if cell is None:
+                        continue
+                    pre_sum += float(cell["pre_filter"]["recall_at_5"])
+                    post_sum += float(cell["post_filter"]["recall_at_5"])
+                    n += 1
+                if n > 0:
+                    label = "overall" if category is None else category
+                    recall_tradeoff[mode][label] = {
+                        "pre_filter": round(pre_sum / n, 4),
+                        "post_filter": round(post_sum / n, 4),
+                        "delta": round((pre_sum - post_sum) / n, 4),
+                        "n": float(n),
+                    }
+
+    non_regression: dict[str, dict[str, float | bool]] = {}
+    if any("full_access" in q.get("by_viewer", {}) for q in per_question):
+        for mode in modes:
+            full_pre = (
+                by_viewer_filter.get("full_access", {})
+                .get("pre_filter", {})
+                .get(mode)
+            )
+            if full_pre is None:
+                continue
+            actual = float(full_pre["recall_at_5"])
+            baseline = MODULE_10_BASELINE_RECALL_AT_5.get(mode)
+            if baseline is None:
+                continue
+            delta = round(actual - baseline, 4)
+            non_regression[mode] = {
+                "actual_recall_at_5": actual,
+                "baseline_recall_at_5": baseline,
+                "delta": delta,
+                "tolerance": NON_REGRESSION_TOLERANCE,
+                "within_tolerance": abs(delta) <= NON_REGRESSION_TOLERANCE,
+            }
+
+    return {
+        "by_viewer_filter": by_viewer_filter,
+        "security_no_access": security_no_access,
+        "recall_tradeoff": recall_tradeoff,
+        "non_regression": non_regression,
     }
 
 
@@ -632,6 +1084,68 @@ def render_summary(aggregates: dict[str, Any], modes: tuple[str, ...]) -> str:
                 f"| {mode} | {n} | {m['faithfulness']:.2f} | {m['helpfulness']:.2f} |"
             )
 
+    # US-042: viewer-parameterized tables. Each renders only when its
+    # source aggregate is non-empty so retrieval-only / single-viewer
+    # invocations keep producing the same compact summary as before.
+    security = aggregates.get("security_no_access", {})
+    if security:
+        lines += [
+            "",
+            "### Security (US-042) — fraction of no_access runs that returned 0 gold chunks",
+            "",
+            "| Mode | Pre-filter | Post-filter |",
+            "|---|---|---|",
+        ]
+        for mode in modes:
+            pre = security.get("pre_filter", {}).get(mode)
+            post = security.get("post_filter", {}).get(mode)
+            if pre is None and post is None:
+                continue
+            pre_s = f"{pre:.3f}" if pre is not None else "—"
+            post_s = f"{post:.3f}" if post is not None else "—"
+            lines.append(f"| {mode} | {pre_s} | {post_s} |")
+
+    tradeoff = aggregates.get("recall_tradeoff", {})
+    if tradeoff:
+        lines += [
+            "",
+            "### Recall trade-off (US-042) — partial_access recall@5: pre-filter vs post-filter",
+            "",
+            "| Mode | Category | Pre | Post | Δ (pre−post) |",
+            "|---|---|---|---|---|",
+        ]
+        for mode in modes:
+            cat_map = tradeoff.get(mode, {})
+            row_order = ["overall"] + list(CATEGORY_ORDER)
+            for label in row_order:
+                cell = cat_map.get(label)
+                if cell is None:
+                    continue
+                lines.append(
+                    f"| {mode} | {label} | {cell['pre_filter']:.3f} | "
+                    f"{cell['post_filter']:.3f} | {cell['delta']:+.3f} |"
+                )
+
+    non_reg = aggregates.get("non_regression", {})
+    if non_reg:
+        lines += [
+            "",
+            "### Non-regression (US-042) — full_access recall@5 vs Module-10 baseline",
+            "",
+            "| Mode | Actual | Baseline | Δ | Within ±0.005? |",
+            "|---|---|---|---|---|",
+        ]
+        for mode in modes:
+            cell = non_reg.get(mode)
+            if cell is None:
+                continue
+            ok = "✓" if cell["within_tolerance"] else "✗"
+            lines.append(
+                f"| {mode} | {cell['actual_recall_at_5']:.3f} | "
+                f"{cell['baseline_recall_at_5']:.3f} | "
+                f"{cell['delta']:+.3f} | {ok} |"
+            )
+
     lines += ["", "<!-- END EVAL_SUMMARY -->", ""]
     return "\n".join(lines)
 
@@ -677,6 +1191,17 @@ async def amain() -> int:
         default=DEFAULT_GENERATION_GOLD,
         help="Path to generation_gold.yaml (reference answers).",
     )
+    parser.add_argument(
+        "--viewers",
+        choices=["full", "partial", "no_access", "all"],
+        default="all",
+        help=(
+            "US-042: viewer setups to run. `all` (default) walks the three "
+            "permission setups defined in the YAML's viewer_construction "
+            "block — 50 questions × 3 viewers per mode. `full` reproduces "
+            "the pre-Module-11 single-viewer behaviour."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -704,7 +1229,20 @@ async def amain() -> int:
         raise RuntimeError("CORPUS_SEED_DATABASE_URL or DATABASE_URL is required")
 
     modes: tuple[str, ...] = MODES if args.mode == "all" else (args.mode,)
-    questions = load_questions(args.questions)
+    questions, viewer_construction = load_questions(args.questions)
+
+    viewer_alias = {
+        "full": ("full_access",),
+        "partial": ("full_access", "partial_access"),
+        "no_access": ("full_access", "no_access"),
+        "all": VIEWER_ORDER,
+    }
+    viewers: tuple[ViewerKind, ...] = viewer_alias[args.viewers]
+    if not viewer_construction and any(v != "full_access" for v in viewers):
+        raise RuntimeError(
+            "non-full viewers requested but YAML lacks a viewer_construction "
+            "block — add it to retrieval_gold.yaml or run with --viewers full"
+        )
 
     generation_gold: dict[str, str] | None = None
     anthropic_client: Any | None = None
@@ -732,28 +1270,59 @@ async def amain() -> int:
             "no chunks with stable_id found — run `python -m db_seed.corpus_seed` first"
         )
 
-    supabase_headers = {
-        "apikey": service_role_key,
-        "Authorization": f"Bearer {service_role_key}",
-        "Content-Type": "application/json",
+    # US-042: post-US-037 the match_chunks predicate requires auth.uid() to
+    # match either the chunk owner or an ACL row, so service-role-only
+    # requests now return zero. Mint a JWT for the corpus user so the
+    # owner-side retrieval (which feeds full_access pre_filter and every
+    # post_filter ranking) actually finds the corpus chunks. Service-role
+    # is still used for chunk_acl management via the asyncpg connection.
+    jwt_secret = os.environ.get("SUPABASE_JWT_SECRET") or LOCAL_JWT_SECRET
+    anon_key = os.environ.get("SUPABASE_ANON_KEY") or service_role_key
+    owner_jwt = mint_user_jwt(CORPUS_USER_ID, CORPUS_USER_EMAIL, jwt_secret)
+    owner_headers = user_headers(owner_jwt, anon_key)
+
+    viewer_headers: dict[ViewerKind, dict[str, str]] = {
+        "full_access": owner_headers,
     }
+    if "partial_access" in viewers or "no_access" in viewers:
+        await ensure_viewer_users(database_url)
+        if "partial_access" in viewers:
+            viewer_headers["partial_access"] = user_headers(
+                mint_user_jwt(PARTIAL_VIEWER_ID, PARTIAL_VIEWER_EMAIL, jwt_secret),
+                anon_key,
+            )
+        if "no_access" in viewers:
+            viewer_headers["no_access"] = user_headers(
+                mint_user_jwt(NO_ACCESS_VIEWER_ID, NO_ACCESS_VIEWER_EMAIL, jwt_secret),
+                anon_key,
+            )
 
     openai_client = AsyncOpenAI(api_key=openai_api_key)
     started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     started = time.perf_counter()
 
-    async with httpx.AsyncClient(timeout=30.0) as http:
-        per_question = await run_eval(
-            questions,
-            modes,
-            stable_id_map,
-            openai_client,
-            http,
-            supabase_url,
-            supabase_headers,
-            generation_gold=generation_gold,
-            anthropic_client=anthropic_client,
-        )
+    needs_db = any(v != "full_access" for v in viewers)
+    db_conn = await asyncpg.connect(database_url) if needs_db else None
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            per_question = await run_eval(
+                questions,
+                modes,
+                viewers,
+                viewer_construction,
+                viewer_headers,
+                stable_id_map,
+                openai_client,
+                http,
+                supabase_url,
+                owner_headers,
+                db_conn,
+                generation_gold=generation_gold,
+                anthropic_client=anthropic_client,
+            )
+    finally:
+        if db_conn is not None:
+            await db_conn.close()
 
     aggregates = aggregate(per_question, modes)
     elapsed_s = round(time.perf_counter() - started, 2)
@@ -762,6 +1331,7 @@ async def amain() -> int:
         "generated_at": started_at,
         "elapsed_s": elapsed_s,
         "modes": list(modes),
+        "viewers": list(viewers),
         "n_questions": len(per_question),
         "n_corpus_chunks": len(stable_id_map),
         "generation_included": bool(args.include_generation),
@@ -787,7 +1357,7 @@ async def amain() -> int:
     suffix = " + generation" if args.include_generation else ""
     print(
         f"retrieval eval done{suffix}: {len(per_question)} questions × "
-        f"{len(modes)} modes in {elapsed_s}s → {out_path}"
+        f"{len(modes)} modes × {len(viewers)} viewers in {elapsed_s}s → {out_path}"
     )
     for mode in modes:
         m = aggregates["by_mode"][mode]

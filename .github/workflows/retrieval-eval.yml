@@ -7,6 +7,16 @@
 # cost real money per call and add API-dependency flake to PR checks.
 # The nightly workflow (retrieval-eval-nightly.yml) is where rerankers
 # eventually land once the runner gains reranker support.
+#
+# US-042: the runner now walks 50 questions × 3 modes × 3 viewers ×
+# 2 filter strategies, so the wall-clock budget grows ~3× (each viewer
+# adds an extra match_chunks round-trip per question per mode; post-
+# filter re-uses the owner ranking). Both PR and main are run, so the
+# combined budget is ~6×. timeout-minutes bumped accordingly. Note that
+# `main` predates US-042 — its runner doesn't accept `--viewers`, so it
+# runs the legacy single-viewer flow; the PR's runner produces the
+# richer JSON, and `by_mode` (the canonical full_access × pre_filter
+# numbers) is preserved on both sides for diff_results to consume.
 
 name: Retrieval eval (PR)
 
@@ -35,7 +45,7 @@ jobs:
   retrieval-eval:
     name: PR vs main
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
 
     steps:
       - name: Checkout PR head
@@ -96,7 +106,10 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python -m db_seed.corpus_seed
-          python -m evals.retrieval.runner --out /tmp/pr.json
+          # US-042: --viewers all is the default; spelled out here so the
+          # workflow log clearly records the run shape. Drops to --viewers
+          # full if the new tables are ever too noisy in PR comments.
+          python -m evals.retrieval.runner --viewers all --out /tmp/pr.json
 
       - name: Reseed corpus + run eval (main)
         working-directory: main
