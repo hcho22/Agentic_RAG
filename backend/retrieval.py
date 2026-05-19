@@ -414,3 +414,94 @@ async def hybrid_search(
     vector_results, keyword_results = await asyncio.gather(vector_task, keyword_task)
 
     return _rrf_fuse([vector_results, keyword_results], top_k=top_k, k=get_rrf_k())
+
+
+# -----------------------------------------------------------------------------
+# list_documents: filename-level discovery. search_documents matches on chunk
+# content only, so content-free queries like "summarize 090725.txt" return
+# nothing. This tool lets the agent enumerate the caller's docs by filename /
+# title so it can pick the right document_id for spawn_document_agent.
+# -----------------------------------------------------------------------------
+
+LIST_DOCUMENTS_MAX_LIMIT = 100
+LIST_DOCUMENTS_DEFAULT_LIMIT = 25
+
+
+class ListDocumentsInput(BaseModel):
+    limit: int = Field(
+        default=LIST_DOCUMENTS_DEFAULT_LIMIT,
+        ge=1,
+        le=LIST_DOCUMENTS_MAX_LIMIT,
+        description=(
+            f"Max documents to return (1..{LIST_DOCUMENTS_MAX_LIMIT}). "
+            f"Defaults to {LIST_DOCUMENTS_DEFAULT_LIMIT}, ordered newest first."
+        ),
+    )
+
+
+class ListDocumentsItem(BaseModel):
+    document_id: str
+    filename: str
+    title: str | None = None
+    chunks_count: int | None = None
+    status: str | None = None
+    uploaded_at: str | None = None
+
+
+async def list_documents(
+    http: httpx.AsyncClient,
+    supabase_url: str,
+    supabase_headers: dict[str, str],
+    limit: int = LIST_DOCUMENTS_DEFAULT_LIMIT,
+) -> list[ListDocumentsItem]:
+    """Return the caller's ready documents, newest first, under their JWT.
+
+    Soft-deleted rows are excluded server-side. `status` is included so the
+    agent can tell the user when a doc is still ingesting (and not silently
+    pretend it's missing).
+    """
+    r = await http.get(
+        f"{supabase_url}/rest/v1/documents",
+        params={
+            "select": "id,filename,chunks_count,status,uploaded_at,metadata",
+            "deleted_at": "is.null",
+            "order": "uploaded_at.desc",
+            "limit": str(min(max(limit, 1), LIST_DOCUMENTS_MAX_LIMIT)),
+        },
+        headers=supabase_headers,
+    )
+    r.raise_for_status()
+    out: list[ListDocumentsItem] = []
+    for row in r.json():
+        meta = row.get("metadata") or {}
+        out.append(
+            ListDocumentsItem(
+                document_id=row["id"],
+                filename=row.get("filename") or "",
+                title=meta.get("title") if isinstance(meta, dict) else None,
+                chunks_count=row.get("chunks_count"),
+                status=row.get("status"),
+                uploaded_at=row.get("uploaded_at"),
+            )
+        )
+    return out
+
+
+def list_documents_tool_schema() -> dict[str, Any]:
+    """Chat Completions `tools[]` entry for the list_documents tool."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "list_documents",
+            "description": (
+                "List the caller's ingested documents (newest first) with "
+                "`document_id`, `filename`, `title`, `chunks_count`, and "
+                "`status`. Use this when the user names a file by filename "
+                "(e.g. '090725.txt', 'youtube_transcript_0526.txt') or asks "
+                "what's been uploaded. Pick the matching `document_id` and "
+                "pass it to `spawn_document_agent` for full-document tasks, "
+                "or use it to inform a follow-up `search_documents` query."
+            ),
+            "parameters": ListDocumentsInput.model_json_schema(),
+        },
+    }

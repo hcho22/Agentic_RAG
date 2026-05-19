@@ -58,6 +58,7 @@ from reranking import (
 )
 from retrieval import (
     METADATA_SCHEMA_HINT,
+    ListDocumentsInput,
     SearchDocumentsInput,
     SearchDocumentsResult,
     get_retrieval_mode,
@@ -66,6 +67,8 @@ from retrieval import (
     hybrid_search,
     keyword_only_search,
     keyword_search,
+    list_documents,
+    list_documents_tool_schema,
     search_documents,
     search_documents_tool_schema,
 )
@@ -176,6 +179,11 @@ COMPLETIONS_SYSTEM_PROMPT_BASE = (
     "answer whenever the question might be answerable from the user's own "
     "documents. When you cite tool results, mention the document filename. If "
     "no relevant chunks are returned, answer from general knowledge and say so.\n\n"
+    "When the user names a specific file by filename (e.g. '090725.txt', "
+    "'foo.pdf') OR asks a content-light question about a named document "
+    "(summarize / outline / tldr of <filename>), call `list_documents` first "
+    "to resolve the filename to a `document_id`. `search_documents` matches "
+    "chunk content only, so filenames alone will not retrieve anything.\n\n"
     # US-017: tell the agent what structured metadata is available so it can
     # decide when to pass `filters` to search_documents.
     + METADATA_SCHEMA_HINT
@@ -743,6 +751,25 @@ async def _execute_tool_call(
     except json.JSONDecodeError as e:
         return json.dumps({"error": f"invalid tool arguments json: {e}"})
 
+    if name == "list_documents":
+        try:
+            validated_list = ListDocumentsInput(**args)
+            items = await list_documents(
+                http=http,
+                supabase_url=SUPABASE_URL,
+                supabase_headers=_supabase_headers(user),
+                limit=validated_list.limit,
+            )
+            return json.dumps(
+                {
+                    "documents": [item.model_dump() for item in items],
+                    "count": len(items),
+                }
+            )
+        except Exception as e:  # noqa: BLE001 — surface to model as tool error
+            log.exception("list_documents tool failed")
+            return json.dumps({"error": str(e)})
+
     if name == "search_documents":
         try:
             validated = SearchDocumentsInput(**args)
@@ -894,7 +921,7 @@ async def _stream_completions_reply(
         messages.extend(_prior_to_completions(windowed))
         messages.append({"role": "user", "content": message})
 
-        tools = [search_documents_tool_schema()]
+        tools = [list_documents_tool_schema(), search_documents_tool_schema()]
         # US-030: plan_query + sql_search replace query_database. Both are
         # registered together (sql_search is useless without plan_query) and
         # gated on a live semantic layer plus a CRM DB URL. The old
