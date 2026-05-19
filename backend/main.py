@@ -137,7 +137,7 @@ SUPABASE_ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
 # to the user-JWT lookup, which collapses 403 → 404 for callers who can't
 # see the doc at all (still secure, just less precise).
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or None
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"].strip()
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_VECTOR_STORE_ID = os.environ.get("OPENAI_VECTOR_STORE_ID") or None
 FRONTEND_ORIGINS = [

@@ -38,7 +38,8 @@ from typing import Any, Literal
 import httpx
 from langsmith import traceable
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from uuid import UUID
 
 log = logging.getLogger("agentic_rag.backend.subagent")
 
@@ -149,12 +150,27 @@ class SpawnDocumentAgentInput(BaseModel):
     document_id: str = Field(
         ...,
         description=(
-            "ID of the user's document to delegate to the sub-agent. If you "
-            "don't already have a document_id, first call `search_documents` "
-            "with a query that identifies the right document, then take the "
-            "`document_id` from a high-similarity result."
+            "UUID of the user's document (e.g. 'fef3242e-2b41-4795-b5e8-...'). "
+            "This is the `document_id` field returned by `search_documents`, "
+            "NOT the filename. If you don't already have a UUID, call "
+            "`search_documents` first with a query that identifies the right "
+            "document, then take `document_id` from a high-similarity result."
         ),
     )
+
+    @field_validator("document_id")
+    @classmethod
+    def _validate_uuid(cls, v: str) -> str:
+        try:
+            UUID(v)
+        except (ValueError, AttributeError, TypeError):
+            raise ValueError(
+                f"document_id must be a UUID (got {v!r}). If you have the "
+                "filename, call `search_documents(query=<filename or topic>)` "
+                "first and use the `document_id` field from a result."
+            )
+        return v
+
     task: str = Field(
         ...,
         min_length=1,
