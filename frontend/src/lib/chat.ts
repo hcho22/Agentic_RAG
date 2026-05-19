@@ -74,6 +74,11 @@ export async function updateThreadTitle(threadId: string, title: string): Promis
   if (error) throw error
 }
 
+export async function deleteThread(threadId: string): Promise<void> {
+  const { error } = await supabase.from('threads').delete().eq('id', threadId)
+  if (error) throw error
+}
+
 export function deriveTitle(firstUserMessage: string): string {
   const trimmed = firstUserMessage.trim().replace(/\s+/g, ' ')
   return trimmed.length > TITLE_MAX_LEN ? trimmed.slice(0, TITLE_MAX_LEN) : trimmed
