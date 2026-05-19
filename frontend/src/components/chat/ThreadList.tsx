@@ -37,7 +37,7 @@ export function ThreadList({
             {threads.map((t) => {
               const isDeleting = deletingThreadId === t.id
               return (
-                <li key={t.id} className="group relative">
+                <li key={t.id} className="relative">
                   <NavLink
                     to={`/chat/${t.id}`}
                     className={({ isActive }) =>
@@ -60,7 +60,7 @@ export function ThreadList({
                       e.stopPropagation()
                       onDeleteThread(t.id)
                     }}
-                    className="absolute right-1 top-1/2 -translate-y-1/2 hidden h-7 w-7 items-center justify-center rounded text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-neutral-500 group-hover:flex disabled:pointer-events-none disabled:opacity-50"
+                    className="absolute right-1 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded text-lg leading-none text-neutral-500 hover:bg-neutral-700 hover:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-neutral-500 disabled:pointer-events-none disabled:opacity-50"
                   >
                     ×
                   </button>
