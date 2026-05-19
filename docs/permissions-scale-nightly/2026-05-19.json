@@ -1,0 +1,2217 @@
+{
+  "aggregates": {
+    "recall_at_5_by_viewer_ef": {
+      "viewer_10pct": {
+        "200": 1.0,
+        "40": 1.0,
+        "500": 1.0,
+        "80": 1.0
+      },
+      "viewer_1pct": {
+        "200": 1.0,
+        "40": 1.0,
+        "500": 1.0,
+        "80": 1.0
+      },
+      "viewer_50pct": {
+        "200": 1.0,
+        "40": 1.0,
+        "500": 1.0,
+        "80": 1.0
+      }
+    }
+  },
+  "config": {
+    "ef_search_for_gold": 500,
+    "ef_search_values": [
+      40,
+      80,
+      200,
+      500
+    ],
+    "top_k": 5,
+    "viewers": [
+      {
+        "id": "00000000-0000-0000-0000-000000005000",
+        "name": "viewer_50pct",
+        "visible_chunks": 5000
+      },
+      {
+        "id": "00000000-0000-0000-0000-000000001000",
+        "name": "viewer_10pct",
+        "visible_chunks": 1000
+      },
+      {
+        "id": "00000000-0000-0000-0000-000000000100",
+        "name": "viewer_1pct",
+        "visible_chunks": 100
+      }
+    ]
+  },
+  "elapsed_s": 57.65,
+  "generated_at": "2026-05-19T06:44:25+00:00",
+  "n_corpus_chunks": 10000,
+  "n_questions": 15,
+  "per_question": [
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0992",
+              "wikipedia-0007:0992",
+              "wikipedia-0009:0723",
+              "wikipedia-0008:0993",
+              "wikipedia-0004:0082"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0992",
+              "wikipedia-0007:0992",
+              "wikipedia-0009:0723",
+              "wikipedia-0008:0993",
+              "wikipedia-0004:0082"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0992",
+              "wikipedia-0007:0992",
+              "wikipedia-0009:0723",
+              "wikipedia-0008:0993",
+              "wikipedia-0004:0082"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0992",
+              "wikipedia-0007:0992",
+              "wikipedia-0009:0723",
+              "wikipedia-0008:0993",
+              "wikipedia-0004:0082"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0993",
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0294",
+              "wikipedia-0008:0985",
+              "wikipedia-0006:0351"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0993",
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0294",
+              "wikipedia-0008:0985",
+              "wikipedia-0006:0351"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0993",
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0294",
+              "wikipedia-0008:0985",
+              "wikipedia-0006:0351"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0993",
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0294",
+              "wikipedia-0008:0985",
+              "wikipedia-0006:0351"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0991",
+              "wikipedia-0008:0992",
+              "wikipedia-0009:0723",
+              "wikipedia-0009:0724",
+              "wikipedia-0008:0994"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0991",
+              "wikipedia-0008:0992",
+              "wikipedia-0009:0723",
+              "wikipedia-0009:0724",
+              "wikipedia-0008:0994"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0991",
+              "wikipedia-0008:0992",
+              "wikipedia-0009:0723",
+              "wikipedia-0009:0724",
+              "wikipedia-0008:0994"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0991",
+              "wikipedia-0008:0992",
+              "wikipedia-0009:0723",
+              "wikipedia-0009:0724",
+              "wikipedia-0008:0994"
+            ]
+          }
+        }
+      },
+      "id": "q21",
+      "question": "What's the expedited warranty replacement workflow for a Gold-tier customer with a defective home goods item?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0424",
+              "wikipedia-0006:0541",
+              "wikipedia-0007:0998",
+              "wikipedia-0006:0677",
+              "wikipedia-0000:0423"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0424",
+              "wikipedia-0006:0541",
+              "wikipedia-0007:0998",
+              "wikipedia-0006:0677",
+              "wikipedia-0000:0423"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0424",
+              "wikipedia-0006:0541",
+              "wikipedia-0007:0998",
+              "wikipedia-0006:0677",
+              "wikipedia-0000:0423"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0424",
+              "wikipedia-0006:0541",
+              "wikipedia-0007:0998",
+              "wikipedia-0006:0677",
+              "wikipedia-0000:0423"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0692",
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0449",
+              "wikipedia-0008:0413",
+              "wikipedia-0001:0168"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0692",
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0449",
+              "wikipedia-0008:0413",
+              "wikipedia-0001:0168"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0692",
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0449",
+              "wikipedia-0008:0413",
+              "wikipedia-0001:0168"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0692",
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0449",
+              "wikipedia-0008:0413",
+              "wikipedia-0001:0168"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0002:0765",
+              "wikipedia-0000:0416",
+              "wikipedia-0009:0701",
+              "wikipedia-0009:0698",
+              "wikipedia-0002:0766"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0002:0765",
+              "wikipedia-0000:0416",
+              "wikipedia-0009:0701",
+              "wikipedia-0009:0698",
+              "wikipedia-0002:0766"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0002:0765",
+              "wikipedia-0000:0416",
+              "wikipedia-0009:0701",
+              "wikipedia-0009:0698",
+              "wikipedia-0002:0766"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0002:0765",
+              "wikipedia-0000:0416",
+              "wikipedia-0009:0701",
+              "wikipedia-0009:0698",
+              "wikipedia-0002:0766"
+            ]
+          }
+        }
+      },
+      "id": "q22",
+      "question": "Can a Platinum customer use the goodwill refund exception 55 days after their order shipped?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0002:0085",
+              "wikipedia-0006:0625",
+              "wikipedia-0002:0906",
+              "wikipedia-0008:0747",
+              "wikipedia-0000:0997"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0002:0085",
+              "wikipedia-0006:0625",
+              "wikipedia-0002:0906",
+              "wikipedia-0008:0747",
+              "wikipedia-0000:0997"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0002:0085",
+              "wikipedia-0006:0625",
+              "wikipedia-0002:0906",
+              "wikipedia-0008:0747",
+              "wikipedia-0000:0997"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0002:0085",
+              "wikipedia-0006:0625",
+              "wikipedia-0002:0906",
+              "wikipedia-0008:0747",
+              "wikipedia-0000:0997"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0980",
+              "wikipedia-0006:0650",
+              "wikipedia-0005:0907",
+              "wikipedia-0006:0688",
+              "wikipedia-0006:0361"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0980",
+              "wikipedia-0006:0650",
+              "wikipedia-0005:0907",
+              "wikipedia-0006:0688",
+              "wikipedia-0006:0361"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0980",
+              "wikipedia-0006:0650",
+              "wikipedia-0005:0907",
+              "wikipedia-0006:0688",
+              "wikipedia-0006:0361"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0980",
+              "wikipedia-0006:0650",
+              "wikipedia-0005:0907",
+              "wikipedia-0006:0688",
+              "wikipedia-0006:0361"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0652",
+              "wikipedia-0003:0020",
+              "wikipedia-0006:0624",
+              "wikipedia-0002:0085",
+              "wikipedia-0005:0233"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0652",
+              "wikipedia-0003:0020",
+              "wikipedia-0006:0624",
+              "wikipedia-0002:0085",
+              "wikipedia-0005:0233"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0652",
+              "wikipedia-0003:0020",
+              "wikipedia-0006:0624",
+              "wikipedia-0002:0085",
+              "wikipedia-0005:0233"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0652",
+              "wikipedia-0003:0020",
+              "wikipedia-0006:0624",
+              "wikipedia-0002:0085",
+              "wikipedia-0005:0233"
+            ]
+          }
+        }
+      },
+      "id": "q23",
+      "question": "What's the chain of events when a worn apparel item is returned with its original packaging intact?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0423",
+              "wikipedia-0005:0036",
+              "wikipedia-0000:0424",
+              "wikipedia-0009:0723",
+              "wikipedia-0004:0511"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0423",
+              "wikipedia-0005:0036",
+              "wikipedia-0000:0424",
+              "wikipedia-0009:0723",
+              "wikipedia-0004:0511"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0423",
+              "wikipedia-0005:0036",
+              "wikipedia-0000:0424",
+              "wikipedia-0009:0723",
+              "wikipedia-0004:0511"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0423",
+              "wikipedia-0005:0036",
+              "wikipedia-0000:0424",
+              "wikipedia-0009:0723",
+              "wikipedia-0004:0511"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0810",
+              "wikipedia-0001:0710",
+              "wikipedia-0004:0025",
+              "wikipedia-0002:0261",
+              "wikipedia-0007:0873"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0810",
+              "wikipedia-0001:0710",
+              "wikipedia-0004:0025",
+              "wikipedia-0002:0261",
+              "wikipedia-0007:0873"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0810",
+              "wikipedia-0001:0710",
+              "wikipedia-0004:0025",
+              "wikipedia-0002:0261",
+              "wikipedia-0007:0873"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0810",
+              "wikipedia-0001:0710",
+              "wikipedia-0004:0025",
+              "wikipedia-0002:0261",
+              "wikipedia-0007:0873"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0036",
+              "wikipedia-0002:0046",
+              "wikipedia-0009:0268",
+              "wikipedia-0000:0137",
+              "wikipedia-0009:0709"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0036",
+              "wikipedia-0002:0046",
+              "wikipedia-0009:0268",
+              "wikipedia-0000:0137",
+              "wikipedia-0009:0709"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0036",
+              "wikipedia-0002:0046",
+              "wikipedia-0009:0268",
+              "wikipedia-0000:0137",
+              "wikipedia-0009:0709"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0036",
+              "wikipedia-0002:0046",
+              "wikipedia-0009:0268",
+              "wikipedia-0000:0137",
+              "wikipedia-0009:0709"
+            ]
+          }
+        }
+      },
+      "id": "q24",
+      "question": "What happens if an electronics SKU shows a 22% return rate over the trailing quarter?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0874",
+              "wikipedia-0009:0723",
+              "wikipedia-0007:0998",
+              "wikipedia-0009:0003",
+              "wikipedia-0007:0992"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0874",
+              "wikipedia-0009:0723",
+              "wikipedia-0007:0998",
+              "wikipedia-0009:0003",
+              "wikipedia-0007:0992"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0874",
+              "wikipedia-0009:0723",
+              "wikipedia-0007:0998",
+              "wikipedia-0009:0003",
+              "wikipedia-0007:0992"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0874",
+              "wikipedia-0009:0723",
+              "wikipedia-0007:0998",
+              "wikipedia-0009:0003",
+              "wikipedia-0007:0992"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0003:0130",
+              "wikipedia-0003:0546",
+              "wikipedia-0008:0993",
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0294"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0003:0130",
+              "wikipedia-0003:0546",
+              "wikipedia-0008:0993",
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0294"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0003:0130",
+              "wikipedia-0003:0546",
+              "wikipedia-0008:0993",
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0294"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0003:0130",
+              "wikipedia-0003:0546",
+              "wikipedia-0008:0993",
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0294"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0874",
+              "wikipedia-0007:0991",
+              "wikipedia-0007:0990",
+              "wikipedia-0009:0723",
+              "wikipedia-0007:0998"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0874",
+              "wikipedia-0007:0991",
+              "wikipedia-0007:0990",
+              "wikipedia-0009:0723",
+              "wikipedia-0007:0998"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0874",
+              "wikipedia-0007:0991",
+              "wikipedia-0007:0990",
+              "wikipedia-0009:0723",
+              "wikipedia-0007:0998"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0874",
+              "wikipedia-0007:0991",
+              "wikipedia-0007:0990",
+              "wikipedia-0009:0723",
+              "wikipedia-0007:0998"
+            ]
+          }
+        }
+      },
+      "id": "q25",
+      "question": "What's the SOP for handling a customer requesting a $700 refund 50 days after their order shipped?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0462",
+              "wikipedia-0006:0456",
+              "wikipedia-0000:0167",
+              "wikipedia-0009:0436",
+              "wikipedia-0006:0454"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0462",
+              "wikipedia-0006:0456",
+              "wikipedia-0000:0167",
+              "wikipedia-0009:0436",
+              "wikipedia-0006:0454"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0462",
+              "wikipedia-0006:0456",
+              "wikipedia-0000:0167",
+              "wikipedia-0009:0436",
+              "wikipedia-0006:0454"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0462",
+              "wikipedia-0006:0456",
+              "wikipedia-0000:0167",
+              "wikipedia-0009:0436",
+              "wikipedia-0006:0454"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0051",
+              "wikipedia-0001:0705",
+              "wikipedia-0007:0418",
+              "wikipedia-0002:0616"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0051",
+              "wikipedia-0001:0705",
+              "wikipedia-0007:0418",
+              "wikipedia-0002:0616"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0051",
+              "wikipedia-0001:0705",
+              "wikipedia-0007:0418",
+              "wikipedia-0002:0616"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0009:0051",
+              "wikipedia-0001:0705",
+              "wikipedia-0007:0418",
+              "wikipedia-0002:0616"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0004:0173",
+              "wikipedia-0006:0456",
+              "wikipedia-0006:0459",
+              "wikipedia-0006:0457",
+              "wikipedia-0009:0428"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0004:0173",
+              "wikipedia-0006:0456",
+              "wikipedia-0006:0459",
+              "wikipedia-0006:0457",
+              "wikipedia-0009:0428"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0004:0173",
+              "wikipedia-0006:0456",
+              "wikipedia-0006:0459",
+              "wikipedia-0006:0457",
+              "wikipedia-0009:0428"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0004:0173",
+              "wikipedia-0006:0456",
+              "wikipedia-0006:0459",
+              "wikipedia-0006:0457",
+              "wikipedia-0009:0428"
+            ]
+          }
+        }
+      },
+      "id": "q26",
+      "question": "If a Silver-tier customer places a $40 order, what shipping cost and timing apply?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0989",
+              "wikipedia-0006:0541",
+              "wikipedia-0005:0036",
+              "wikipedia-0009:0694",
+              "wikipedia-0007:0992"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0989",
+              "wikipedia-0006:0541",
+              "wikipedia-0005:0036",
+              "wikipedia-0009:0694",
+              "wikipedia-0007:0992"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0989",
+              "wikipedia-0006:0541",
+              "wikipedia-0005:0036",
+              "wikipedia-0009:0694",
+              "wikipedia-0007:0992"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0989",
+              "wikipedia-0006:0541",
+              "wikipedia-0005:0036",
+              "wikipedia-0009:0694",
+              "wikipedia-0007:0992"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0199",
+              "wikipedia-0009:0294",
+              "wikipedia-0003:0616",
+              "wikipedia-0007:0873",
+              "wikipedia-0003:0641"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0199",
+              "wikipedia-0009:0294",
+              "wikipedia-0003:0616",
+              "wikipedia-0007:0873",
+              "wikipedia-0003:0641"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0199",
+              "wikipedia-0009:0294",
+              "wikipedia-0003:0616",
+              "wikipedia-0007:0873",
+              "wikipedia-0003:0641"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0199",
+              "wikipedia-0009:0294",
+              "wikipedia-0003:0616",
+              "wikipedia-0007:0873",
+              "wikipedia-0003:0641"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0990",
+              "wikipedia-0006:0544",
+              "wikipedia-0007:0995",
+              "wikipedia-0007:0991",
+              "wikipedia-0007:0989"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0990",
+              "wikipedia-0006:0544",
+              "wikipedia-0007:0995",
+              "wikipedia-0007:0991",
+              "wikipedia-0007:0989"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0990",
+              "wikipedia-0006:0544",
+              "wikipedia-0007:0995",
+              "wikipedia-0007:0991",
+              "wikipedia-0007:0989"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0990",
+              "wikipedia-0006:0544",
+              "wikipedia-0007:0995",
+              "wikipedia-0007:0991",
+              "wikipedia-0007:0989"
+            ]
+          }
+        }
+      },
+      "id": "q27",
+      "question": "How does the order's shipped_at timestamp affect refund eligibility?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0989",
+              "wikipedia-0009:0723",
+              "wikipedia-0000:0431",
+              "wikipedia-0007:0609",
+              "wikipedia-0008:0992"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0989",
+              "wikipedia-0009:0723",
+              "wikipedia-0000:0431",
+              "wikipedia-0007:0609",
+              "wikipedia-0008:0992"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0989",
+              "wikipedia-0009:0723",
+              "wikipedia-0000:0431",
+              "wikipedia-0007:0609",
+              "wikipedia-0008:0992"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0989",
+              "wikipedia-0009:0723",
+              "wikipedia-0000:0431",
+              "wikipedia-0007:0609",
+              "wikipedia-0008:0992"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0130",
+              "wikipedia-0005:0907",
+              "wikipedia-0003:0616",
+              "wikipedia-0005:0572"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0130",
+              "wikipedia-0005:0907",
+              "wikipedia-0003:0616",
+              "wikipedia-0005:0572"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0130",
+              "wikipedia-0005:0907",
+              "wikipedia-0003:0616",
+              "wikipedia-0005:0572"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0130",
+              "wikipedia-0005:0907",
+              "wikipedia-0003:0616",
+              "wikipedia-0005:0572"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0989",
+              "wikipedia-0008:0188",
+              "wikipedia-0001:0791",
+              "wikipedia-0009:0723",
+              "wikipedia-0000:0283"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0989",
+              "wikipedia-0008:0188",
+              "wikipedia-0001:0791",
+              "wikipedia-0009:0723",
+              "wikipedia-0000:0283"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0989",
+              "wikipedia-0008:0188",
+              "wikipedia-0001:0791",
+              "wikipedia-0009:0723",
+              "wikipedia-0000:0283"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0008:0989",
+              "wikipedia-0008:0188",
+              "wikipedia-0001:0791",
+              "wikipedia-0009:0723",
+              "wikipedia-0000:0283"
+            ]
+          }
+        }
+      },
+      "id": "q28",
+      "question": "What's the inspection-and-refund flow for a damaged-in-transit electronics order?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0996",
+              "wikipedia-0006:0333",
+              "wikipedia-0006:0541",
+              "wikipedia-0002:0927",
+              "wikipedia-0006:0540"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0996",
+              "wikipedia-0006:0333",
+              "wikipedia-0006:0541",
+              "wikipedia-0002:0927",
+              "wikipedia-0006:0540"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0996",
+              "wikipedia-0006:0333",
+              "wikipedia-0006:0541",
+              "wikipedia-0002:0927",
+              "wikipedia-0006:0540"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0996",
+              "wikipedia-0006:0333",
+              "wikipedia-0006:0541",
+              "wikipedia-0002:0927",
+              "wikipedia-0006:0540"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0351",
+              "wikipedia-0001:0677",
+              "wikipedia-0002:0261",
+              "wikipedia-0004:0025",
+              "wikipedia-0004:0024"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0351",
+              "wikipedia-0001:0677",
+              "wikipedia-0002:0261",
+              "wikipedia-0004:0025",
+              "wikipedia-0004:0024"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0351",
+              "wikipedia-0001:0677",
+              "wikipedia-0002:0261",
+              "wikipedia-0004:0025",
+              "wikipedia-0004:0024"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0351",
+              "wikipedia-0001:0677",
+              "wikipedia-0002:0261",
+              "wikipedia-0004:0025",
+              "wikipedia-0004:0024"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0701",
+              "wikipedia-0009:0700",
+              "wikipedia-0009:0698",
+              "wikipedia-0006:0328",
+              "wikipedia-0006:0329"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0701",
+              "wikipedia-0009:0700",
+              "wikipedia-0009:0698",
+              "wikipedia-0006:0328",
+              "wikipedia-0006:0329"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0701",
+              "wikipedia-0009:0700",
+              "wikipedia-0009:0698",
+              "wikipedia-0006:0328",
+              "wikipedia-0006:0329"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0701",
+              "wikipedia-0009:0700",
+              "wikipedia-0009:0698",
+              "wikipedia-0006:0328",
+              "wikipedia-0006:0329"
+            ]
+          }
+        }
+      },
+      "id": "q29",
+      "question": "How does the loyalty-tier grace period interact with the monthly tier recalculation and active-customer metric?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0000:0287",
+              "wikipedia-0000:0043",
+              "wikipedia-0000:0717",
+              "wikipedia-0003:0911"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0000:0287",
+              "wikipedia-0000:0043",
+              "wikipedia-0000:0717",
+              "wikipedia-0003:0911"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0000:0287",
+              "wikipedia-0000:0043",
+              "wikipedia-0000:0717",
+              "wikipedia-0003:0911"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0000:0287",
+              "wikipedia-0000:0043",
+              "wikipedia-0000:0717",
+              "wikipedia-0003:0911"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0003:0505",
+              "wikipedia-0006:0351",
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0130",
+              "wikipedia-0002:0044"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0003:0505",
+              "wikipedia-0006:0351",
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0130",
+              "wikipedia-0002:0044"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0003:0505",
+              "wikipedia-0006:0351",
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0130",
+              "wikipedia-0002:0044"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0003:0505",
+              "wikipedia-0006:0351",
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0130",
+              "wikipedia-0002:0044"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0287",
+              "wikipedia-0003:0914",
+              "wikipedia-0000:0043",
+              "wikipedia-0000:0286",
+              "wikipedia-0000:0289"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0287",
+              "wikipedia-0003:0914",
+              "wikipedia-0000:0043",
+              "wikipedia-0000:0286",
+              "wikipedia-0000:0289"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0287",
+              "wikipedia-0003:0914",
+              "wikipedia-0000:0043",
+              "wikipedia-0000:0286",
+              "wikipedia-0000:0289"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0287",
+              "wikipedia-0003:0914",
+              "wikipedia-0000:0043",
+              "wikipedia-0000:0286",
+              "wikipedia-0000:0289"
+            ]
+          }
+        }
+      },
+      "id": "q30",
+      "question": "How is an active-hours fraud report handled after the phone line closes for the day?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0609",
+              "wikipedia-0006:0454",
+              "wikipedia-0005:0160",
+              "wikipedia-0001:0786",
+              "wikipedia-0007:0992"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0609",
+              "wikipedia-0006:0454",
+              "wikipedia-0005:0160",
+              "wikipedia-0001:0786",
+              "wikipedia-0007:0992"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0609",
+              "wikipedia-0006:0454",
+              "wikipedia-0005:0160",
+              "wikipedia-0001:0786",
+              "wikipedia-0007:0992"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0609",
+              "wikipedia-0006:0454",
+              "wikipedia-0005:0160",
+              "wikipedia-0001:0786",
+              "wikipedia-0007:0992"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0956",
+              "wikipedia-0009:0564",
+              "wikipedia-0000:0171",
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0619"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0956",
+              "wikipedia-0009:0564",
+              "wikipedia-0000:0171",
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0619"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0956",
+              "wikipedia-0009:0564",
+              "wikipedia-0000:0171",
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0619"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0956",
+              "wikipedia-0009:0564",
+              "wikipedia-0000:0171",
+              "wikipedia-0008:0993",
+              "wikipedia-0003:0619"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0038",
+              "wikipedia-0005:0952",
+              "wikipedia-0009:0718",
+              "wikipedia-0001:0717",
+              "wikipedia-0007:0991"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0038",
+              "wikipedia-0005:0952",
+              "wikipedia-0009:0718",
+              "wikipedia-0001:0717",
+              "wikipedia-0007:0991"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0038",
+              "wikipedia-0005:0952",
+              "wikipedia-0009:0718",
+              "wikipedia-0001:0717",
+              "wikipedia-0007:0991"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0038",
+              "wikipedia-0005:0952",
+              "wikipedia-0009:0718",
+              "wikipedia-0001:0717",
+              "wikipedia-0007:0991"
+            ]
+          }
+        }
+      },
+      "id": "q31",
+      "question": "What's required from the customer when a glassware item arrives broken, and what refund amount applies?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0976",
+              "wikipedia-0008:0170",
+              "wikipedia-0009:0427",
+              "wikipedia-0005:0333",
+              "wikipedia-0009:0346"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0976",
+              "wikipedia-0008:0170",
+              "wikipedia-0009:0427",
+              "wikipedia-0005:0333",
+              "wikipedia-0009:0346"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0976",
+              "wikipedia-0008:0170",
+              "wikipedia-0009:0427",
+              "wikipedia-0005:0333",
+              "wikipedia-0009:0346"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0976",
+              "wikipedia-0008:0170",
+              "wikipedia-0009:0427",
+              "wikipedia-0005:0333",
+              "wikipedia-0009:0346"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0688",
+              "wikipedia-0003:0862",
+              "wikipedia-0001:0710",
+              "wikipedia-0007:0884"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0688",
+              "wikipedia-0003:0862",
+              "wikipedia-0001:0710",
+              "wikipedia-0007:0884"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0688",
+              "wikipedia-0003:0862",
+              "wikipedia-0001:0710",
+              "wikipedia-0007:0884"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0688",
+              "wikipedia-0003:0862",
+              "wikipedia-0001:0710",
+              "wikipedia-0007:0884"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0978",
+              "wikipedia-0007:0982",
+              "wikipedia-0009:0428",
+              "wikipedia-0008:0713",
+              "wikipedia-0006:0331"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0978",
+              "wikipedia-0007:0982",
+              "wikipedia-0009:0428",
+              "wikipedia-0008:0713",
+              "wikipedia-0006:0331"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0978",
+              "wikipedia-0007:0982",
+              "wikipedia-0009:0428",
+              "wikipedia-0008:0713",
+              "wikipedia-0006:0331"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0007:0978",
+              "wikipedia-0007:0982",
+              "wikipedia-0009:0428",
+              "wikipedia-0008:0713",
+              "wikipedia-0006:0331"
+            ]
+          }
+        }
+      },
+      "id": "q32",
+      "question": "Why might SUM(unit_price * quantity) on order_items differ from SUM(products.list_price * quantity), and which should be used for reporting revenue?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0008:0176",
+              "wikipedia-0000:0043",
+              "wikipedia-0007:0764",
+              "wikipedia-0009:0436"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0008:0176",
+              "wikipedia-0000:0043",
+              "wikipedia-0007:0764",
+              "wikipedia-0009:0436"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0008:0176",
+              "wikipedia-0000:0043",
+              "wikipedia-0007:0764",
+              "wikipedia-0009:0436"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0008:0176",
+              "wikipedia-0000:0043",
+              "wikipedia-0007:0764",
+              "wikipedia-0009:0436"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0351",
+              "wikipedia-0003:0130",
+              "wikipedia-0001:0810",
+              "wikipedia-0003:0505",
+              "wikipedia-0003:0641"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0351",
+              "wikipedia-0003:0130",
+              "wikipedia-0001:0810",
+              "wikipedia-0003:0505",
+              "wikipedia-0003:0641"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0351",
+              "wikipedia-0003:0130",
+              "wikipedia-0001:0810",
+              "wikipedia-0003:0505",
+              "wikipedia-0003:0641"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0351",
+              "wikipedia-0003:0130",
+              "wikipedia-0001:0810",
+              "wikipedia-0003:0505",
+              "wikipedia-0003:0641"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0403",
+              "wikipedia-0007:0765",
+              "wikipedia-0007:0760",
+              "wikipedia-0005:0952",
+              "wikipedia-0000:0043"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0403",
+              "wikipedia-0007:0765",
+              "wikipedia-0007:0760",
+              "wikipedia-0005:0952",
+              "wikipedia-0000:0043"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0403",
+              "wikipedia-0007:0765",
+              "wikipedia-0007:0760",
+              "wikipedia-0005:0952",
+              "wikipedia-0000:0043"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0403",
+              "wikipedia-0007:0765",
+              "wikipedia-0007:0760",
+              "wikipedia-0005:0952",
+              "wikipedia-0000:0043"
+            ]
+          }
+        }
+      },
+      "id": "q33",
+      "question": "What's the difference between the cancellation cutoff and the refund eligibility window?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0436",
+              "wikipedia-0007:0314",
+              "wikipedia-0006:0456",
+              "wikipedia-0003:0862",
+              "wikipedia-0006:0462"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0436",
+              "wikipedia-0007:0314",
+              "wikipedia-0006:0456",
+              "wikipedia-0003:0862",
+              "wikipedia-0006:0462"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0436",
+              "wikipedia-0007:0314",
+              "wikipedia-0006:0456",
+              "wikipedia-0003:0862",
+              "wikipedia-0006:0462"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0436",
+              "wikipedia-0007:0314",
+              "wikipedia-0006:0456",
+              "wikipedia-0003:0862",
+              "wikipedia-0006:0462"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0199",
+              "wikipedia-0003:0862",
+              "wikipedia-0009:0294",
+              "wikipedia-0000:0171",
+              "wikipedia-0003:0616"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0199",
+              "wikipedia-0003:0862",
+              "wikipedia-0009:0294",
+              "wikipedia-0000:0171",
+              "wikipedia-0003:0616"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0199",
+              "wikipedia-0003:0862",
+              "wikipedia-0009:0294",
+              "wikipedia-0000:0171",
+              "wikipedia-0003:0616"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0001:0199",
+              "wikipedia-0003:0862",
+              "wikipedia-0009:0294",
+              "wikipedia-0000:0171",
+              "wikipedia-0003:0616"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0718",
+              "wikipedia-0001:0337",
+              "wikipedia-0009:0717",
+              "wikipedia-0006:0461",
+              "wikipedia-0009:0301"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0718",
+              "wikipedia-0001:0337",
+              "wikipedia-0009:0717",
+              "wikipedia-0006:0461",
+              "wikipedia-0009:0301"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0718",
+              "wikipedia-0001:0337",
+              "wikipedia-0009:0717",
+              "wikipedia-0006:0461",
+              "wikipedia-0009:0301"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0009:0718",
+              "wikipedia-0001:0337",
+              "wikipedia-0009:0717",
+              "wikipedia-0006:0461",
+              "wikipedia-0009:0301"
+            ]
+          }
+        }
+      },
+      "id": "q34",
+      "question": "How are international import duties handled when an international order is later refunded?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0002:0927",
+              "wikipedia-0009:0436",
+              "wikipedia-0005:0036",
+              "wikipedia-0006:0541"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0002:0927",
+              "wikipedia-0009:0436",
+              "wikipedia-0005:0036",
+              "wikipedia-0006:0541"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0002:0927",
+              "wikipedia-0009:0436",
+              "wikipedia-0005:0036",
+              "wikipedia-0006:0541"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0006:0333",
+              "wikipedia-0002:0927",
+              "wikipedia-0009:0436",
+              "wikipedia-0005:0036",
+              "wikipedia-0006:0541"
+            ]
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0351",
+              "wikipedia-0003:0692",
+              "wikipedia-0003:0693",
+              "wikipedia-0003:0546"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0351",
+              "wikipedia-0003:0692",
+              "wikipedia-0003:0693",
+              "wikipedia-0003:0546"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0351",
+              "wikipedia-0003:0692",
+              "wikipedia-0003:0693",
+              "wikipedia-0003:0546"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0000:0171",
+              "wikipedia-0006:0351",
+              "wikipedia-0003:0692",
+              "wikipedia-0003:0693",
+              "wikipedia-0003:0546"
+            ]
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0952",
+              "wikipedia-0002:0046",
+              "wikipedia-0006:0329",
+              "wikipedia-0002:0246",
+              "wikipedia-0001:0014"
+            ]
+          },
+          "40": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0952",
+              "wikipedia-0002:0046",
+              "wikipedia-0006:0329",
+              "wikipedia-0002:0246",
+              "wikipedia-0001:0014"
+            ]
+          },
+          "500": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0952",
+              "wikipedia-0002:0046",
+              "wikipedia-0006:0329",
+              "wikipedia-0002:0246",
+              "wikipedia-0001:0014"
+            ]
+          },
+          "80": {
+            "n_returned": 5,
+            "recall_at_5": 1.0,
+            "top_stable_ids": [
+              "wikipedia-0005:0952",
+              "wikipedia-0002:0046",
+              "wikipedia-0006:0329",
+              "wikipedia-0002:0246",
+              "wikipedia-0001:0014"
+            ]
+          }
+        }
+      },
+      "id": "q35",
+      "question": "What benefits does a customer lose immediately if they close their Platinum account?"
+    }
+  ]
+}
