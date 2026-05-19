@@ -8,9 +8,18 @@ type Props = {
   loading: boolean
   onNewThread: () => void
   creating: boolean
+  onDeleteThread: (threadId: string) => void
+  deletingThreadId: string | null
 }
 
-export function ThreadList({ threads, loading, onNewThread, creating }: Props) {
+export function ThreadList({
+  threads,
+  loading,
+  onNewThread,
+  creating,
+  onDeleteThread,
+  deletingThreadId,
+}: Props) {
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-neutral-800 bg-neutral-950">
       <div className="p-3">
@@ -25,21 +34,39 @@ export function ThreadList({ threads, loading, onNewThread, creating }: Props) {
           <p className="px-2 py-4 text-xs text-neutral-500">No threads yet.</p>
         ) : (
           <ul className="space-y-1">
-            {threads.map((t) => (
-              <li key={t.id}>
-                <NavLink
-                  to={`/chat/${t.id}`}
-                  className={({ isActive }) =>
-                    cn(
-                      'block truncate rounded-md px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800',
-                      isActive && 'bg-neutral-800 text-neutral-100',
-                    )
-                  }
-                >
-                  {t.title ?? 'Untitled'}
-                </NavLink>
-              </li>
-            ))}
+            {threads.map((t) => {
+              const isDeleting = deletingThreadId === t.id
+              return (
+                <li key={t.id} className="group relative">
+                  <NavLink
+                    to={`/chat/${t.id}`}
+                    className={({ isActive }) =>
+                      cn(
+                        'block truncate rounded-md py-2 pl-3 pr-9 text-sm text-neutral-300 hover:bg-neutral-800',
+                        isActive && 'bg-neutral-800 text-neutral-100',
+                        isDeleting && 'opacity-50',
+                      )
+                    }
+                  >
+                    {t.title ?? 'Untitled'}
+                  </NavLink>
+                  <button
+                    type="button"
+                    aria-label={`Delete thread ${t.title ?? 'Untitled'}`}
+                    title="Delete thread"
+                    disabled={isDeleting}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      onDeleteThread(t.id)
+                    }}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 hidden h-7 w-7 items-center justify-center rounded text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100 focus:outline-none focus:ring-2 focus:ring-neutral-500 group-hover:flex disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    ×
+                  </button>
+                </li>
+              )
+            })}
           </ul>
         )}
       </div>

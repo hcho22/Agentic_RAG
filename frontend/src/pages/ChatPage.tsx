@@ -9,6 +9,7 @@ import { ChatInput } from '@/components/chat/ChatInput'
 import { ChatModeToggle } from '@/components/chat/ChatModeToggle'
 import {
   createThread,
+  deleteThread,
   deriveTitle,
   fetchBackendConfig,
   listMessages,
@@ -29,6 +30,7 @@ export function ChatPage() {
   const [threads, setThreads] = useState<ThreadRow[]>([])
   const [threadsLoading, setThreadsLoading] = useState(true)
   const [creating, setCreating] = useState(false)
+  const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null)
 
   const [messages, setMessages] = useState<MessageRow[]>([])
   const [messagesLoading, setMessagesLoading] = useState(false)
@@ -101,6 +103,24 @@ export function ChatPage() {
       toast(e instanceof Error ? e.message : 'Failed to create thread', 'error')
     } finally {
       setCreating(false)
+    }
+  }
+
+  async function handleDeleteThread(id: string) {
+    const target = threads.find((t) => t.id === id)
+    const label = target?.title ?? 'this thread'
+    if (!window.confirm(`Delete "${label}"? This cannot be undone.`)) return
+    setDeletingThreadId(id)
+    try {
+      await deleteThread(id)
+      setThreads((prev) => prev.filter((t) => t.id !== id))
+      if (threadId === id) {
+        navigate('/chat', { replace: true })
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Failed to delete thread', 'error')
+    } finally {
+      setDeletingThreadId(null)
     }
   }
 
@@ -181,6 +201,8 @@ export function ChatPage() {
           loading={threadsLoading}
           onNewThread={handleNewThread}
           creating={creating}
+          onDeleteThread={handleDeleteThread}
+          deletingThreadId={deletingThreadId}
         />
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center justify-end border-b border-neutral-800 px-4 py-2">
