@@ -10,3 +10,12 @@
 # deps); judge is Anthropic's Claude. Only loaded when the runner is
 # invoked with --include-generation.
 anthropic>=0.40.0
+
+# US-001 (RAGAS integration): RAGAS provides the four canonical RAG metrics
+# (Faithfulness, Answer Relevancy, Context Precision, Context Recall) under
+# industry-standard names. It drags in heavy langchain-core / datasets /
+# pandas transitive deps, so — like the anthropic judge above — these are
+# imported lazily and only loaded when the runner is invoked with
+# --include-ragas. The PR-CI install (requirements-ci.txt) omits them.
+ragas>=0.2.0
+langchain-openai>=0.2.0

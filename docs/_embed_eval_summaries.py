@@ -18,6 +18,10 @@ the doc byte-identical.
 Adding a new embed target later means: (1) drop a `<!-- BEGIN EVAL_SUMMARY:NAME -->`
 + `<!-- END EVAL_SUMMARY:NAME -->` pair into the target doc, (2) add a
 new entry to `EMBEDS` below.
+
+US-004 adds a second destination doc: the RAGAS comparison table is lifted
+out of the retrieval `summary.md` (the region between its `EVAL_SUMMARY_RAGAS`
+markers) and embedded into the matching marker pair in `docs/evals.md`.
 """
 
 from __future__ import annotations
@@ -38,6 +42,14 @@ EMBEDS: dict[str, Path] = {
 OUTER_MARKER_RE = re.compile(
     r"<!-- (?:BEGIN|END) EVAL_SUMMARY -->\s*\n?", re.MULTILINE
 )
+
+# US-004: the RAGAS comparison table is embedded into docs/evals.md, separate
+# from the named-region embeds above. The retrieval runner brackets the table
+# in summary.md with these markers; the same pair brackets the destination
+# region in evals.md.
+EVALS_DOC = ROOT / "docs" / "evals.md"
+RAGAS_START = "<!-- EVAL_SUMMARY_RAGAS_START -->"
+RAGAS_END = "<!-- EVAL_SUMMARY_RAGAS_END -->"
 
 
 def extract_payload(summary_md: str) -> str:
@@ -78,6 +90,37 @@ def replace_region(doc: str, name: str, payload: str) -> str:
     )
 
 
+def extract_ragas_table(summary_md: str) -> str | None:
+    """Return the RAGAS table bracketed by the EVAL_SUMMARY_RAGAS markers.
+
+    Returns None when the markers are absent — a `summary.md` generated before
+    US-004, or never generated at all — so the caller falls back to a
+    placeholder rather than crashing.
+    """
+    pattern = re.compile(
+        rf"{re.escape(RAGAS_START)}(.*?){re.escape(RAGAS_END)}", re.DOTALL
+    )
+    match = pattern.search(summary_md)
+    return match.group(1).strip() if match else None
+
+
+def replace_ragas_region(doc: str, payload: str) -> str:
+    """Replace the content between the EVAL_SUMMARY_RAGAS markers in `doc`."""
+    pattern = re.compile(
+        rf"({re.escape(RAGAS_START)})(.*?)({re.escape(RAGAS_END)})", re.DOTALL
+    )
+    if not pattern.search(doc):
+        raise RuntimeError(
+            f"marker pair not found in {EVALS_DOC}: "
+            f"{RAGAS_START} ... {RAGAS_END}"
+        )
+    return pattern.sub(
+        lambda m: f"{m.group(1)}\n\n{payload}\n\n{m.group(3)}",
+        doc,
+        count=1,
+    )
+
+
 def main() -> None:
     if not TARGET.exists():
         raise SystemExit(f"target doc missing: {TARGET}")
@@ -96,7 +139,34 @@ def main() -> None:
         doc = replace_region(doc, name, payload)
         refreshed.append(f"  {name}: from {source_path.relative_to(ROOT)}")
     TARGET.write_text(doc, encoding="utf-8")
-    print(f"refreshed {TARGET.relative_to(ROOT)}:")
+
+    # US-004: lift the RAGAS comparison table out of the retrieval summary.md
+    # and embed it into docs/evals.md's EVAL_SUMMARY_RAGAS region.
+    if not EVALS_DOC.exists():
+        raise SystemExit(f"target doc missing: {EVALS_DOC}")
+    retrieval_summary = EMBEDS["retrieval"]
+    ragas_table: str | None = None
+    if retrieval_summary.exists():
+        ragas_table = extract_ragas_table(
+            retrieval_summary.read_text(encoding="utf-8")
+        )
+    if ragas_table is None:
+        ragas_table = (
+            "_RAGAS comparison not generated yet — run "
+            "`python -m evals.retrieval.runner --include-ragas`._"
+        )
+        refreshed.append("  ragas: PLACEHOLDER (no RAGAS table in summary.md)")
+    else:
+        refreshed.append(
+            f"  ragas: from {retrieval_summary.relative_to(ROOT)} "
+            f"→ {EVALS_DOC.relative_to(ROOT)}"
+        )
+    evals_doc = replace_ragas_region(
+        EVALS_DOC.read_text(encoding="utf-8"), ragas_table
+    )
+    EVALS_DOC.write_text(evals_doc, encoding="utf-8")
+
+    print("refreshed eval-summary embeds:")
     print("\n".join(refreshed))
 
 

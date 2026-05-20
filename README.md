@@ -1,18 +1,114 @@
 # Agentic RAG
 
-A multi-user, production-oriented Retrieval-Augmented Generation app built across 11 progressive modules. Raw OpenAI SDK + Pydantic (no LLM frameworks), FastAPI backend, React/Vite/Tailwind frontend, Supabase (Postgres + pgvector + Auth + Storage + Realtime), LangSmith observability.
+A production-shaped Retrieval-Augmented Generation app where **per-document
+sharing is a first-class part of the retrieval predicate, not a post-hoc
+filter**. Multi-user from day one — every chunk carries an ACL, every
+retrieval call runs under the viewer's JWT, every tool-call attribution
+in the chat UI surfaces *why* the viewer can see a chunk.
 
-## What's in the box
+Raw OpenAI SDK + Pydantic (no LLM frameworks), FastAPI backend,
+React/Vite/Tailwind frontend, Supabase (Postgres + pgvector + Auth +
+Storage + Realtime), LangSmith observability.
+
+![Granting-principal badges in the chat UI](docs/img/granting-principal-badges.png)
+
+*Tool-call attribution renders a per-chunk badge — "via owner" / "via direct
+grant" / "via {group}" — so the viewer can see exactly which ACL rule
+granted them access to each retrieved chunk.*
+
+## The permissions story, in numbers
+
+The retrieval path is evaluated in two cuts: a correctness eval that
+proves the security property holds at small scale, and a scale benchmark
+that characterises the recall curve as the visible set shrinks.
+
+**Security — fraction of `no_access` runs that returned zero gold chunks**
+(50 questions × 3 modes × 3 viewer setups, 14-chunk Acme corpus):
+
+| Mode | Pre-filter | Post-filter |
+|---|---|---|
+| vector | **1.000** | 1.000 |
+| keyword | **1.000** | 1.000 |
+| hybrid | **1.000** | 1.000 |
+
+Pre-filter is the load-bearing row — security is enforced in the SQL
+predicate, not a Python drop after the fact (post-filter passes too but
+could in principle leak via timing or payload size).
+
+**Recall@5 across viewers, ef_search × selectivity sweep**
+(15 multi-hop queries against a synthetic Wikipedia 10k-chunk corpus,
+gold = top-5 at the most exhaustive sweep):
+
+| Viewer | Visible chunks | Selectivity | ef_search=40 | ef_search=80 | ef_search=200 | ef_search=500 (gold) |
+|---|---|---|---|---|---|---|
+| viewer_50pct | 5,000 | 50.0% | 1.000 | 1.000 | 1.000 | 1.000 |
+| viewer_10pct | 1,000 | 10.0% | 1.000 | 1.000 | 1.000 | 1.000 |
+| viewer_1pct | 100 | 1.0% | 1.000 | 1.000 | 1.000 | 1.000 |
+
+Every cell is 1.000 because at 10k chunks the Postgres planner sidesteps
+HNSW entirely — it bitmap-scans `chunk_acl`, index-scans the visible
+chunks, sorts exactly by embedding distance, and takes top-5. `EXPLAIN
+ANALYZE` confirms; `ef_search` is a no-op in that plan. The eval
+infrastructure (10k seed, viewer ACL setup, sweep, regression alarm) is
+shipped; the recall curve surfaces at the corpus size where exact NN
+over the filtered set becomes more expensive than HNSW + post-filter
+(tens to hundreds of thousands of visible chunks per query). The
+nightly workflow fails loudly if the configured recall floor is
+breached. See [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md)
+§5b for the full plan output.
+
+## Why this is hard
+
+The naive approach to per-document sharing in a RAG retriever is to
+leave the vector search alone and **post-filter** the results: pull
+top-k chunks by similarity, then drop the ones the viewer can't see.
+This fails on selective ACLs in a way that's easy to miss. The math:
+if a viewer can see 5% of the corpus and we ask for top-10, the
+*expected* number of visible chunks in that result is
+`k × selectivity = 10 × 0.05 = 0.5` — half a chunk on average. The
+viewer most often sees zero relevant chunks; multi-hop questions that
+need two chunks become unanswerable. "Fetch more candidates and
+post-filter harder" doesn't rescue it — at 5% selectivity you'd need
+top-100 to expect five visible chunks, and post-filtering top-100
+means embedding distance is no longer ranking the *visible* chunks
+against each other. The fix is to push the ACL check **into** the SQL
+predicate so the planner is choosing among visible candidates from the
+start — which then opens a second gotcha around HNSW behaviour under
+selective filters. The full write-up is in
+[`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md).
+
+## What else is in the box
 
 - **Chat with streaming** — OpenAI Responses or Chat Completions API, configurable per-request, streamed token-by-token to the UI. Tool calls and results persist alongside messages.
 - **Drag-and-drop ingestion** — `.txt / .md / .pdf / .docx / .html` parsed via docling, chunked, embedded, indexed. Live status updates via Supabase Realtime. Document-level metadata (title, authors, topics, dates) extracted via LLM structured outputs.
 - **Hybrid retrieval** — vector (pgvector HNSW) + keyword (Postgres full-text) fused via Reciprocal Rank Fusion. Optional reranker layer: Cohere, Voyage, or LLM-as-judge. All retrieval runs under user JWT — RLS enforces per-user visibility.
-- **Per-document sharing** — share documents with individual users or groups via the per-chunk ACL system. Share dialog in the ingestion UI. Per-chunk badges in chat tool attribution show *why* the viewer can see each chunk ("via owner" / "via direct grant" / "via {group}").
+- **Per-document sharing** — share documents with individual users or groups via the per-chunk ACL system. Share dialog in the ingestion UI. Per-chunk badges in chat tool attribution show *why* the viewer can see each chunk.
 - **Structured RAG (text-to-SQL)** — `query_database` tool over an allowlisted read-only schema, with a semantic-layer-aware compiler so the LLM doesn't have to know table internals.
 - **Web search fallback** — `web_search` tool when local retrieval is insufficient.
 - **Sub-agents** — `spawn_document_agent` launches a sub-agent with isolated context and purpose-specific tools.
 - **Retrieval eval suite** — 50-question golden set, runner that exercises vector / keyword / hybrid against the real backend functions, recall@k / MRR / nDCG@5 metrics, optional generation + LLM-judge step. PR CI posts a delta-vs-`main` comment; nightly publishes snapshots to `docs/nightly/`.
+- **RAGAS metrics** — the four canonical RAG-eval scores (Faithfulness, Answer Relevancy, Context Precision, Context Recall) computed weekly alongside the custom Claude judge and published to `docs/ragas-weekly/`.
 - **Permissions scale benchmark** — Wikipedia 10k synthetic corpus, ef_search sweep across three permission selectivities, nightly workflow with regression alarm.
+
+## Documentation
+
+Long-form writeups for the parts of the system that benefit from prose
+explanation — the kind of context a code review won't recover:
+
+| Doc | What it covers |
+| --- | --- |
+| [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md) | The post-filter recall problem, the four-table data model, the SQL predicate, the HNSW interaction, the eval tables, deliberate v0 scope cuts (group nesting, workspace scoping, write-vs-read tiers). |
+| [`docs/evals.md`](docs/evals.md) | Corpus design, the 50-question golden set, what each metric measures and what it *doesn't*, a worked example of CI catching a regression (Δ -0.510 on `recall@5` from a one-line chunk-size change), and a frank list of the eval's limitations. |
+| [`docs/structured-rag.md`](docs/structured-rag.md) | The semantic-layer-aware text-to-SQL compiler, allowlisted schemas, the read-only role boundary. |
+
+The eval tables in `docs/permissions-aware-rag.md` are auto-embedded
+from the runner-generated `summary.md` files via marker comments:
+
+```bash
+python -m evals.retrieval.runner          # populates evals/retrieval/summary.md
+python -m evals.permissions_scale.runner  # populates evals/permissions_scale/summary.md (after wikipedia_seed)
+python -m docs._embed_eval_summaries      # injects into docs/permissions-aware-rag.md
+```
 
 ## Repository layout
 
@@ -22,7 +118,7 @@ frontend/               React + Vite + Tailwind (vercel.json)
 supabase/               Migrations + local CLI config
 evals/retrieval/        50-question golden set + runner + CI workflow integration
 evals/permissions_scale/ Wikipedia 10k corpus benchmark + nightly workflow
-evals/structured_rag/   Text-to-SQL eval (Module 9)
+evals/structured_rag/   Text-to-SQL eval
 db_seed/                Deterministic seeders for the eval corpora
 docs/                   Long-form writeups (evals, structured RAG, permissions-aware RAG)
 .github/workflows/      PR + nightly eval workflows
@@ -80,9 +176,9 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | `LANGSMITH_PROJECT` | no | Default `agentic-rag` |
 | `LANGSMITH_TRACING` | no | `true`/`false`; auto-set based on API key presence |
 | `PORT` | no | Injected by Railway/Fly at runtime |
-| `ANALYTICS_DATABASE_URL` | no (Module 7) | Postgres URL for the `analytics_readonly` role used by the text-to-SQL baseline |
-| `CRM_DATABASE_URL` | no (Module 9) | Postgres URL for the `crm_readonly` role used by the semantic-layer-aware SQL search. Falls back to `ANALYTICS_DATABASE_URL` |
-| `CRM_SEED_DATABASE_URL` | no (Module 9) | Writable Postgres URL used only by `python -m db_seed.crm_seed`. Falls back to `DATABASE_URL` |
+| `ANALYTICS_DATABASE_URL` | no | Postgres URL for the `analytics_readonly` role used by the text-to-SQL baseline |
+| `CRM_DATABASE_URL` | no | Postgres URL for the `crm_readonly` role used by the semantic-layer-aware SQL search. Falls back to `ANALYTICS_DATABASE_URL` |
+| `CRM_SEED_DATABASE_URL` | no | Writable Postgres URL used only by `python -m db_seed.crm_seed`. Falls back to `DATABASE_URL` |
 | `ALLOWED_SQL_SCHEMAS` | no | Comma-separated schema allowlist for SQL tools. Default `analytics,crm` |
 | `SQL_QUERY_TIMEOUT_MS` | no | Statement timeout for SQL tools. Default 10000 |
 | `ANTHROPIC_API_KEY` | only for eval generation | Required by `evals/retrieval/runner.py --include-generation` (the LLM judge runs Claude). Never read by the live backend |
@@ -113,31 +209,13 @@ The backend exposes:
 | `POST` | `/api/subagent` | Spawn a document sub-agent |
 | `GET` | `/healthz` | Liveness check |
 
-## Documentation
-
-Long-form writeups for the parts of the system that benefit from prose explanation:
-
-| Doc | What it covers |
-| --- | --- |
-| [`docs/evals.md`](docs/evals.md) | Module 10: corpus, golden set, metrics, what they don't measure, a worked example of catching a regression in CI |
-| [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md) | Module 11: the post-filter recall problem, the data model, the SQL change, the HNSW interaction, the eval tables, and the deliberate v0 scope cuts |
-| [`docs/structured-rag.md`](docs/structured-rag.md) | Module 9: the semantic layer, the SQL compiler, allowlisted schemas, the read-only role |
-
-The eval tables in `docs/evals.md` and `docs/permissions-aware-rag.md` are auto-embedded from the runner-generated `summary.md` files via marker comments. To refresh after a runner change:
-
-```bash
-python -m evals.retrieval.runner          # populates evals/retrieval/summary.md
-python -m evals.permissions_scale.runner  # populates evals/permissions_scale/summary.md (after wikipedia_seed)
-python -m docs._embed_eval_summaries      # injects into docs/permissions-aware-rag.md
-```
-
 ## Eval suite
 
-Two CI workflows wrap the eval runners:
+Three CI workflows wrap the eval runners:
 
 - **`.github/workflows/retrieval-eval.yml`** — runs on PRs that touch retrieval / chunking / embeddings / migrations / the runner itself. Executes the 50-question golden set against PR head AND `main`, posts a delta-vs-`main` comment. Comment-only — never fails the build.
 - **`.github/workflows/retrieval-eval-nightly.yml`** — daily 02:00 UTC. Publishes snapshots to `docs/nightly/<DATE>.md` + `.json`.
-- **`.github/workflows/permissions-scale-eval.yml`** — daily 03:00 UTC + manual `workflow_dispatch`. Runs the Wikipedia 10k seed + ef_search sweep; publishes to `docs/permissions-scale-nightly/<DATE>.md`. Fails loudly if the configured recall floor is breached.
+- **`.github/workflows/permissions-scale-eval.yml`** — daily 03:00 UTC + manual `workflow_dispatch`. Runs the Wikipedia 10k seed + ef_search sweep; publishes to `docs/permissions-scale-nightly/<DATE>.md`. **Fails the workflow if the configured recall floor is breached** — this is the regression alarm for the day the planner flips to HNSW for some workload.
 
 To run the eval locally:
 
@@ -204,9 +282,10 @@ fly deploy
 
 Open the Vercel URL, sign up, create a thread, send a message. The response should stream token-by-token, and a trace should appear in LangSmith tagged with your `user_id` and `thread_id`. Upload a document at `/ingestion`, watch it transition `pending → processing → ready`, then ask the chat about its contents.
 
-## Modules
+## How it was built
 
-See `.claude/agent/tasks/prd-agentic-rag.md` for the full 11-module plan and per-story acceptance criteria.
+The system landed in 11 progressive modules; the full plan + per-story
+acceptance criteria live in `.claude/agent/tasks/prd-agentic-rag.md`.
 
 | Module | What landed |
 | --- | --- |
