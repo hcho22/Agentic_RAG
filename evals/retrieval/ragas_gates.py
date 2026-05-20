@@ -151,6 +151,26 @@ def _cell_api_errors(cell: dict[str, Any]) -> int | None:
     return None
 
 
+def _collect_metric_history(
+    history: list[dict[str, Any]], cell_id: str, metric: str, key: str
+) -> list[float]:
+    """Collect a per-(cell × metric) numeric field across prior snapshots.
+
+    Each ``history`` entry is a prior run's ``ragas.aggregates``. Snapshots
+    missing the cell, the metric, or the value are skipped — the result holds
+    only the values actually present, the rolling window the gates median over.
+    """
+    values: list[float] = []
+    for h in history:
+        block = h.get("by_cell", {}).get(cell_id, {}).get(metric)
+        if block is None:
+            continue
+        value = block.get(key)
+        if value is not None:
+            values.append(value)
+    return values
+
+
 def check_operational_gates(ragas_aggregates: dict[str, Any]) -> list[GateFinding]:
     """Return red operational findings over the RAGAS by-cell aggregates.
 
@@ -291,14 +311,9 @@ def check_diagnostic_gates(
             current_cov = block.get("coverage")
             if current_cov is None:
                 continue
-            past_cov: list[float] = []
-            for h in history:
-                h_block = h.get("by_cell", {}).get(cell_id, {}).get(metric)
-                if h_block is None:
-                    continue
-                cov = h_block.get("coverage")
-                if cov is not None:
-                    past_cov.append(cov)
+            past_cov = _collect_metric_history(
+                history, cell_id, metric, "coverage"
+            )
             if not past_cov:
                 continue
             median_cov = statistics.median(past_cov)
@@ -448,14 +463,9 @@ def check_score_regressions(
             current_strict = block.get("mean_strict")
             if current_strict is None:
                 continue
-            past_strict: list[float] = []
-            for h in history:
-                h_block = h.get("by_cell", {}).get(cell_id, {}).get(metric)
-                if h_block is None:
-                    continue
-                value = h_block.get("mean_strict")
-                if value is not None:
-                    past_strict.append(value)
+            past_strict = _collect_metric_history(
+                history, cell_id, metric, "mean_strict"
+            )
             if len(past_strict) < MIN_REGRESSION_HISTORY:
                 continue
             ragas_median = statistics.median(past_strict)

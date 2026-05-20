@@ -644,6 +644,15 @@ def _project_to_corpus(
     return retrieved, corpus_chunks, unknown
 
 
+def _format_generation_context(
+    chunks: list[Any], stable_id_map: dict[str, str]
+) -> str:
+    """Render retrieved chunks into the stable-id-labelled context block fed to the generator."""
+    return "\n\n".join(
+        f"[{stable_id_map.get(r.id, r.id)}]\n{r.content}" for r in chunks
+    )
+
+
 async def run_eval(
     questions: list[dict[str, Any]],
     modes: tuple[str, ...],
@@ -787,9 +796,8 @@ async def run_eval(
                     and reference_answer is not None
                     and pre_corpus_chunks
                 ):
-                    context = "\n\n".join(
-                        f"[{stable_id_map.get(r.id, r.id)}]\n{r.content}"
-                        for r in pre_corpus_chunks[:TOP_K_FOR_GENERATION]
+                    context = _format_generation_context(
+                        pre_corpus_chunks[:TOP_K_FOR_GENERATION], stable_id_map
                     )
                     answer = await generate_answer(openai_client, question, context)
                     scores = await judge_answer(
@@ -824,9 +832,8 @@ async def run_eval(
                     ragas_chunks = pre_corpus_chunks[:TOP_K_FOR_GENERATION]
                     ragas_answer = pre_block.get("generated_answer")
                     if ragas_answer is None:
-                        ragas_context = "\n\n".join(
-                            f"[{stable_id_map.get(r.id, r.id)}]\n{r.content}"
-                            for r in ragas_chunks
+                        ragas_context = _format_generation_context(
+                            ragas_chunks, stable_id_map
                         )
                         ragas_answer = await generate_answer(
                             openai_client, question, ragas_context
