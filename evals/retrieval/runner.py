@@ -47,6 +47,7 @@ import sys
 import time
 import uuid
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -65,6 +66,23 @@ from retrieval import (  # noqa: E402
     hybrid_search,
     keyword_only_search,
     search_documents,
+)
+
+from .ragas import (  # noqa: E402
+    RAGAS_CELL_IDS,
+    RAGAS_JUDGE_MODEL,
+    RAGAS_METRICS,
+    build_ragas_section,
+    ragas_cell_enabled,
+    score_with_ragas,
+)
+from .ragas_gates import (  # noqa: E402
+    GateFinding,
+    check_diagnostic_gates,
+    check_operational_gates,
+    check_score_regressions,
+    load_custom_judge_history,
+    load_ragas_history,
 )
 
 log = logging.getLogger("agentic_rag.evals.retrieval")
@@ -640,7 +658,8 @@ async def run_eval(
     db_conn: asyncpg.Connection | None,
     generation_gold: dict[str, str] | None = None,
     anthropic_client: Any | None = None,
-) -> list[dict[str, Any]]:
+    include_ragas: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run retrieval per (question × mode × viewer × filter_strategy).
 
     Every (mode × viewer) cell carries both `pre_filter` and `post_filter`
@@ -654,6 +673,13 @@ async def run_eval(
     Generation + judge (US-036) runs only for full_access × pre_filter to
     keep the cost bounded; that's the canonical "pretend permissions don't
     exist" baseline the generation table is meant to characterise.
+
+    When `include_ragas` is set, the second return value collects one RAGAS
+    input row per gated cell (`ragas_cell_enabled` — hybrid × the two
+    pre_filter cells). full_access reuses the answer the generation block
+    already produced; partial_access generates one here. The Claude judge
+    stays full_access-only, so partial_access carries an answer but no judge
+    scores. The list is empty when `include_ragas` is False.
 
     `db_conn` may be None when only `full_access` is requested — the per-
     question chunk_acl reset is then unnecessary. The function asserts the
@@ -672,6 +698,7 @@ async def run_eval(
     }
 
     per_question: list[dict[str, Any]] = []
+    ragas_rows: list[dict[str, Any]] = []
     for q in questions:
         qid = q["id"]
         category = q["category"]
@@ -782,6 +809,40 @@ async def run_eval(
                 ):
                     pre_block["generation_skipped"] = "no_reference_answer"
 
+                # RAGAS input rows are collected only for the gated cells
+                # (hybrid × the two pre_filter cells). full_access reuses the
+                # answer the generation block above already produced;
+                # partial_access generates one here so RAGAS has an answer to
+                # score — without invoking the Claude judge, which stays
+                # full_access-only (the US-036 table's scope is unchanged).
+                if (
+                    include_ragas
+                    and ragas_cell_enabled(mode, viewer, "pre_filter")
+                    and reference_answer is not None
+                    and pre_corpus_chunks
+                ):
+                    ragas_chunks = pre_corpus_chunks[:TOP_K_FOR_GENERATION]
+                    ragas_answer = pre_block.get("generated_answer")
+                    if ragas_answer is None:
+                        ragas_context = "\n\n".join(
+                            f"[{stable_id_map.get(r.id, r.id)}]\n{r.content}"
+                            for r in ragas_chunks
+                        )
+                        ragas_answer = await generate_answer(
+                            openai_client, question, ragas_context
+                        )
+                    ragas_rows.append(
+                        {
+                            "question_id": qid,
+                            "cell": f"{viewer}:pre_filter",
+                            "mode": mode,
+                            "question": question,
+                            "contexts": [r.content for r in ragas_chunks],
+                            "answer": ragas_answer,
+                            "reference": reference_answer,
+                        }
+                    )
+
                 mode_by_viewer[viewer] = {
                     "pre_filter": pre_block,
                     "post_filter": post_block,
@@ -797,7 +858,7 @@ async def run_eval(
                 entry["by_viewer"].setdefault(viewer, {})[mode] = mode_by_viewer[viewer]
 
         per_question.append(entry)
-    return per_question
+    return per_question, ragas_rows
 
 
 def aggregate(
@@ -1028,12 +1089,22 @@ def _aggregate_viewer_filter(
 # ---------------------------------------------------------------------------
 
 
-def render_summary(aggregates: dict[str, Any], modes: tuple[str, ...]) -> str:
-    """Two-or-three markdown tables wrapped in EVAL_SUMMARY markers.
+def render_summary(
+    aggregates: dict[str, Any],
+    modes: tuple[str, ...],
+    ragas_section: dict[str, Any] | None = None,
+    diagnostic_findings: list[GateFinding] | None = None,
+) -> str:
+    """Markdown tables wrapped in EVAL_SUMMARY markers.
 
-    The third table (generation quality) renders only when at least one
-    mode carries `faithfulness` / `helpfulness` from US-036's
-    `--include-generation` path.
+    The generation-quality table renders only when at least one mode carries
+    `faithfulness` / `helpfulness` from US-036's `--include-generation` path.
+    The RAGAS comparison table (US-004) is always rendered — its inner
+    `EVAL_SUMMARY_RAGAS` markers are emitted even on runs without
+    `--include-ragas` (body shows a placeholder), so the `docs/evals.md`
+    embed target never goes stale. The `Diagnostics` section (US-006) renders
+    only when `diagnostic_findings` is non-empty — a clean run, or an
+    early-rollout run without enough history, shows no Diagnostics section.
     """
     by_mode = aggregates["by_mode"]
     has_generation = any("faithfulness" in by_mode[m] for m in modes)
@@ -1083,6 +1154,50 @@ def render_summary(aggregates: dict[str, Any], modes: tuple[str, ...]) -> str:
             lines.append(
                 f"| {mode} | {n} | {m['faithfulness']:.2f} | {m['helpfulness']:.2f} |"
             )
+
+    # RAGAS comparison table (US-004). Always rendered. The EVAL_SUMMARY_RAGAS
+    # markers let docs/_embed_eval_summaries.py lift just this table into
+    # docs/evals.md; the `### RAGAS comparison` heading sits outside them so
+    # the embed target supplies its own framing without a doubled heading.
+    lines += [
+        "",
+        "### RAGAS comparison",
+        "",
+        "<!-- EVAL_SUMMARY_RAGAS_START -->",
+        "",
+    ]
+    if ragas_section is None:
+        lines.append(
+            "_(RAGAS not run on this snapshot — pass --include-ragas to enable)_"
+        )
+    else:
+        by_cell = ragas_section.get("aggregates", {}).get("by_cell", {})
+        lines += [
+            "| Metric | Cell | mean_strict | mean_available | Coverage | API errors |",
+            "|---|---|---|---|---|---|",
+        ]
+        for metric in RAGAS_METRICS:
+            metric_label = metric.replace("_", " ").title()
+            for cell_id in RAGAS_CELL_IDS:
+                block = by_cell.get(cell_id, {}).get(metric)
+                if block is None:
+                    lines.append(f"| {metric_label} | {cell_id} | — | — | — | — |")
+                    continue
+                available = block["mean_available"]
+                available_s = f"{available:.3f}" if available is not None else "—"
+                lines.append(
+                    f"| {metric_label} | {cell_id} | {block['mean_strict']:.3f} | "
+                    f"{available_s} | {block['coverage']:.3f} | {block['api_errors']} |"
+                )
+    lines += ["", "<!-- EVAL_SUMMARY_RAGAS_END -->"]
+
+    # US-006: yellow diagnostic findings (coverage / api_error drift), as a
+    # markdown list. Sits right after the RAGAS comparison table; renders only
+    # when there are findings, so a clean run keeps the compact summary.
+    if diagnostic_findings:
+        lines += ["", "### Diagnostics", ""]
+        for finding in diagnostic_findings:
+            lines.append(f"- **{finding.tag}** — {finding.message}")
 
     # US-042: viewer-parameterized tables. Each renders only when its
     # source aggregate is non-empty so retrieval-only / single-viewer
@@ -1202,9 +1317,29 @@ async def amain() -> int:
             "the pre-Module-11 single-viewer behaviour."
         ),
     )
+    parser.add_argument(
+        "--include-ragas",
+        action="store_true",
+        help=(
+            "RAGAS integration: additionally score the hybrid-mode "
+            "full_access / partial_access pre_filter cells with the four "
+            "canonical RAGAS metrics (Faithfulness, Answer Relevancy, Context "
+            "Precision, Context Recall). Implies --include-generation (RAGAS "
+            "needs generated answers) and requires the `ragas` package."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    # --include-ragas needs generated answers to score, so it auto-enables
+    # --include-generation rather than erroring when the operator omits it.
+    if args.include_ragas and not args.include_generation:
+        log.info(
+            "auto-enabling --include-generation because --include-ragas "
+            "requires generated answers"
+        )
+        args.include_generation = True
 
     supabase_url = os.environ.get("SUPABASE_URL")
     if not supabase_url:
@@ -1243,6 +1378,27 @@ async def amain() -> int:
             "non-full viewers requested but YAML lacks a viewer_construction "
             "block — add it to retrieval_gold.yaml or run with --viewers full"
         )
+
+    # RAGAS is hybrid-only and full_access / partial_access only. Warn (don't
+    # error) when the operator's --mode / --viewers selection includes cells
+    # RAGAS will silently skip, so an empty `ragas` section is never a mystery.
+    if args.include_ragas:
+        for skipped_mode in (m for m in modes if m != "hybrid"):
+            log.warning(
+                "RAGAS scoring skipped for mode=%s (hybrid-only)", skipped_mode
+            )
+        for skipped_viewer in (
+            v
+            for v in viewers
+            if not any(
+                ragas_cell_enabled("hybrid", v, f) for f in FILTER_ORDER
+            )
+        ):
+            log.warning(
+                "RAGAS scoring skipped for viewer=%s "
+                "(RAGAS runs on full_access / partial_access only)",
+                skipped_viewer,
+            )
 
     generation_gold: dict[str, str] | None = None
     anthropic_client: Any | None = None
@@ -1305,7 +1461,7 @@ async def amain() -> int:
     db_conn = await asyncpg.connect(database_url) if needs_db else None
     try:
         async with httpx.AsyncClient(timeout=30.0) as http:
-            per_question = await run_eval(
+            per_question, ragas_rows = await run_eval(
                 questions,
                 modes,
                 viewers,
@@ -1319,6 +1475,7 @@ async def amain() -> int:
                 db_conn,
                 generation_gold=generation_gold,
                 anthropic_client=anthropic_client,
+                include_ragas=args.include_ragas,
             )
     finally:
         if db_conn is not None:
@@ -1326,6 +1483,45 @@ async def amain() -> int:
 
     aggregates = aggregate(per_question, modes)
     elapsed_s = round(time.perf_counter() - started, 2)
+
+    # RAGAS scoring: a single batched call over the rows collected from the
+    # gated cells. score_with_ragas raises a clear RuntimeError if the `ragas`
+    # package is missing. build_ragas_section assembles the per-question rows
+    # plus the by-cell aggregates (US-003). Three gate families then run over
+    # those aggregates: check_operational_gates (US-005) is fixed-threshold and
+    # red; check_diagnostic_gates (US-006) compares against the rolling weekly
+    # history and is yellow; check_score_regressions (US-007) compares the
+    # RAGAS scores against their rolling median, escalating to red only when
+    # the cross-family Claude judge corroborates the same-cell drop. Any red
+    # finding fails the run (exit 1); yellow findings never do. All findings
+    # ride along under `ragas.gate_findings` so the weekly workflow can read
+    # them.
+    ragas_section: dict[str, Any] | None = None
+    ragas_gate_findings: list[GateFinding] = []
+    diagnostic_findings: list[GateFinding] = []
+    if args.include_ragas:
+        ragas_results = await score_with_ragas(ragas_rows, RAGAS_JUDGE_MODEL)
+        ragas_section = build_ragas_section(ragas_results, RAGAS_JUDGE_MODEL)
+        operational_findings = check_operational_gates(ragas_section["aggregates"])
+        history = [
+            snap.get("ragas", {}).get("aggregates", {})
+            for snap in load_ragas_history()
+        ]
+        diagnostic_findings = check_diagnostic_gates(
+            ragas_section["aggregates"], history
+        )
+        custom_judge_history = [
+            snap.get("aggregates", {}) for snap in load_custom_judge_history()
+        ]
+        regression_findings = check_score_regressions(
+            {"ragas": ragas_section, "aggregates": aggregates},
+            history,
+            custom_judge_history,
+        )
+        ragas_gate_findings = (
+            operational_findings + diagnostic_findings + regression_findings
+        )
+        ragas_section["gate_findings"] = [asdict(f) for f in ragas_gate_findings]
 
     results = {
         "generated_at": started_at,
@@ -1340,6 +1536,8 @@ async def amain() -> int:
         "per_question": per_question,
         "aggregates": aggregates,
     }
+    if ragas_section is not None:
+        results["ragas"] = ragas_section
 
     out_path = args.out
     if out_path is None:
@@ -1352,7 +1550,10 @@ async def amain() -> int:
         encoding="utf-8",
     )
 
-    args.summary.write_text(render_summary(aggregates, modes), encoding="utf-8")
+    args.summary.write_text(
+        render_summary(aggregates, modes, ragas_section, diagnostic_findings),
+        encoding="utf-8",
+    )
 
     suffix = " + generation" if args.include_generation else ""
     print(
@@ -1371,6 +1572,19 @@ async def amain() -> int:
                 f" (n={int(m['generation_n'])})"
             )
         print(line)
+
+    # US-005: a red operational gate finding fails the run. The JSON +
+    # summary.md are already written above, so the weekly workflow can still
+    # read `ragas.gate_findings` and file issues despite the non-zero exit.
+    red_findings = [f for f in ragas_gate_findings if f.severity == "red"]
+    if red_findings:
+        log.error(
+            "%d red operational gate finding(s) — failing the run:",
+            len(red_findings),
+        )
+        for f in red_findings:
+            log.error("  [%s] %s", f.tag, f.message)
+        return 1
     return 0
 
 
