@@ -105,6 +105,24 @@ async def _seed_fixture(
         bob_id, f"bob-{bob_id[:8]}@test.local",
     )
 
+    # Workspace-membership mirroring (ADR-0002): alice/bob are created AFTER the
+    # Default-Workspace backfill migration ran, so they are not members yet.
+    # Without this, the US-005 documents/chunks SELECT RLS (membership AND-ed
+    # under owner-OR-ACL) hides alice's own chunks from grant_doc_to_principal —
+    # the per-chunk fan-out reads back zero chunks and inserts nothing. Mirrors
+    # the fixture in test_share_api.py. (Cascades away on the auth.users delete
+    # in _cleanup_fixture via workspace_membership's ON DELETE CASCADE FK.)
+    await conn.execute(
+        """
+        insert into public.workspace_membership (workspace_id, user_id, role)
+        values
+          ('00000000-0000-0000-0000-0000000000d0', $1, 'member'),
+          ('00000000-0000-0000-0000-0000000000d0', $2, 'member')
+        on conflict do nothing
+        """,
+        alice_id, bob_id,
+    )
+
     await conn.execute(
         """
         insert into public.documents
