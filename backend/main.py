@@ -1552,7 +1552,7 @@ async def _assert_doc_owner(
     # No service role: best we can do is the user-scoped read.
     r = await http.get(
         f"{SUPABASE_URL}/rest/v1/documents",
-        params={"id": f"eq.{doc_id}", "select": "id,user_id,status"},
+        params={"id": f"eq.{doc_id}", "select": "id,user_id,status,workspace_id"},
         headers=_supabase_headers(user),
     )
     r.raise_for_status()
