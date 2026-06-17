@@ -47,7 +47,7 @@ Four small tables underpin permission-aware retrieval, all under
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `principals` | Group identities (no users — those live in `auth.users`) | `id uuid pk`, `name text unique`, `kind = 'group'` |
+| `principals` | Group identities (no users — those live in `auth.users`) | `id uuid pk`, `workspace_id uuid fk`, `(workspace_id, name)` unique, `kind = 'group'` |
 | `principal_membership` | Which users belong to which group | `(principal_id, member_user_id)` pk |
 | `chunk_acl` | Per-chunk grants — the source of truth for permissions | `(chunk_id, principal_type, principal_id)` pk |
 | `profiles` | `auth.users(id, email)` mirror, for the granting-principal display | `id pk`, `email text` |
@@ -80,11 +80,15 @@ join) made the retrieval predicate one JOIN deeper, and the retrieval
 predicate is the hottest query in the system. We picked storage over
 read latency.
 
-**3. Group nesting and workspace scoping are explicitly out.** A
-principal cannot contain other principals (no group-of-groups). A grant
-cannot be scoped to "the engineering workspace inside Acme org" (no
-workspace tier above users). These are real production needs; section 6
-says why they didn't ship in v0.
+**3. Group nesting is explicitly out; workspace scoping shipped in
+Phase 2.** A principal cannot contain other principals (no
+group-of-groups) — a real production need; section 6 says why it didn't
+ship in v0. Workspace scoping *was* a v0 cut but landed in Phase 2:
+ADR-0002 adds a Workspace tenant boundary AND-ed into the retrieval
+predicate (a membership clause inside `match_chunks` / `keyword_search`,
+mirrored in the `chunks` / `documents` RLS), and `principals` became
+workspace-scoped (`(workspace_id, name)` unique, membership-gated RLS).
+See `docs/adr/0002-workspace-tenant-isolation.md`.
 
 The `chunks` and `documents` RLS policies extend to grant access via
 `chunk_acl` rows (`chunks_select_via_acl`, `documents_select_via_acl`)
@@ -426,7 +430,16 @@ a reviewer wonder.
 | **Role hierarchies** | No "owner / editor / viewer" tiering. Every grant is read access. Hierarchies require a `role` column on `chunk_acl` and a precedence table for "what does an editor see vs an owner". Real ask in shared workspaces; v0 doesn't model write-vs-read because the only write surface (re-ingestion) is owner-only by design. |
 | **Write-vs-read permission tiers** | Grants are read-only — no shared-edit flow. Closely related to role hierarchies; would need a re-ingestion / re-chunking authorisation check that distinguishes "can read" from "can mutate". |
 | **Nested group membership** | A principal cannot contain other principals. The `principal_membership` join in `match_chunks` would become a recursive CTE, and depth-bounded recursion in PG is fine but the cost-of-nesting question (how deep? what's the worst-case fan-out?) needs production-shaped data to answer. v0 ships flat groups. |
-| **Workspace scoping** | No tenancy tier above users. Multi-tenant deployment would route each tenant to its own Postgres schema or its own DB; that's a deployment-shape question, not a retrieval one. The retrieval path doesn't change. |
+
+> **Update (Phase 2):** Workspace scoping is no longer deferred. ADR-0002
+> adds a **Workspace** as a hard tenant boundary *above* owner-OR-ACL — a
+> chunk is visible only if the viewer is a member of its document's
+> workspace, AND-ed into the retrieval predicate inside `match_chunks` /
+> `keyword_search` and mirrored in the `chunks` / `documents` RLS. The
+> boundary is resolved from `auth.uid()` against `workspace_membership`
+> (never a backend-passed tenant id), so it *does* change the retrieval
+> path — contrary to the original deferral note. See
+> [`docs/adr/0002-workspace-tenant-isolation.md`](adr/0002-workspace-tenant-isolation.md).
 
 ## 7. Refresh + reproduce
 
