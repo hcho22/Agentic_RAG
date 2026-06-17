@@ -1570,8 +1570,9 @@ async def _resolve_principal(
     """Try profiles.email, then principals.name. None → 404 at the endpoint.
 
     Returns (principal_type, principal_id, display_name). Reads under the
-    caller's JWT — both tables have permissive select RLS (US-037) so any
-    authenticated reader can resolve.
+    caller's JWT: profiles has permissive select RLS (US-037), while principals
+    is membership-gated (US-006) — so a caller resolves only groups in their own
+    workspaces and an out-of-workspace group name resolves to nothing (404).
     """
     r = await http.get(
         f"{SUPABASE_URL}/rest/v1/profiles",

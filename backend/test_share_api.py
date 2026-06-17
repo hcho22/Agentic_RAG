@@ -109,6 +109,23 @@ async def _seed_fixture(
         alice_id, instance, alice_email, bob_id, bob_email,
     )
 
+    # Workspace-membership mirroring (ADR-0002): alice/bob are created AFTER the
+    # Default-Workspace backfill migration ran, so they are not members yet.
+    # Without this, the US-005 documents/chunks RLS hides alice's own doc from
+    # _assert_doc_owner and the US-006 membership-gated principals RLS hides the
+    # group from _resolve_principal — both break the share flow. (Cascades away
+    # on the auth.users delete in _cleanup via workspace_membership's FK.)
+    await conn.execute(
+        """
+        insert into public.workspace_membership (workspace_id, user_id, role)
+        values
+          ('00000000-0000-0000-0000-0000000000d0', $1, 'member'),
+          ('00000000-0000-0000-0000-0000000000d0', $2, 'member')
+        on conflict do nothing
+        """,
+        alice_id, bob_id,
+    )
+
     await conn.execute(
         """
         insert into public.documents
