@@ -14,8 +14,7 @@
 -- RLS on the inner reads while still applying the membership predicate, exactly
 -- like _chunk_acl_grants_user / _chunk_belongs_to_doc_owner.
 create or replace function public._user_in_document_workspace(
-  p_document_id uuid,
-  p_user_id uuid
+  p_document_id uuid
 )
 returns boolean
 language sql
@@ -28,7 +27,7 @@ as $$
     from public.workspace_membership wm
     join public.documents d on d.id = p_document_id
     where wm.workspace_id = d.workspace_id
-      and wm.user_id = p_user_id
+      and wm.user_id = auth.uid()
   );
 $$;
 
@@ -45,23 +44,23 @@ $$;
 alter policy chunks_select_own on public.chunks
   using (
     auth.uid() = user_id
-    and public._user_in_document_workspace(document_id, auth.uid())
+    and public._user_in_document_workspace(document_id)
   );
 
 alter policy chunks_select_via_acl on public.chunks
   using (
     public._chunk_acl_grants_user(id, auth.uid())
-    and public._user_in_document_workspace(document_id, auth.uid())
+    and public._user_in_document_workspace(document_id)
   );
 
 alter policy documents_select_own on public.documents
   using (
     auth.uid() = user_id
-    and public._user_in_document_workspace(id, auth.uid())
+    and public._user_in_document_workspace(id)
   );
 
 alter policy documents_select_via_acl on public.documents
   using (
     public._document_has_acl_grant_for_user(id, auth.uid())
-    and public._user_in_document_workspace(id, auth.uid())
+    and public._user_in_document_workspace(id)
   );
