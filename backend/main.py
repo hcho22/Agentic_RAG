@@ -1533,7 +1533,10 @@ async def _assert_doc_owner(
     if service_headers is not None:
         r = await http.get(
             f"{SUPABASE_URL}/rest/v1/documents",
-            params={"id": f"eq.{doc_id}", "select": "id,user_id,status"},
+            params={
+                "id": f"eq.{doc_id}",
+                "select": "id,user_id,status,workspace_id",
+            },
             headers=service_headers,
         )
         r.raise_for_status()
@@ -1549,7 +1552,7 @@ async def _assert_doc_owner(
     # No service role: best we can do is the user-scoped read.
     r = await http.get(
         f"{SUPABASE_URL}/rest/v1/documents",
-        params={"id": f"eq.{doc_id}", "select": "id,user_id,status"},
+        params={"id": f"eq.{doc_id}", "select": "id,user_id,status,workspace_id"},
         headers=_supabase_headers(user),
     )
     r.raise_for_status()
@@ -1566,12 +1569,18 @@ async def _resolve_principal(
     http: httpx.AsyncClient,
     supabase_headers: dict[str, str],
     identifier: str,
+    doc_workspace_id: str,
 ) -> tuple[PrincipalType, str, str] | None:
     """Try profiles.email, then principals.name. None → 404 at the endpoint.
 
     Returns (principal_type, principal_id, display_name). Reads under the
-    caller's JWT — both tables have permissive select RLS (US-037) so any
-    authenticated reader can resolve.
+    caller's JWT: profiles has permissive select RLS (US-037), while principals
+    is membership-gated (US-006) — so a caller resolves only groups in their own
+    workspaces and an out-of-workspace group name resolves to nothing (404).
+    Group resolution is additionally scoped to the target document's workspace:
+    per-workspace unique (workspace_id, name) means the same name can exist in
+    several workspaces the caller belongs to, so without this filter `limit 1`
+    would bind nondeterministically.
     """
     r = await http.get(
         f"{SUPABASE_URL}/rest/v1/profiles",
@@ -1585,7 +1594,12 @@ async def _resolve_principal(
 
     r = await http.get(
         f"{SUPABASE_URL}/rest/v1/principals",
-        params={"name": f"eq.{identifier}", "select": "id,name", "limit": "1"},
+        params={
+            "name": f"eq.{identifier}",
+            "workspace_id": f"eq.{doc_workspace_id}",
+            "select": "id,name",
+            "limit": "1",
+        },
         headers=supabase_headers,
     )
     r.raise_for_status()
@@ -1611,7 +1625,8 @@ async def grant_share(
 
         headers = _supabase_headers(user)
         resolved = await _resolve_principal(
-            http, headers, req.principal_email_or_name.strip()
+            http, headers, req.principal_email_or_name.strip(),
+            doc["workspace_id"],
         )
         if resolved is None:
             raise HTTPException(

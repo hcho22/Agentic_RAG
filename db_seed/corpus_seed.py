@@ -66,6 +66,13 @@ CORPUS_DIR = Path(__file__).resolve().parent / "corpus"
 CORPUS_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 CORPUS_USER_EMAIL = "corpus-seed@local.test"
 
+# US-002: the fixed Default Workspace every legacy/eval row migrates into. Must
+# match the constant in the init migration (20260617120200_default_workspace_backfill.sql)
+# and evals/retrieval/runner.py. The corpus user is created here, *after* that
+# migration's auth.users backfill runs, so we add its membership explicitly —
+# otherwise the US-003 subtractive membership clause would hide the whole corpus.
+DEFAULT_WORKSPACE_ID = uuid.UUID("00000000-0000-0000-0000-0000000000d0")
+
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -128,6 +135,26 @@ async def _ensure_test_user(conn: asyncpg.Connection) -> None:
     )
 
 
+async def _ensure_workspace_membership(conn: asyncpg.Connection) -> None:
+    """Add the corpus user to the Default Workspace (US-002).
+
+    The init migration backfills users that exist at migration time, but the
+    corpus user is inserted by `_ensure_test_user` *after* migrations run. Once
+    the US-003 subtractive membership clause lands, a corpus owner that is not a
+    member of its documents' workspace is hidden from itself — E4 would regress
+    to all-zero recall. Idempotent.
+    """
+    await conn.execute(
+        """
+        insert into public.workspace_membership (workspace_id, user_id, role)
+        values ($1, $2, 'member')
+        on conflict do nothing
+        """,
+        DEFAULT_WORKSPACE_ID,
+        CORPUS_USER_ID,
+    )
+
+
 async def _purge_existing(conn: asyncpg.Connection) -> int:
     """Delete prior corpus documents (chunks cascade via the documents FK)."""
     result = await conn.execute(
@@ -156,14 +183,15 @@ async def _insert_document(
     await conn.execute(
         """
         insert into public.documents (
-            id, user_id, filename, storage_path, byte_size,
+            id, user_id, workspace_id, filename, storage_path, byte_size,
             content_type, status, chunks_count, metadata
         ) values (
-            $1, $2, $3, $4, $5, 'text/markdown', 'ready', $6, $7::jsonb
+            $1, $2, $3, $4, $5, $6, 'text/markdown', 'ready', $7, $8::jsonb
         )
         """,
         document_id,
         CORPUS_USER_ID,
+        DEFAULT_WORKSPACE_ID,
         filename,
         f"corpus-seed/{filename}",
         byte_size,
@@ -224,6 +252,7 @@ async def seed() -> dict[str, int]:
     total_chunks = 0
     try:
         await _ensure_test_user(conn)
+        await _ensure_workspace_membership(conn)
         purged = await _purge_existing(conn)
         if purged:
             log.info("corpus_seed: purged %d previously-seeded documents", purged)

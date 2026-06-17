@@ -83,6 +83,7 @@ selective filters. The full write-up is in
 - **Drag-and-drop ingestion** — `.txt / .md / .pdf / .docx / .html` parsed via docling, chunked, embedded, indexed. Live status updates via Supabase Realtime. Document-level metadata (title, authors, topics, dates) extracted via LLM structured outputs.
 - **Hybrid retrieval** — vector (pgvector HNSW) + keyword (Postgres full-text) fused via Reciprocal Rank Fusion. Optional reranker layer: Cohere, Voyage, or LLM-as-judge. All retrieval runs under user JWT — RLS enforces per-user visibility.
 - **Per-document sharing** — share documents with individual users or groups via the per-chunk ACL system. Share dialog in the ingestion UI. Per-chunk badges in chat tool attribution show *why* the viewer can see each chunk.
+- **Workspace tenant isolation** — a hard tenant boundary *above* per-document sharing: a chunk is visible only if the viewer is a member of its document's workspace, AND-ed into the same `SECURITY INVOKER` retrieval predicate (resolved from the viewer's JWT, never a backend-passed tenant id) and mirrored in the table RLS. Existing data lives in one operator-managed Default Workspace; the boundary bites once a second workspace exists. See [`docs/adr/0002-workspace-tenant-isolation.md`](docs/adr/0002-workspace-tenant-isolation.md).
 - **Structured RAG (text-to-SQL)** — `query_database` tool over an allowlisted read-only schema, with a semantic-layer-aware compiler so the LLM doesn't have to know table internals.
 - **Web search fallback** — `web_search` tool when local retrieval is insufficient.
 - **Sub-agents** — `spawn_document_agent` launches a sub-agent with isolated context and purpose-specific tools.
@@ -97,7 +98,8 @@ explanation — the kind of context a code review won't recover:
 
 | Doc | What it covers |
 | --- | --- |
-| [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md) | The post-filter recall problem, the four-table data model, the SQL predicate, the HNSW interaction, the eval tables, deliberate v0 scope cuts (group nesting, workspace scoping, write-vs-read tiers). |
+| [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md) | The post-filter recall problem, the four-table data model, the SQL predicate, the HNSW interaction, the eval tables, deliberate v0 scope cuts (group nesting, write-vs-read tiers). |
+| [`docs/adr/0002-workspace-tenant-isolation.md`](docs/adr/0002-workspace-tenant-isolation.md) | Phase 2 — the Workspace tenant boundary layered above owner-OR-ACL: where the boundary is enforced (membership clause inside the retrieval predicate, never a backend-passed tenant id), how existing data migrates into a Default Workspace, and the alternatives rejected. |
 | [`docs/evals.md`](docs/evals.md) | Corpus design, the 50-question golden set, what each metric measures and what it *doesn't*, a worked example of CI catching a regression (Δ -0.510 on `recall@5` from a one-line chunk-size change), and a frank list of the eval's limitations. |
 | [`docs/structured-rag.md`](docs/structured-rag.md) | The semantic-layer-aware text-to-SQL compiler, allowlisted schemas, the read-only role boundary. |
 

@@ -125,6 +125,14 @@ NO_ACCESS_VIEWER_ID = uuid.uuid5(EVAL_VIEWER_NAMESPACE, "eval-viewer-no-access")
 PARTIAL_VIEWER_EMAIL = "eval-partial@local.test"
 NO_ACCESS_VIEWER_EMAIL = "eval-no-access@local.test"
 
+# US-002: the fixed Default Workspace the corpus + eval viewers live in. Must
+# match the init migration (20260617120200_default_workspace_backfill.sql) and
+# db_seed.corpus_seed.DEFAULT_WORKSPACE_ID. These users are created here, after
+# the migration's auth.users backfill runs, so ensure_viewer_users adds their
+# membership explicitly — otherwise the US-003 subtractive membership clause
+# would hide the corpus and E4/E6 would regress to all-zero recall.
+DEFAULT_WORKSPACE_ID = uuid.UUID("00000000-0000-0000-0000-0000000000d0")
+
 # Local-dev default; production / CI overrides via SUPABASE_JWT_SECRET.
 LOCAL_JWT_SECRET = "super-secret-jwt-token-with-at-least-32-characters-long"
 
@@ -335,11 +343,17 @@ def user_headers(jwt_token: str, anon_or_service_key: str) -> dict[str, str]:
 
 
 async def ensure_viewer_users(database_url: str) -> None:
-    """Idempotently insert the corpus user + the two eval viewers.
+    """Idempotently insert the corpus user + the two eval viewers, and make all
+    three members of the Default Workspace.
 
     Direct insert into auth.users bypasses the normal Supabase Auth flow;
     only acceptable here because the runner is a service-role-equipped
     eval against a local / CI database.
+
+    US-002: these users are created after the init migration's auth.users
+    backfill, so their Default-Workspace memberships are added here. Without
+    them the US-003 subtractive membership clause hides the corpus and recall
+    collapses to zero for every viewer.
     """
     conn = await asyncpg.connect(database_url)
     try:
@@ -363,6 +377,18 @@ async def ensure_viewer_users(database_url: str) -> None:
                 (CORPUS_USER_ID, CORPUS_USER_EMAIL),
                 (PARTIAL_VIEWER_ID, PARTIAL_VIEWER_EMAIL),
                 (NO_ACCESS_VIEWER_ID, NO_ACCESS_VIEWER_EMAIL),
+            ],
+        )
+        await conn.executemany(
+            """
+            insert into public.workspace_membership (workspace_id, user_id, role)
+            values ($1, $2, 'member')
+            on conflict do nothing
+            """,
+            [
+                (DEFAULT_WORKSPACE_ID, CORPUS_USER_ID),
+                (DEFAULT_WORKSPACE_ID, PARTIAL_VIEWER_ID),
+                (DEFAULT_WORKSPACE_ID, NO_ACCESS_VIEWER_ID),
             ],
         )
     finally:
