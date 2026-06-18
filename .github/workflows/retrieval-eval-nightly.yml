@@ -45,9 +45,13 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install Supabase CLI
+        # Pinned to match local dev + retrieval-eval.yml: an unpinned `latest`
+        # drifted to a CLI whose default auth key format breaks the eval
+        # runner's self-minted JWTs (403). See retrieval-eval.yml for the full
+        # rationale; keep these pins in lockstep.
         uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.90.0
 
       - name: Start local Supabase stack
         run: |

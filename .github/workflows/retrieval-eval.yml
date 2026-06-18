@@ -81,9 +81,17 @@ jobs:
           cache-dependency-path: pr/evals/retrieval/requirements-ci.txt
 
       - name: Install Supabase CLI
+        # Pinned, NOT `latest`: a newer Supabase CLI changed the local stack's
+        # default auth key format / JWT signing, so the runner's self-minted
+        # HS256 JWTs were gateway-rejected (403) on the first match_chunks call
+        # — even after sourcing JWT_SECRET/ANON_KEY from `supabase status`
+        # (below), because the break is the key *format*, not just its value.
+        # 2.90.0 matches local dev, where the eval's auth path is verified
+        # working. Bump only alongside a runner update that handles the newer
+        # Supabase key formats. Keep the other eval workflows on the same pin.
         uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.90.0
 
       - name: Start local Supabase stack
         working-directory: pr
@@ -102,12 +110,13 @@ jobs:
           # JWTs with SUPABASE_JWT_SECRET (falling back to a baked-in local
           # secret) and sends SUPABASE_ANON_KEY as the PostgREST `apikey` for
           # those user-JWT requests (falling back to the privileged
-          # service-role key). Those fallbacks only line up when the pinned
-          # `supabase start` default secret/keys happen to match the baked-in
-          # constants; `version: latest` can ship a different default JWT
-          # secret or key format, after which the very first authenticated
-          # match_chunks call is gateway-rejected (403) and the eval crashes.
-          # Sourcing both from `supabase status` keeps the eval version-robust.
+          # service-role key). Those fallbacks only line up when the running
+          # `supabase start` default secret/keys match the baked-in constants;
+          # an UNPINNED CLI can ship a different default JWT secret or key
+          # format, after which the very first authenticated match_chunks call
+          # is gateway-rejected (403) and the eval crashes. The CLI is now
+          # pinned (above) to dodge that drift; sourcing from `supabase status`
+          # stays as defense so a future pin bump can't silently desync auth.
           supabase status -o env > /tmp/supabase.env
           grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|JWT_SECRET|DB_URL)=' /tmp/supabase.env \
             | sed -E 's/^(.*)="(.*)"$/\1=\2/' \
