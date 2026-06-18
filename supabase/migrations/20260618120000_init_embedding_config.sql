@@ -42,16 +42,20 @@ create table public.embedding_config (
 
 alter table public.embedding_config enable row level security;
 
--- Authenticated callers may READ the stamp and SEED it once (the first ingest
--- that produces embeddings inserts the row), but may NOT update or delete it:
--- omitting UPDATE/DELETE policies makes the single row immutable to the API role
--- under RLS, so a routine per-user ingest can never silently rewrite the
--- corpus's recorded model — which would blind US-027's drift detection. The
--- production ingest path is therefore insert-if-absent (ON CONFLICT DO NOTHING).
--- Bulk re-index that DOES overwrite the stamp (the corpus / wikipedia seeders)
--- runs as service-role, which bypasses RLS. anon gets no policy → no access.
+-- Authenticated callers may READ the stamp (the model name is harmless and the
+-- US-027 guard reads it via service-role anyway) but may NOT write it: there is
+-- no INSERT/UPDATE/DELETE policy for the API role, so the single row is
+-- write-immutable under RLS. ALL writes — both the production ingest stamp and
+-- the bulk re-index seeders — run as service-role, which bypasses RLS.
+--
+-- Why no authenticated INSERT: a `with check (true)` insert policy let ANY
+-- authenticated tenant seed the GLOBAL singleton with an arbitrary (model, dim)
+-- on an empty corpus. Because the row is then immutable to the API role, a
+-- legitimate later ingest no-ops on the poisoned stamp and the US-027 startup
+-- guard trips on the mismatch — a cross-tenant startup DoS driven from one
+-- tenant. Restricting writes to service-role closes that hole; the production
+-- stamp path (_stamp_embedding_config) now writes with the service-role key and
+-- skips when it is unset (matching the guard, which also disables itself then).
+-- anon gets no policy → no access.
 create policy embedding_config_select on public.embedding_config
   for select to authenticated using (true);
-
-create policy embedding_config_insert on public.embedding_config
-  for insert to authenticated with check (true);

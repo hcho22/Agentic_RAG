@@ -59,9 +59,10 @@ from pydantic import BaseModel, ConfigDict
 Provider = Literal["openai", "azure"]
 Role = Literal["answerer", "embedder", "judge"]
 # US-025: the runtime chat surface. `responses` (OpenAI Responses API: hosted
-# file_search + server-side previous_response_id threading) is an OpenAI-provider-
-# only enhancement; `completions` (Chat Completions) is the portable cross-provider
-# path. See `resolve_chat_mode_default` for the fail-closed binding (FR-M4).
+# file_search + server-side previous_response_id threading) runs on OpenAI proper
+# only (provider=openai with no base_url override); `completions` (Chat
+# Completions) is the portable cross-provider path. See `responses_capable` /
+# `resolve_chat_mode_default` for the fail-closed binding (FR-M4).
 ChatMode = Literal["responses", "completions"]
 
 # Env-var prefix per role. The answerer (None) reads the bare base vars; the
@@ -262,21 +263,38 @@ def build_openai_client(cfg: ProviderConfig) -> AsyncOpenAI:
     return AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url)
 
 
+def responses_capable(answerer: ProviderConfig) -> bool:
+    """US-025: whether the answerer can serve the Responses API.
+
+    Responses mode (hosted `file_search` + server-side `previous_response_id`
+    threading) exists on **OpenAI proper only** — `provider=openai` with no
+    `base_url` override. An OpenAI-*compatible* host reached via `base_url`
+    (vLLM, Together, Groq, Ollama, …) faithfully speaks Chat Completions but has
+    no Responses endpoint, so it is NOT responses-capable even though its
+    provider is `openai`. Azure is likewise out (provider != openai). This is
+    the single source of truth for both the default-mode resolution
+    (`resolve_chat_mode_default`) and the per-request `mode` gate in main.py.
+    """
+    return answerer.provider == "openai" and answerer.base_url is None
+
+
 def resolve_chat_mode_default(answerer: ProviderConfig, raw: str | None) -> ChatMode:
     """US-025: resolve + validate the process-wide default chat mode (FR-M4).
 
     `responses` (OpenAI Responses API — hosted `file_search` + server-side
-    `previous_response_id` threading) is an OpenAI-**provider**-only enhancement
-    and non-portable; `completions` (Chat Completions) is the cross-provider
-    path every provider speaks. Resolved against the already-validated answerer
-    provider, so the portable path is the cross-provider default and a
+    `previous_response_id` threading) runs on **OpenAI proper only** (`openai`
+    provider with no `base_url` override) and is non-portable; `completions`
+    (Chat Completions) is the cross-provider path every provider speaks.
+    Resolved against the already-validated answerer config (provider AND
+    base_url), so the portable path is the cross-provider default and a
     non-portable combination can never look "accepted" while silently stripping
     file_search / server-side threading:
 
-      * `raw` empty/unset → `responses` for an `openai` answerer (preserves the
-        US-004 default), `completions` for any other provider;
-      * an explicit `responses` under a non-`openai` answerer → **fail closed**
-        with a `RuntimeError` naming the offending provider and the remedy
+      * `raw` empty/unset → `responses` for a responses-capable answerer
+        (preserves the US-004 default), `completions` otherwise (Azure, or an
+        openai answerer with a base_url override);
+      * an explicit `responses` under a non-responses-capable answerer → **fail
+        closed** with a `RuntimeError` naming the offending config and the remedy
         (never a silent downgrade to `completions`);
       * `completions` is always honored;
       * any other value → `ValueError` (typo, like the provider validation).
@@ -291,16 +309,22 @@ def resolve_chat_mode_default(answerer: ProviderConfig, raw: str | None) -> Chat
         raise ValueError(
             f"CHAT_MODE_DEFAULT must be 'responses' or 'completions', got {explicit!r}"
         )
-    if answerer.provider != "openai":
+    if not responses_capable(answerer):
         if explicit == "responses":
+            reason = (
+                f"provider={answerer.provider!r}"
+                if answerer.provider != "openai"
+                else f"an OpenAI-compatible host (OPENAI_BASE_URL={answerer.base_url!r})"
+            )
             raise RuntimeError(
-                "chat-mode 'responses' requires answerer provider=openai, but the "
-                f"resolved answerer provider is {answerer.provider!r}. Responses mode "
-                "(hosted file_search + server-side previous_response_id threading) is "
-                "OpenAI-only and non-portable — it cannot run on this provider. Set "
-                "CHAT_MODE_DEFAULT=completions or use provider=openai."
+                "chat-mode 'responses' requires OpenAI proper (provider=openai with "
+                f"no base_url override), but the resolved answerer is {reason}. "
+                "Responses mode (hosted file_search + server-side "
+                "previous_response_id threading) is OpenAI-only and non-portable — it "
+                "cannot run on this host. Set CHAT_MODE_DEFAULT=completions, or use "
+                "provider=openai with no base_url override."
             )
         return "completions"
-    # openai answerer: honor an explicit choice, else keep the historical
-    # `responses` default (US-004). `responses` stays an OpenAI-only enhancement.
+    # responses-capable answerer (openai proper, no base_url): honor an explicit
+    # choice, else keep the historical `responses` default (US-004).
     return explicit or "responses"  # type: ignore[return-value]

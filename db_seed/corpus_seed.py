@@ -28,7 +28,8 @@ Run:
 
 Reads:
     CORPUS_SEED_DATABASE_URL  (or DATABASE_URL fallback) — writable Postgres URL
-    OPENAI_API_KEY — required for embedding generation
+    Embedder connection — resolved from the embedder-role ProviderConfig
+        (EMBEDDER_* / OPENAI_API_KEY / AZURE_OPENAI_*; see backend/model_config.py)
 """
 
 from __future__ import annotations
@@ -54,8 +55,19 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from chunking import chunk_text  # noqa: E402
 from embeddings import embed_texts, get_embedding_model, to_pgvector  # noqa: E402
+from model_config import ProviderConfig, build_openai_client  # noqa: E402
 
 log = logging.getLogger("agentic_rag.db_seed.corpus")
+
+
+def build_embedder_client() -> AsyncOpenAI:
+    """US-027: build the embedding client from the embedder-role ProviderConfig
+    (EMBEDDER_PROVIDER / EMBEDDER_BASE_URL / EMBEDDER_AZURE_* → answerer
+    fallback), so the documented re-index remedy embeds via the SAME provider the
+    running app uses — not a hardcoded OpenAI host. Fails closed (ValueError) on
+    a missing key for the resolved provider, exactly like the backend startup.
+    Shared by both seeders so they stay in lockstep."""
+    return build_openai_client(ProviderConfig.from_env("embedder"))
 
 CORPUS_DIR = Path(__file__).resolve().parent / "corpus"
 
@@ -273,12 +285,8 @@ async def seed() -> dict[str, int]:
             "set CORPUS_SEED_DATABASE_URL (or DATABASE_URL) to a writable "
             "Postgres connection string"
         )
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required to embed corpus chunks")
-
     corpus = load_corpus()
-    openai_client = AsyncOpenAI(api_key=api_key)
+    openai_client = build_embedder_client()
     conn = await asyncpg.connect(url)
 
     total_chunks = 0

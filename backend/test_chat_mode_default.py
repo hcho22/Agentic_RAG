@@ -14,8 +14,12 @@ Covers the PRD validation test (assert-style fail-closed guard):
     `completions` (the portable cross-provider default);
   * answerer provider=openai + responses -> still resolves to `responses`
     (the OpenAI-only enhancement stays available);
+  * answerer provider=openai WITH a base_url override (a BYO OpenAI-compatible
+    host) -> NOT responses-capable: defaults to `completions` and an explicit
+    `responses` fails closed, same posture as azure (the Responses endpoint
+    doesn't exist on a compatible host);
 plus the surrounding matrix (openai default preserved, explicit completions
-always honored, bad value -> ValueError).
+always honored, `responses_capable` matrix, bad value -> ValueError).
 
 Run:
     python -m backend.test_chat_mode_default
@@ -29,12 +33,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from model_config import ProviderConfig, resolve_chat_mode_default  # noqa: E402
+from model_config import (  # noqa: E402
+    ProviderConfig,
+    resolve_chat_mode_default,
+    responses_capable,
+)
 
-# Minimal valid configs per provider. resolve_chat_mode_default only reads
-# `.provider`, but we build real (frozen) configs so the test exercises the
-# actual type the startup path passes in.
+# Minimal valid configs per provider. resolve_chat_mode_default reads the
+# provider AND base_url (Responses runs on OpenAI proper only), so we build real
+# (frozen) configs so the test exercises the actual type the startup path passes
+# in.
 _OPENAI = ProviderConfig(provider="openai", api_key="sk-test")
+# An openai answerer pointed at an OpenAI-compatible host (the BYO-host feature):
+# speaks Chat Completions but has no Responses endpoint, so it is NOT
+# responses-capable even though provider == "openai".
+_OPENAI_BASE_URL = ProviderConfig(
+    provider="openai", api_key="sk-test", base_url="https://vllm.internal/v1"
+)
 _AZURE = ProviderConfig(
     provider="azure",
     api_key="az-key",
@@ -127,6 +142,53 @@ def test_case_and_whitespace_insensitive() -> None:
     raise AssertionError("normalized 'responses' on azure must still fail closed")
 
 
+def test_openai_base_url_plus_responses_fails_closed() -> None:
+    """BYO-host case: an openai answerer with OPENAI_BASE_URL set is NOT
+    responses-capable (no Responses endpoint on a compatible host), so an
+    explicit CHAT_MODE_DEFAULT=responses fails closed — same posture as Azure,
+    never a silent downgrade. The message must name the base_url and the
+    completions remedy."""
+    try:
+        resolve_chat_mode_default(_OPENAI_BASE_URL, "responses")
+    except RuntimeError as e:
+        text = str(e)
+        _check(
+            "vllm.internal" in text,
+            f"error must name the offending base_url host, got: {text!r}",
+        )
+        _check(
+            "completions" in text,
+            f"error must carry the CHAT_MODE_DEFAULT=completions remedy, got: {text!r}",
+        )
+        print("ok: openai + base_url + responses fails closed (RuntimeError)")
+        return
+    raise AssertionError("openai + base_url + responses must raise RuntimeError")
+
+
+def test_openai_base_url_unset_defaults_to_completions() -> None:
+    """An openai answerer with a base_url override defaults to the portable
+    `completions` path, NOT `responses` — the Responses endpoint isn't there."""
+    for raw in (None, "", "   "):
+        mode = resolve_chat_mode_default(_OPENAI_BASE_URL, raw)
+        _check(
+            mode == "completions",
+            f"openai+base_url with raw={raw!r} should default to completions, got {mode!r}",
+        )
+    print("ok: openai + base_url with no explicit mode resolves to completions")
+
+
+def test_responses_capable_matrix() -> None:
+    """`responses_capable` is the single source of truth shared by the default
+    resolution and the per-request mode gate: only OpenAI proper (no base_url)."""
+    _check(responses_capable(_OPENAI), "openai proper must be responses-capable")
+    _check(
+        not responses_capable(_OPENAI_BASE_URL),
+        "openai + base_url must NOT be responses-capable",
+    )
+    _check(not responses_capable(_AZURE), "azure must NOT be responses-capable")
+    print("ok: responses_capable — openai-proper only (no base_url, not azure)")
+
+
 def test_invalid_value_fails_closed() -> None:
     """A typo in CHAT_MODE_DEFAULT raises ValueError (never silently ignored),
     independent of provider — same spirit as the provider-string validation."""
@@ -149,6 +211,9 @@ def main() -> int:
         test_openai_responses_still_starts,
         test_openai_unset_preserves_responses_default,
         test_openai_explicit_completions,
+        test_openai_base_url_plus_responses_fails_closed,
+        test_openai_base_url_unset_defaults_to_completions,
+        test_responses_capable_matrix,
         test_case_and_whitespace_insensitive,
         test_invalid_value_fails_closed,
     ]

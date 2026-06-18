@@ -84,7 +84,7 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 | `OPENAI_SUBAGENT_MODEL` | Document subagent | `OPENAI_MODEL` |
 | `OPENAI_RERANK_MODEL` | `llm` reranker (only when `RERANKER=llm`) | `OPENAI_MODEL` |
 | `EMBEDDER_MODEL` | Embedder | `EMBEDDING_MODEL` → `text-embedding-3-small` |
-| `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (openai) / `completions` (any other provider) |
+| `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (OpenAI proper, no `base_url`) / `completions` (Azure or `openai` + `base_url`) |
 
 Rerankers (`COHERE_RERANK_MODEL` / `VOYAGE_RERANK_MODEL`) are a **separate
 provider axis** (dedicated rerank endpoints) and are not part of this surface.
@@ -167,7 +167,7 @@ scope. "Tested" means exercised in CI / verified end-to-end.
 | `provider=azure` (Azure OpenAI) | ✅ **Tested** | Deployment-vs-model split, path-templating, `api-version` query param, **api-key auth only**. |
 | `provider=openai` + custom `base_url` (vLLM, Together, Groq, Ollama, LM Studio, …) | ⚠️ **Supported, untested** | Anything that faithfully speaks the OpenAI Chat Completions + Embeddings contract should work, but it is **not** in CI — validate it yourself. |
 | Native non-OpenAI **runtime** APIs (Anthropic Messages, Bedrock, Vertex native SDKs) | ❌ **Out of scope** | A non-OpenAI model reaches this surface **only** via an OpenAI-compatible endpoint. No native adapters. |
-| **Responses mode** (`CHAT_MODE_DEFAULT=responses`: hosted `file_search` + server-side `previous_response_id` threading) | ⚠️ **OpenAI-provider only, non-portable** | Fails closed at startup on any non-`openai` answerer (FR-M4) — never a silent downgrade. `completions` is the portable cross-provider path and the default everywhere else. |
+| **Responses mode** (`CHAT_MODE_DEFAULT=responses`: hosted `file_search` + server-side `previous_response_id` threading) | ⚠️ **OpenAI proper only (no `base_url` override), non-portable** | Requires `provider=openai` with **no** `base_url` override — the Responses endpoint doesn't exist on Azure or any OpenAI-compatible `base_url` host. Fails closed at startup on any non-capable answerer (FR-M4) — never a silent downgrade. `completions` is the portable cross-provider path and the default everywhere else. |
 | Azure **Entra ID / AAD-token** auth | 🚧 **Deferred** | api-key auth only in v1; documented future seam (ADR-0006). |
 | Per-call-site **provider / `base_url`** split | ❌ **Out of scope** | Provider binds per *role*; one chat host serves all text generation. Only the *model* varies per call-site. |
 | Cohere / Voyage **rerankers** as a model-surface role | ❌ **Separate axis** | Dedicated rerank endpoints (`RERANKER=cohere|voyage`), orthogonal to answerer/embedder/judge. |

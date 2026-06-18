@@ -51,6 +51,7 @@ from model_config import (
     ProviderConfig,
     build_openai_client,
     resolve_chat_mode_default,
+    responses_capable,
 )
 from parsing import UnsupportedFormatError, parse_document, warmup as warmup_parsing
 from permissions import (
@@ -135,7 +136,13 @@ load_dotenv()
 log = logging.getLogger("agentic_rag.backend")
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 
-_REQUIRED_ENV = ("SUPABASE_URL", "SUPABASE_ANON_KEY", "OPENAI_API_KEY")
+# US-024: the model-provider key (OPENAI_API_KEY / AZURE_OPENAI_API_KEY / a
+# role-specific *_API_KEY) is NOT required here — which key is needed depends on
+# the resolved provider per role, and ProviderConfig.from_env validates that
+# fail-closed when the answerer/embedder/judge clients are built below. Requiring
+# OPENAI_API_KEY unconditionally would crash an all-Azure deployment (which sets
+# no OPENAI_API_KEY) before that per-provider check ever runs.
+_REQUIRED_ENV = ("SUPABASE_URL", "SUPABASE_ANON_KEY")
 _missing = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
 if _missing:
     raise RuntimeError(
@@ -156,8 +163,9 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or None
 # US-021: the OpenAI/Azure connection (api key, base_url, Azure params) is now
 # resolved once via model_config.ProviderConfig.from_env (see the client build
 # below), not read ad hoc here. OPENAI_MODEL stays — model selection is
-# per-call-site (ADR-0006). A missing OPENAI_API_KEY is still caught by the
-# _REQUIRED_ENV startup check above.
+# per-call-site (ADR-0006). A missing key for the resolved provider is caught
+# fail-closed by ProviderConfig.from_env at the client build below (per-provider,
+# not the unconditional _REQUIRED_ENV check above).
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_VECTOR_STORE_ID = os.environ.get("OPENAI_VECTOR_STORE_ID") or None
 FRONTEND_ORIGINS = [
@@ -324,20 +332,23 @@ _JUDGE_CONFIG = ProviderConfig.from_env("judge")
 openai_client = wrap_openai(build_openai_client(_ANSWERER_CONFIG))
 
 # US-025 (FR-M4): resolve + validate the process-wide default chat mode against
-# the now-resolved answerer provider. Responses mode (hosted file_search +
-# server-side previous_response_id threading) is OpenAI-provider-only and
-# non-portable, so the portable `completions` path is the cross-provider
-# default, and an explicit CHAT_MODE_DEFAULT=responses under a non-openai
-# answerer fails closed HERE (at startup), never silently downgraded. For an
-# openai answerer the historical `responses` default is preserved.
+# the now-resolved answerer config. Responses mode (hosted file_search +
+# server-side previous_response_id threading) runs on OpenAI proper only
+# (provider=openai with no base_url override) and is non-portable, so the
+# portable `completions` path is the cross-provider default, and an explicit
+# CHAT_MODE_DEFAULT=responses under a non-responses-capable answerer (Azure, or
+# an openai base_url-overridden host) fails closed HERE (at startup), never
+# silently downgraded. For an OpenAI-proper answerer the historical `responses`
+# default is preserved.
 DEFAULT_CHAT_MODE: ChatMode = resolve_chat_mode_default(
     _ANSWERER_CONFIG, os.environ.get("CHAT_MODE_DEFAULT")
 )
 # US-025: the hosted-file_search + server-side-threading Responses path is
-# reachable ONLY on a validated openai answerer. Gates the per-request `mode`
-# override at /api/chat so an explicit mode=responses can't sneak onto a
-# non-openai provider (where file_search/threading don't exist).
-RESPONSES_MODE_AVAILABLE = _ANSWERER_CONFIG.provider == "openai"
+# reachable ONLY on OpenAI proper (provider=openai with no base_url override).
+# Gates the per-request `mode` override at /api/chat so an explicit
+# mode=responses can't sneak onto a non-openai provider OR an OpenAI-compatible
+# base_url host (where the Responses endpoint doesn't exist).
+RESPONSES_MODE_AVAILABLE = responses_capable(_ANSWERER_CONFIG)
 
 
 def _build_role_client(cfg: ProviderConfig) -> AsyncOpenAI:
@@ -411,7 +422,10 @@ async def _on_startup() -> None:
     # nothing to compare against, so an empty corpus pays no embedding call.
     # A failure to READ the stamp is logged and skipped (it must not mask a
     # drift — a broken embedder resurfaces on the first real query), but a
-    # confirmed drift propagates.
+    # confirmed drift propagates. Likewise a probe API error (rate-limit / 5xx /
+    # transient outage after retries) is logged and skips the check rather than
+    # crash-looping boot on a momentarily-unreachable embedder; only
+    # check_embedder_drift's RuntimeError (a real drift) aborts startup.
     async with httpx.AsyncClient(timeout=30.0) as http:
         try:
             stamp = await _fetch_embedding_stamp(http)
@@ -419,13 +433,23 @@ async def _on_startup() -> None:
             log.exception("embedder_guard.stamp_read_failed — skipping drift check")
             stamp = None
     if stamp is not None:
-        measured_dim = await probe_embed_dim(embedder_client)
-        check_embedder_drift(get_embedding_model(), measured_dim, stamp)
-        log.info(
-            "embedder_guard.ok — embedder %r @ %d dims matches the corpus stamp",
-            get_embedding_model(),
-            measured_dim,
-        )
+        try:
+            measured_dim = await probe_embed_dim(embedder_client)
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "embedder_guard.probe_failed — skipping drift check (the embedder "
+                "was unreachable at startup; a real drift resurfaces on the first "
+                "query)",
+                exc_info=True,
+            )
+            measured_dim = None
+        if measured_dim is not None:
+            check_embedder_drift(get_embedding_model(), measured_dim, stamp)
+            log.info(
+                "embedder_guard.ok — embedder %r @ %d dims matches the corpus stamp",
+                get_embedding_model(),
+                measured_dim,
+            )
 
 
 class ChatRequest(BaseModel):
@@ -1426,7 +1450,6 @@ async def _reconcile_chunks(
 
 async def _stamp_embedding_config(
     http: httpx.AsyncClient,
-    user: AuthedUser,
     model: str,
     dim: int,
 ) -> None:
@@ -1440,16 +1463,31 @@ async def _stamp_embedding_config(
     per-user ingest must NOT rewrite the corpus's recorded model — if it did, an
     accidental model swap would re-stamp itself and blind US-027's drift guard.
     Overwriting the stamp is reserved for a deliberate bulk re-index (the
-    seeders, service-role). The insert-only RLS on the table enforces this even
-    if a caller tried to update. Best-effort: a stamp failure must not fail an
+    seeders, service-role).
+
+    Writes go through the **service-role** key, not the caller's JWT: the table's
+    RLS restricts INSERT to service-role (no authenticated-insert policy), which
+    closes the cross-tenant poisoning hole where any authenticated tenant could
+    pre-seed the global singleton with an arbitrary (model, dim) and trip the
+    US-027 guard for everyone. When no service-role key is configured the stamp
+    is skipped (logged) — consistent with the US-027 guard, which also disables
+    itself without the key. Best-effort: a stamp failure must not fail an
     otherwise-successful ingest, so errors are logged, not raised.
     """
+    headers = _service_role_headers()
+    if headers is None:
+        log.warning(
+            "embedding_config stamp skipped — SUPABASE_SERVICE_ROLE_KEY is unset, "
+            "so the corpus stamp can't be written (its RLS restricts INSERT to "
+            "service-role). Set the service-role key to enable US-026 stamping."
+        )
+        return
     try:
         r = await http.post(
             f"{SUPABASE_URL}/rest/v1/embedding_config",
             params={"on_conflict": "singleton"},
             headers={
-                **_supabase_headers(user),
+                **headers,
                 "Prefer": "resolution=ignore-duplicates, return=minimal",
             },
             json={"singleton": True, "model": model, "dim": dim},
@@ -1605,7 +1643,7 @@ async def ingest_document(
             # ingest seeds it and the rest no-op.
             if produced_dim is not None:
                 await _stamp_embedding_config(
-                    http, user, get_embedding_model(), produced_dim
+                    http, get_embedding_model(), produced_dim
                 )
 
             if to_replay:
