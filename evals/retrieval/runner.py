@@ -1437,7 +1437,7 @@ async def amain() -> int:
     modes: tuple[str, ...] = MODES if args.mode == "all" else (args.mode,)
     questions, viewer_construction = load_questions(args.questions)
 
-    viewer_alias = {
+    viewer_alias: dict[str, tuple[ViewerKind, ...]] = {
         "full": ("full_access",),
         "partial": ("full_access", "partial_access"),
         "no_access": ("full_access", "no_access"),
