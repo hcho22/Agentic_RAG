@@ -48,6 +48,7 @@ it in behind `--include-e6` and fails the run (exit 1) when `passed` is False.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -525,9 +526,9 @@ async def run_e6(
             }
             for mode in modes:
                 rows = await _retry_transient(
-                    lambda mode=mode, q=q: run_query(
-                        mode, openai_client, http, supabase_url, e6_viewer_headers,
-                        q["question"],
+                    functools.partial(
+                        run_query, mode, openai_client, http, supabase_url,
+                        e6_viewer_headers, q["question"],
                     ),
                     what=f"negative query {qid}/{mode}",
                 )
@@ -549,9 +550,9 @@ async def run_e6(
             b_gold = {str(stable_to_b_chunk[s]) for s in gold if s in stable_to_b_chunk}
             for mode in modes:
                 rows = await _retry_transient(
-                    lambda mode=mode, q=q: run_query(
-                        mode, openai_client, http, supabase_url, e6_viewer_headers,
-                        q["question"],
+                    functools.partial(
+                        run_query, mode, openai_client, http, supabase_url,
+                        e6_viewer_headers, q["question"],
                     ),
                     what=f"positive query {qid}/{mode}",
                 )
