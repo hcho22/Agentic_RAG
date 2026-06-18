@@ -92,10 +92,24 @@ jobs:
           # all migrations in supabase/migrations/. The PR's migration set
           # is used because we want to eval against the schema the PR ships.
           supabase start
-          # Surface API_URL / SERVICE_ROLE_KEY / DB_URL to subsequent steps.
+          # Surface the running stack's coordinates to subsequent steps.
           # `-o env` emits `KEY="value"` pairs; strip quotes for $GITHUB_ENV.
+          #
+          # ANON_KEY + JWT_SECRET are surfaced (alongside API_URL /
+          # SERVICE_ROLE_KEY / DB_URL) so the eval authenticates against THIS
+          # instance's actual credentials rather than the runner's hardcoded
+          # local-dev fallbacks. The runner mints the per-viewer authenticated
+          # JWTs with SUPABASE_JWT_SECRET (falling back to a baked-in local
+          # secret) and sends SUPABASE_ANON_KEY as the PostgREST `apikey` for
+          # those user-JWT requests (falling back to the privileged
+          # service-role key). Those fallbacks only line up when the pinned
+          # `supabase start` default secret/keys happen to match the baked-in
+          # constants; `version: latest` can ship a different default JWT
+          # secret or key format, after which the very first authenticated
+          # match_chunks call is gateway-rejected (403) and the eval crashes.
+          # Sourcing both from `supabase status` keeps the eval version-robust.
           supabase status -o env > /tmp/supabase.env
-          grep -E '^(API_URL|SERVICE_ROLE_KEY|DB_URL)=' /tmp/supabase.env \
+          grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|JWT_SECRET|DB_URL)=' /tmp/supabase.env \
             | sed -E 's/^(.*)="(.*)"$/\1=\2/' \
             >> "$GITHUB_ENV"
 
@@ -115,6 +129,14 @@ jobs:
         env:
           SUPABASE_URL: ${{ env.API_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          # The eval mints authenticated viewer JWTs and calls match_chunks
+          # under them; SUPABASE_JWT_SECRET signs those JWTs and
+          # SUPABASE_ANON_KEY is the PostgREST apikey for the user-JWT
+          # requests. Both come from the running stack (above) so the eval does
+          # not fall back to baked-in local-dev defaults that a newer Supabase
+          # may no longer match (the 403-on-first-query failure mode).
+          SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
           CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
           DATABASE_URL: ${{ env.DB_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -149,6 +171,10 @@ jobs:
         env:
           SUPABASE_URL: ${{ env.API_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          # Same as the PR step: authenticate against the running stack's real
+          # secret/anon key rather than baked-in local-dev fallbacks.
+          SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
           CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
           DATABASE_URL: ${{ env.DB_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
