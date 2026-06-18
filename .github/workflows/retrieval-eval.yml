@@ -1,7 +1,14 @@
 # US-035: PR retrieval-eval workflow. Runs the 50-question golden set
 # (US-033) against PR head AND main, then posts a delta-vs-main markdown
-# comment on the PR. Comment-only — never fails the build, regardless of
-# delta sign. Updates an existing bot comment in place across pushes.
+# comment on the PR. The delta comment is advisory — it never fails the build,
+# regardless of delta sign, and updates an existing bot comment in place across
+# pushes.
+#
+# US-009: the PR run additionally executes the E6 second-workspace zero-leak
+# eval (--include-e6), which IS a hard gate: a cross-workspace leak fails the
+# eval step and blocks the merge. E6 is a deterministic, pinned security
+# invariant (CONTEXT E8), so it is allowed to block per-PR — unlike the
+# LLM-judged quality metrics, which only ever comment here.
 #
 # Reranker modes (cohere / voyage / llm) are NOT exercised here — they
 # cost real money per call and add API-dependency flake to PR checks.
@@ -109,7 +116,17 @@ jobs:
           # US-042: --viewers all is the default; spelled out here so the
           # workflow log clearly records the run shape. Drops to --viewers
           # full if the new tables are ever too noisy in PR comments.
-          python -m evals.retrieval.runner --viewers all --out /tmp/pr.json
+          #
+          # US-009: --include-e6 runs the second-workspace zero-leak eval. It is
+          # a PINNED SECURITY INVARIANT (CONTEXT E8 "Security/correctness gate"):
+          # a cross-workspace leak — or a structurally blind positive control —
+          # makes the runner exit non-zero, which FAILS this step and blocks the
+          # merge. This is deliberate and non-downgradable (it is the only
+          # fail-the-build behavior in this otherwise comment-only workflow); the
+          # delta-vs-main comment below stays advisory. E6 is deterministic (no
+          # LLM judge), so a per-PR hard gate cannot flake-block an innocent PR.
+          python -m evals.retrieval.runner \
+            --viewers all --include-e6 --out /tmp/pr.json
 
       - name: Reseed corpus + run eval (main)
         working-directory: main
