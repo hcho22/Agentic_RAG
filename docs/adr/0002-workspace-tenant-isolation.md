@@ -92,3 +92,62 @@ a backend-supplied tenant ID.
 - **Admin role implies content read across the workspace.** Rejected — it would
   revive the deferred access-control RBAC through the back door and punch a hole
   in owner-OR-ACL. An admin who must read everything is *granted* it via the ACL.
+
+## Identity Boundary (AU3)
+
+US-011 pins what an integrator may swap in the auth stack and what is welded to
+the security core. This is the formal record of the CONTEXT "Identity boundary
+(AU3)" design note; it lives under this ADR because the boundary is the very same
+`auth.uid()` the workspace-membership clause (US-003) resolves against — swapping
+identity wrong is just another way to cross the tenant boundary.
+
+- **The floor (non-negotiable): the data plane is a Supabase-JWT pass-through.**
+  `get_user` (`backend/main.py:361`) validates the bearer token against GoTrue
+  (`GET {SUPABASE_URL}/auth/v1/user`); every data call then forwards *the user's
+  own JWT* to PostgREST via `_supabase_headers` (`backend/main.py:390`). So
+  `auth.uid()` inside `match_chunks`, `keyword_search`, and the `chunks` /
+  `documents` SELECT RLS — **including the new workspace-membership clause**
+  (US-003 / US-004 / US-005) — is resolved **by Postgres, from the Supabase JWT**.
+  The backend never passes a principal ID or a workspace ID as the access
+  boundary (the active-workspace path value is a non-security UX filter, validated
+  against membership, never the retrieval predicate). The trust boundary therefore
+  *requires* "a valid Supabase JWT whose `sub` is an `auth.users` row," and AU4
+  (US-010) proves a forged / missing / expired / cross-workspace / tampered-`sub`
+  JWT retrieves **zero rows on every retrieval endpoint**.
+
+- **The contract (what may be swapped): _verified external identity → a Supabase
+  session whose `sub` is an `auth.users` row._** The supported v1 swap is
+  **federating the client's IdP into Supabase Auth** — native SAML SSO, external
+  OIDC, or social providers — so the client's existing identity provider becomes
+  the *authenticator* while the data plane (PostgREST + RLS + `match_chunks`) is
+  **unchanged**, because it still sees an ordinary Supabase JWT. Buyer framing:
+  **swap who authenticates, not the principal store.**
+
+- **Out of scope (would rewrite the security core): the `auth.users` UUID floor
+  cannot move.** Full **principal-store replacement** — a backend-passed principal
+  with RLS rewritten off `auth.uid()` — is **rejected**: it moves the
+  tenant/permission boundary out of the database and deletes the "trust boundary
+  is the DB" property the leak/correctness eval (E4/E6) proves. A client demanding
+  Supabase Auth be ripped out entirely is a security-core rewrite, **not a v1
+  configuration** (consistent with the A2 rejection of inheriting orgs from an
+  external IdP, above).
+
+- **Future seam (documented, not v1): a backend "JWT-exchange" adapter** — verify
+  a *foreign* JWT, then mint a Supabase session via the admin API — for clients
+  who cannot use Supabase's native SSO. It keeps `auth.uid()` intact but adds a
+  token-minting + admin-API surface that needs its own audit, so it is recorded as
+  a future seam, **not shipped in v1.**
+
+**Capability matrix (F3) row.** _Identity provider — swappable at the federation
+edge only: federate the client IdP into Supabase Auth (SAML / OIDC / social). The
+`auth.users` principal store is fixed; full principal-store replacement is out of
+scope; a foreign-JWT exchange adapter is a documented future seam, not v1._
+(Cross-ref: CONTEXT "Capability matrix (F3)".)
+
+**Threat model (P5) line.** _The Identity Boundary is the Supabase JWT: every
+retrieval path resolves `auth.uid()` from the user's forwarded token inside the
+database, so the auth floor (`get_user` → GoTrue) plus the membership/ACL
+predicate are the whole boundary. Federating an external IdP changes only who
+issues the upstream identity — it does not widen what a token can read. The
+future JWT-exchange adapter would add a token-minting surface requiring its own
+audit._ (Cross-ref: CONTEXT "Identity boundary (AU3)".)
