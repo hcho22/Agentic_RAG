@@ -711,3 +711,28 @@ def render_e6_execution_error(message: str) -> list[str]:
         "cross-workspace leak: it is surfaced loudly but does not fail the build. "
         "A genuine detected leak would still hard-block.",
     ]
+
+
+def render_e6_hard_error(message: str) -> list[str]:
+    """Markdown lines for an E6 run that failed deterministically (fail-closed).
+
+    Unlike a transient execution error, this is a non-flaky, reproducible failure
+    (e.g. an empty/mis-seeded corpus, a deterministic 4xx, or an unexpected bug).
+    It blocks the run (exit 1) — but only AFTER the E4 results are persisted, so
+    E4 output is never discarded — and keeps blocking consistently until the
+    underlying problem is fixed.
+    """
+    return [
+        "",
+        "### E6 (US-009) — second-workspace zero-leak (security invariant, pinned `fail`)",
+        "",
+        f"**❌ FAILED — deterministic E6 error (blocking):** {message}",
+        "",
+        "E6 hit a non-transient, reproducible failure (e.g. an empty or "
+        "mis-seeded corpus, a deterministic HTTP 4xx, or an unexpected bug), so "
+        "the zero-leak invariant could **not** be verified. Because the failure "
+        "is deterministic it cannot flake-block an innocent PR; it fails the "
+        "build (exit 1) and keeps doing so until the underlying problem is fixed. "
+        "The E4 results JSON + summary were written before this exit, so no E4 "
+        "output was discarded.",
+    ]

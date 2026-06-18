@@ -74,6 +74,7 @@ from .e6 import (  # noqa: E402
     E6ExecutionError,
     E6Result,
     render_e6_execution_error,
+    render_e6_hard_error,
     render_e6_section,
     run_e6,
 )
@@ -1138,6 +1139,7 @@ def render_summary(
     diagnostic_findings: list[GateFinding] | None = None,
     e6_result: E6Result | None = None,
     e6_error: str | None = None,
+    e6_hard_error: str | None = None,
 ) -> str:
     """Markdown tables wrapped in EVAL_SUMMARY markers.
 
@@ -1308,9 +1310,13 @@ def render_summary(
     # US-009: E6 second-workspace zero-leak block. Renders only when E6 ran, so
     # the default (E4-only) summary is byte-identical to before. A transient
     # execution failure (e6_error) renders a loud, non-blocking "NOT RUN" note
-    # instead — the invariant went unverified, but no leak was detected.
+    # instead — the invariant went unverified, but no leak was detected. A
+    # deterministic E6 failure (e6_hard_error) renders a loud, BLOCKING note: it
+    # fails the build, but only after the E4 outputs are written.
     if e6_result is not None:
         lines += render_e6_section(e6_result)
+    elif e6_hard_error is not None:
+        lines += render_e6_hard_error(e6_hard_error)
     elif e6_error is not None:
         lines += render_e6_execution_error(e6_error)
 
@@ -1596,12 +1602,13 @@ async def amain() -> int:
     # control — fails the run below, exactly like a red gate finding.
     e6_result: E6Result | None = None
     e6_error: str | None = None
+    e6_hard_error: str | None = None
     if args.include_e6:
         e6_viewer_headers = user_headers(
             mint_user_jwt(E6_VIEWER_ID, E6_VIEWER_EMAIL, jwt_secret), anon_key
         )
-        async with httpx.AsyncClient(timeout=30.0) as e6_http:
-            try:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as e6_http:
                 e6_result = await run_e6(
                     questions=questions,
                     modes=modes,
@@ -1613,21 +1620,40 @@ async def amain() -> int:
                     e6_viewer_headers=e6_viewer_headers,
                     database_url=database_url,
                 )
-            except E6ExecutionError as e:
-                # E6 made its ~300 live calls but a transient blip (rate-limit /
-                # network / DB) outlasted the bounded retries. This is NOT a leak
-                # verdict — record it loudly and surface non-blocking. The
-                # merge-blocking exit 1 below fires ONLY on a real verdict
-                # (e6_result is not None and not e6_result.passed), so a flaky
-                # call can never fail-block an innocent PR — and an execution
-                # error is never mistaken for a PASS.
-                e6_error = str(e)
-                log.error(
-                    "E6 could not execute after retries (transient infra "
-                    "failure) — surfacing as a NON-BLOCKING execution error, "
-                    "NOT a leak verdict; the merge is not blocked: %s",
-                    e,
-                )
+        except E6ExecutionError as e:
+            # E6 made its ~300 live calls but a transient blip (rate-limit /
+            # network / DB) outlasted the bounded retries. This is NOT a leak
+            # verdict — record it loudly and surface non-blocking. The
+            # merge-blocking exit 1 below fires ONLY on a real verdict
+            # (e6_result is not None and not e6_result.passed), so a flaky
+            # call can never fail-block an innocent PR — and an execution
+            # error is never mistaken for a PASS.
+            e6_error = str(e)
+            log.error(
+                "E6 could not execute after retries (transient infra "
+                "failure) — surfacing as a NON-BLOCKING execution error, "
+                "NOT a leak verdict; the merge is not blocked: %s",
+                e,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Non-transient / deterministic failure: a seed_workspace_b
+            # RuntimeError (e.g. "no corpus documents found" / "copied 0 chunks"
+            # / "no filename_slug"), a deterministic 4xx re-raised by
+            # _retry_transient, or any unexpected bug. It is NOT a leak verdict
+            # and NOT a flaky blip — so it cannot flake-block an innocent PR, but
+            # it must fail-close (exit 1) consistently until the real problem is
+            # fixed. Crucially, no exception from run_e6 may abort amain before
+            # the E4 results JSON + summary.md are written: the exit-code decision
+            # happens AFTER those outputs are persisted below, so E4 output is
+            # never discarded by an E6 problem.
+            e6_hard_error = f"{type(e).__name__}: {e}"
+            log.error(
+                "E6 hit a deterministic / unexpected failure (NOT a transient "
+                "blip) — recording a loud HARD-ERROR marker and fail-closing "
+                "the run (exit 1) AFTER the E4 results JSON + summary.md are "
+                "written, so E4 output is never discarded: %s",
+                e,
+            )
 
     results = {
         "generated_at": started_at,
@@ -1648,6 +1674,8 @@ async def amain() -> int:
         results["e6"] = e6_result.to_dict()
     if e6_error is not None:
         results["e6_execution_error"] = e6_error
+    if e6_hard_error is not None:
+        results["e6_hard_error"] = e6_hard_error
 
     out_path = args.out
     if out_path is None:
@@ -1663,7 +1691,7 @@ async def amain() -> int:
     args.summary.write_text(
         render_summary(
             aggregates, modes, ragas_section, diagnostic_findings, e6_result,
-            e6_error,
+            e6_error, e6_hard_error,
         ),
         encoding="utf-8",
     )
@@ -1693,6 +1721,11 @@ async def amain() -> int:
             f"{len(e6_result.leaking_rows)} leaking row(s), "
             f"positive control "
             f"{'ok' if e6_result.positive_control_ok else 'BLIND'}"
+        )
+    elif e6_hard_error is not None:
+        print(
+            f"  E6 (workspace zero-leak): FAILED — deterministic execution error "
+            f"(blocking): {e6_hard_error}"
         )
     elif e6_error is not None:
         print(
@@ -1736,6 +1769,19 @@ async def amain() -> int:
                 "E6 positive control retrieved NOTHING — the eval is structurally "
                 "blind, so its zero-leak result is a false pass. Failing the run."
             )
+        return 1
+
+    # US-009: a deterministic / unexpected E6 failure (NOT a transient blip) is
+    # fail-closed. It was recorded above (results["e6_hard_error"] + summary) and
+    # the E4 JSON + summary.md are already written, so E4 output is preserved; the
+    # exit code is only decided now. Because the failure is deterministic it can
+    # never flake-block an innocent PR — it blocks consistently until fixed.
+    if e6_hard_error is not None:
+        log.error(
+            "E6 HARD ERROR (deterministic / unexpected) — failing the run "
+            "(exit 1) AFTER persisting E4 output: %s",
+            e6_hard_error,
+        )
         return 1
     return 0
 

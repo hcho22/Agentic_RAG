@@ -37,6 +37,7 @@ from evals.retrieval.e6 import (
     b_document_uuid,
     recall_at_10,
     render_e6_execution_error,
+    render_e6_hard_error,
     render_e6_section,
     seed_workspace_b,
 )
@@ -234,6 +235,13 @@ async def _retry_checks() -> None:
     assert "NOT RUN" in err_md
     assert "non-blocking" in err_md.lower()
     assert "rate limit after retries" in err_md
+
+    # --- hard-error markdown is loud + BLOCKING (deterministic failure) ----
+    hard_md = "\n".join(render_e6_hard_error("RuntimeError: copied 0 chunks"))
+    assert "E6 (US-009)" in hard_md
+    assert "blocking" in hard_md.lower()
+    assert "non-blocking" not in hard_md.lower()
+    assert "copied 0 chunks" in hard_md
 
     print("retry checks OK")
 

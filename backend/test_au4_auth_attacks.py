@@ -373,11 +373,9 @@ async def _run() -> None:
 
     fx = Fixture()
     conn = await asyncpg.connect(db_url)
-    seeded = False
     total = 0
     try:
         await _seed(conn, fx)
-        seeded = True
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
@@ -397,8 +395,7 @@ async def _run() -> None:
         print(f"OK: AU4 passed — {total} exact assertions across the auth floor "
               "and the cross-workspace / no-membership data boundary")
     finally:
-        if seeded:
-            await _cleanup(conn, fx)
+        await _cleanup(conn, fx)
         await conn.close()
 
 

@@ -9,9 +9,13 @@
 # a structurally blind positive control) fails the eval step and blocks the
 # merge. E6 is a pinned security invariant (CONTEXT E8), so a real leak VERDICT
 # is allowed to block per-PR — unlike the LLM-judged quality metrics, which only
-# ever comment here. A transient EXECUTION failure (E6 makes ~300 live OpenAI +
-# DB calls) is a different thing: it is retried with backoff, then surfaced
-# loudly but NON-BLOCKING, so an infra blip can't fail-block an innocent PR.
+# ever comment here. A DETERMINISTIC E6 failure (e.g. an empty/mis-seeded corpus
+# or a deterministic 4xx) also BLOCKS: it is reproducible, so it can't flake and
+# keeps failing until fixed — but the runner writes the E4 results + summary
+# FIRST, then exits 1, so E4 output is never discarded. A transient EXECUTION
+# failure (E6 makes ~300 live OpenAI + DB calls) is a different thing: it is
+# retried with backoff, then surfaced loudly but NON-BLOCKING, so an infra blip
+# can't fail-block an innocent PR.
 #
 # Reranker modes (cohere / voyage / llm) are NOT exercised here — they
 # cost real money per call and add API-dependency flake to PR checks.
@@ -125,15 +129,18 @@ jobs:
           # a DETECTED cross-workspace leak — or a structurally blind positive
           # control — makes the runner exit non-zero, which FAILS this step and
           # blocks the merge. This leak VERDICT is deliberate and non-downgradable
-          # (the only fail-the-build behavior in this otherwise comment-only
-          # workflow); the delta-vs-main comment below stays advisory. Leak
-          # DETECTION is deterministic, so a real verdict is trustworthy — but
-          # eval EXECUTION is not: E6 makes ~300 live OpenAI + asyncpg calls, so a
-          # transient blip (rate-limit / network / DB) is retried with backoff
-          # and then surfaced as a loud but NON-BLOCKING execution error
-          # (recorded in the result JSON + summary.md, no exit 1). Thus an infra
-          # flake cannot fail-block an innocent PR, mirroring the graceful
-          # degradation in backend/test_au4_auth_attacks.py.
+          # (a fail-the-build behavior in this otherwise comment-only workflow);
+          # the delta-vs-main comment below stays advisory. Leak DETECTION is
+          # deterministic, so a real verdict is trustworthy — but eval EXECUTION
+          # is not: E6 makes ~300 live OpenAI + asyncpg calls, so a transient blip
+          # (rate-limit / network / DB) is retried with backoff and then surfaced
+          # as a loud but NON-BLOCKING execution error (recorded in the result
+          # JSON + summary.md, no exit 1). Thus an infra flake cannot fail-block
+          # an innocent PR, mirroring the graceful degradation in
+          # backend/test_au4_auth_attacks.py. A DETERMINISTIC E6 failure (e.g. an
+          # empty/mis-seeded corpus or a deterministic 4xx) is neither a leak nor
+          # a flake: it ALSO exits 1 and blocks — but ONLY after the E4 results
+          # JSON + summary.md are written, so E4 output is never discarded.
           python -m evals.retrieval.runner \
             --viewers all --include-e6 --out /tmp/pr.json
 
