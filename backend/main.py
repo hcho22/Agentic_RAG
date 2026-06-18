@@ -1212,13 +1212,18 @@ async def chat(
     # mode=responses on a non-openai provider fails closed (400) rather than
     # silently falling back to completions — consistent with the startup guard.
     if mode == "responses" and not RESPONSES_MODE_AVAILABLE:
+        reason = (
+            f"provider={_ANSWERER_CONFIG.provider!r}"
+            if _ANSWERER_CONFIG.provider != "openai"
+            else f"an OpenAI-compatible host (OPENAI_BASE_URL={_ANSWERER_CONFIG.base_url!r})"
+        )
         raise HTTPException(
             status_code=400,
             detail=(
-                "chat mode 'responses' requires answerer provider=openai (current "
-                f"provider is {_ANSWERER_CONFIG.provider!r}); use mode=completions. "
-                "Responses mode (hosted file_search + server-side threading) is "
-                "OpenAI-only and non-portable."
+                "chat mode 'responses' requires OpenAI proper (provider=openai with "
+                f"no base_url override), but the resolved answerer is {reason}; use "
+                "mode=completions. Responses mode (hosted file_search + server-side "
+                "threading) is OpenAI-only and non-portable."
             ),
         )
     streamer = (
