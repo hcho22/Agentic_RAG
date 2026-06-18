@@ -72,6 +72,15 @@ python -m evals.retrieval.runner --mode vector
 # env alongside OPENAI_API_KEY.
 export ANTHROPIC_API_KEY=sk-ant-...
 python -m evals.retrieval.runner --include-generation
+
+# Include the E6 second-workspace zero-leak gate (US-009). Seeds a second
+# Workspace B (a copy of the gold corpus) and asserts a cross-workspace
+# viewer retrieves 0 of B's gold under every mode + filter, with a positive
+# control proving B's gold is detectable. Additive to the E4 sweep above; a
+# detected leak (or a blind positive control) exits the runner non-zero — a
+# pinned security invariant, not a thresholded metric. See
+# docs/adr/0002-workspace-tenant-isolation.md for the isolation rationale.
+python -m evals.retrieval.runner --include-e6
 ```
 
 The runner writes `evals/retrieval/results/<ISO-timestamp>.json` (full per-question detail + aggregates) and `evals/retrieval/summary.md` (two markdown tables ready to drop between the EVAL_SUMMARY markers in the next section).

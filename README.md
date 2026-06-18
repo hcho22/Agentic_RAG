@@ -215,7 +215,7 @@ The backend exposes:
 
 Three CI workflows wrap the eval runners:
 
-- **`.github/workflows/retrieval-eval.yml`** — runs on PRs that touch retrieval / chunking / embeddings / migrations / the runner itself. Executes the 50-question golden set against PR head AND `main`, posts a delta-vs-`main` comment. Comment-only — never fails the build.
+- **`.github/workflows/retrieval-eval.yml`** — runs on PRs that touch retrieval / chunking / embeddings / migrations / the runner itself. Executes the 50-question golden set against PR head AND `main`, posts a delta-vs-`main` comment. The delta comment is advisory — it never fails the build. The PR run additionally executes the **E6 second-workspace zero-leak eval** (`--include-e6`), which **is** a hard gate: a detected cross-workspace leak (or a structurally blind positive control) fails the build. It is the only fail-the-build condition here; a transient E6 execution error is surfaced loudly but stays non-blocking.
 - **`.github/workflows/retrieval-eval-nightly.yml`** — daily 02:00 UTC. Publishes snapshots to `docs/nightly/<DATE>.md` + `.json`.
 - **`.github/workflows/permissions-scale-eval.yml`** — daily 03:00 UTC + manual `workflow_dispatch`. Runs the Wikipedia 10k seed + ef_search sweep; publishes to `docs/permissions-scale-nightly/<DATE>.md`. **Fails the workflow if the configured recall floor is breached** — this is the regression alarm for the day the planner flips to HNSW for some workload.
 
@@ -233,6 +233,7 @@ python -m db_seed.corpus_seed
 python -m evals.retrieval.runner                      # all three modes
 python -m evals.retrieval.runner --mode vector        # single mode (faster)
 python -m evals.retrieval.runner --include-generation # adds LLM-judge faithfulness/helpfulness (needs ANTHROPIC_API_KEY)
+python -m evals.retrieval.runner --include-e6         # adds the E6 second-workspace zero-leak gate (exits 1 on a cross-workspace leak)
 ```
 
 ## Deploy
