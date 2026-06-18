@@ -438,7 +438,13 @@ a reviewer wonder.
 > `keyword_search` and mirrored in the `chunks` / `documents` RLS. The
 > boundary is resolved from `auth.uid()` against `workspace_membership`
 > (never a backend-passed tenant id), so it *does* change the retrieval
-> path — contrary to the original deferral note. See
+> path — contrary to the original deferral note. Like the document-level
+> boundary above, it is eval-proven: the additive **E6** second-workspace
+> zero-leak eval (`python -m evals.retrieval.runner --include-e6`, a
+> PR-blocking gate) asserts a cross-workspace viewer retrieves **0** of
+> another workspace's gold under every mode and filter, and the **AU4**
+> API-layer auth-attack tests assert a workspace-A token reads **0 rows**
+> from workspace B on every retrieval endpoint. See
 > [`docs/adr/0002-workspace-tenant-isolation.md`](adr/0002-workspace-tenant-isolation.md).
 
 ## 7. Refresh + reproduce

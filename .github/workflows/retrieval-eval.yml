@@ -1,7 +1,21 @@
 # US-035: PR retrieval-eval workflow. Runs the 50-question golden set
 # (US-033) against PR head AND main, then posts a delta-vs-main markdown
-# comment on the PR. Comment-only — never fails the build, regardless of
-# delta sign. Updates an existing bot comment in place across pushes.
+# comment on the PR. The delta comment is advisory — it never fails the build,
+# regardless of delta sign, and updates an existing bot comment in place across
+# pushes.
+#
+# US-009: the PR run additionally executes the E6 second-workspace zero-leak
+# eval (--include-e6), which IS a hard gate: a DETECTED cross-workspace leak (or
+# a structurally blind positive control) fails the eval step and blocks the
+# merge. E6 is a pinned security invariant (CONTEXT E8), so a real leak VERDICT
+# is allowed to block per-PR — unlike the LLM-judged quality metrics, which only
+# ever comment here. A DETERMINISTIC E6 failure (e.g. an empty/mis-seeded corpus
+# or a deterministic 4xx) also BLOCKS: it is reproducible, so it can't flake and
+# keeps failing until fixed — but the runner writes the E4 results + summary
+# FIRST, then exits 1, so E4 output is never discarded. A transient EXECUTION
+# failure (E6 makes ~300 live OpenAI + DB calls) is a different thing: it is
+# retried with backoff, then surfaced loudly but NON-BLOCKING, so an infra blip
+# can't fail-block an innocent PR.
 #
 # Reranker modes (cohere / voyage / llm) are NOT exercised here — they
 # cost real money per call and add API-dependency flake to PR checks.
@@ -78,10 +92,24 @@ jobs:
           # all migrations in supabase/migrations/. The PR's migration set
           # is used because we want to eval against the schema the PR ships.
           supabase start
-          # Surface API_URL / SERVICE_ROLE_KEY / DB_URL to subsequent steps.
+          # Surface the running stack's coordinates to subsequent steps.
           # `-o env` emits `KEY="value"` pairs; strip quotes for $GITHUB_ENV.
+          #
+          # ANON_KEY + JWT_SECRET are surfaced (alongside API_URL /
+          # SERVICE_ROLE_KEY / DB_URL) so the eval authenticates against THIS
+          # instance's actual credentials rather than the runner's hardcoded
+          # local-dev fallbacks. The runner mints the per-viewer authenticated
+          # JWTs with SUPABASE_JWT_SECRET (falling back to a baked-in local
+          # secret) and sends SUPABASE_ANON_KEY as the PostgREST `apikey` for
+          # those user-JWT requests (falling back to the privileged
+          # service-role key). Those fallbacks only line up when the pinned
+          # `supabase start` default secret/keys happen to match the baked-in
+          # constants; `version: latest` can ship a different default JWT
+          # secret or key format, after which the very first authenticated
+          # match_chunks call is gateway-rejected (403) and the eval crashes.
+          # Sourcing both from `supabase status` keeps the eval version-robust.
           supabase status -o env > /tmp/supabase.env
-          grep -E '^(API_URL|SERVICE_ROLE_KEY|DB_URL)=' /tmp/supabase.env \
+          grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|JWT_SECRET|DB_URL)=' /tmp/supabase.env \
             | sed -E 's/^(.*)="(.*)"$/\1=\2/' \
             >> "$GITHUB_ENV"
 
@@ -101,6 +129,14 @@ jobs:
         env:
           SUPABASE_URL: ${{ env.API_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          # The eval mints authenticated viewer JWTs and calls match_chunks
+          # under them; SUPABASE_JWT_SECRET signs those JWTs and
+          # SUPABASE_ANON_KEY is the PostgREST apikey for the user-JWT
+          # requests. Both come from the running stack (above) so the eval does
+          # not fall back to baked-in local-dev defaults that a newer Supabase
+          # may no longer match (the 403-on-first-query failure mode).
+          SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
           CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
           DATABASE_URL: ${{ env.DB_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -109,13 +145,36 @@ jobs:
           # US-042: --viewers all is the default; spelled out here so the
           # workflow log clearly records the run shape. Drops to --viewers
           # full if the new tables are ever too noisy in PR comments.
-          python -m evals.retrieval.runner --viewers all --out /tmp/pr.json
+          #
+          # US-009: --include-e6 runs the second-workspace zero-leak eval. It is
+          # a PINNED SECURITY INVARIANT (CONTEXT E8 "Security/correctness gate"):
+          # a DETECTED cross-workspace leak — or a structurally blind positive
+          # control — makes the runner exit non-zero, which FAILS this step and
+          # blocks the merge. This leak VERDICT is deliberate and non-downgradable
+          # (a fail-the-build behavior in this otherwise comment-only workflow);
+          # the delta-vs-main comment below stays advisory. Leak DETECTION is
+          # deterministic, so a real verdict is trustworthy — but eval EXECUTION
+          # is not: E6 makes ~300 live OpenAI + asyncpg calls, so a transient blip
+          # (rate-limit / network / DB) is retried with backoff and then surfaced
+          # as a loud but NON-BLOCKING execution error (recorded in the result
+          # JSON + summary.md, no exit 1). Thus an infra flake cannot fail-block
+          # an innocent PR, mirroring the graceful degradation in
+          # backend/test_au4_auth_attacks.py. A DETERMINISTIC E6 failure (e.g. an
+          # empty/mis-seeded corpus or a deterministic 4xx) is neither a leak nor
+          # a flake: it ALSO exits 1 and blocks — but ONLY after the E4 results
+          # JSON + summary.md are written, so E4 output is never discarded.
+          python -m evals.retrieval.runner \
+            --viewers all --include-e6 --out /tmp/pr.json
 
       - name: Reseed corpus + run eval (main)
         working-directory: main
         env:
           SUPABASE_URL: ${{ env.API_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          # Same as the PR step: authenticate against the running stack's real
+          # secret/anon key rather than baked-in local-dev fallbacks.
+          SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
           CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
           DATABASE_URL: ${{ env.DB_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

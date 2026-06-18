@@ -68,6 +68,16 @@ from retrieval import (  # noqa: E402
     search_documents,
 )
 
+from .e6 import (  # noqa: E402
+    E6_VIEWER_EMAIL,
+    E6_VIEWER_ID,
+    E6ExecutionError,
+    E6Result,
+    render_e6_execution_error,
+    render_e6_hard_error,
+    render_e6_section,
+    run_e6,
+)
 from .ragas import (  # noqa: E402
     RAGAS_CELL_IDS,
     RAGAS_JUDGE_MODEL,
@@ -1127,6 +1137,9 @@ def render_summary(
     modes: tuple[str, ...],
     ragas_section: dict[str, Any] | None = None,
     diagnostic_findings: list[GateFinding] | None = None,
+    e6_result: E6Result | None = None,
+    e6_error: str | None = None,
+    e6_hard_error: str | None = None,
 ) -> str:
     """Markdown tables wrapped in EVAL_SUMMARY markers.
 
@@ -1294,6 +1307,19 @@ def render_summary(
                 f"{cell['delta']:+.3f} | {ok} |"
             )
 
+    # US-009: E6 second-workspace zero-leak block. Renders only when E6 ran, so
+    # the default (E4-only) summary is byte-identical to before. A transient
+    # execution failure (e6_error) renders a loud, non-blocking "NOT RUN" note
+    # instead — the invariant went unverified, but no leak was detected. A
+    # deterministic E6 failure (e6_hard_error) renders a loud, BLOCKING note: it
+    # fails the build, but only after the E4 outputs are written.
+    if e6_result is not None:
+        lines += render_e6_section(e6_result)
+    elif e6_hard_error is not None:
+        lines += render_e6_hard_error(e6_hard_error)
+    elif e6_error is not None:
+        lines += render_e6_execution_error(e6_error)
+
     lines += ["", "<!-- END EVAL_SUMMARY -->", ""]
     return "\n".join(lines)
 
@@ -1361,6 +1387,18 @@ async def amain() -> int:
             "needs generated answers) and requires the `ragas` package."
         ),
     )
+    parser.add_argument(
+        "--include-e6",
+        action="store_true",
+        help=(
+            "US-009: additionally run the E6 second-workspace zero-leak eval. "
+            "Seeds a second Workspace B (a copy of the gold corpus) and asserts "
+            "a cross-workspace viewer retrieves 0 of B's gold under every mode + "
+            "filter, with a positive control proving B's gold is detectable. "
+            "Additive to the E4 sweep; a leak (or a blind positive control) "
+            "fails the run (exit 1) — this is a pinned security invariant."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -1399,7 +1437,7 @@ async def amain() -> int:
     modes: tuple[str, ...] = MODES if args.mode == "all" else (args.mode,)
     questions, viewer_construction = load_questions(args.questions)
 
-    viewer_alias = {
+    viewer_alias: dict[str, tuple[ViewerKind, ...]] = {
         "full": ("full_access",),
         "partial": ("full_access", "partial_access"),
         "no_access": ("full_access", "no_access"),
@@ -1556,6 +1594,67 @@ async def amain() -> int:
         )
         ragas_section["gate_findings"] = [asdict(f) for f in ragas_gate_findings]
 
+    # US-009: E6 second-workspace zero-leak eval. Additive — runs only under
+    # --include-e6, strictly AFTER the E4 sweep above (per_question / aggregates
+    # are already computed), and seeds Workspace B with stable_id-less chunks so
+    # fetch_stable_id_map and the E4 sweep never observe them (E4 stays
+    # bit-for-bit). A cross-workspace leak — or a structurally blind positive
+    # control — fails the run below, exactly like a red gate finding.
+    e6_result: E6Result | None = None
+    e6_error: str | None = None
+    e6_hard_error: str | None = None
+    if args.include_e6:
+        e6_viewer_headers = user_headers(
+            mint_user_jwt(E6_VIEWER_ID, E6_VIEWER_EMAIL, jwt_secret), anon_key
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as e6_http:
+                e6_result = await run_e6(
+                    questions=questions,
+                    modes=modes,
+                    stable_id_map=stable_id_map,
+                    run_query=run_query,
+                    openai_client=openai_client,
+                    http=e6_http,
+                    supabase_url=supabase_url,
+                    e6_viewer_headers=e6_viewer_headers,
+                    database_url=database_url,
+                )
+        except E6ExecutionError as e:
+            # E6 made its ~300 live calls but a transient blip (rate-limit /
+            # network / DB) outlasted the bounded retries. This is NOT a leak
+            # verdict — record it loudly and surface non-blocking. The
+            # merge-blocking exit 1 below fires ONLY on a real verdict
+            # (e6_result is not None and not e6_result.passed), so a flaky
+            # call can never fail-block an innocent PR — and an execution
+            # error is never mistaken for a PASS.
+            e6_error = str(e)
+            log.error(
+                "E6 could not execute after retries (transient infra "
+                "failure) — surfacing as a NON-BLOCKING execution error, "
+                "NOT a leak verdict; the merge is not blocked: %s",
+                e,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Non-transient / deterministic failure: a seed_workspace_b
+            # RuntimeError (e.g. "no corpus documents found" / "copied 0 chunks"
+            # / "no filename_slug"), a deterministic 4xx re-raised by
+            # _retry_transient, or any unexpected bug. It is NOT a leak verdict
+            # and NOT a flaky blip — so it cannot flake-block an innocent PR, but
+            # it must fail-close (exit 1) consistently until the real problem is
+            # fixed. Crucially, no exception from run_e6 may abort amain before
+            # the E4 results JSON + summary.md are written: the exit-code decision
+            # happens AFTER those outputs are persisted below, so E4 output is
+            # never discarded by an E6 problem.
+            e6_hard_error = f"{type(e).__name__}: {e}"
+            log.error(
+                "E6 hit a deterministic / unexpected failure (NOT a transient "
+                "blip) — recording a loud HARD-ERROR marker and fail-closing "
+                "the run (exit 1) AFTER the E4 results JSON + summary.md are "
+                "written, so E4 output is never discarded: %s",
+                e,
+            )
+
     results = {
         "generated_at": started_at,
         "elapsed_s": elapsed_s,
@@ -1571,6 +1670,12 @@ async def amain() -> int:
     }
     if ragas_section is not None:
         results["ragas"] = ragas_section
+    if e6_result is not None:
+        results["e6"] = e6_result.to_dict()
+    if e6_error is not None:
+        results["e6_execution_error"] = e6_error
+    if e6_hard_error is not None:
+        results["e6_hard_error"] = e6_hard_error
 
     out_path = args.out
     if out_path is None:
@@ -1584,7 +1689,10 @@ async def amain() -> int:
     )
 
     args.summary.write_text(
-        render_summary(aggregates, modes, ragas_section, diagnostic_findings),
+        render_summary(
+            aggregates, modes, ragas_section, diagnostic_findings, e6_result,
+            e6_error, e6_hard_error,
+        ),
         encoding="utf-8",
     )
 
@@ -1606,6 +1714,25 @@ async def amain() -> int:
             )
         print(line)
 
+    if e6_result is not None:
+        print(
+            f"  E6 (workspace zero-leak): "
+            f"{'PASS' if e6_result.passed else 'FAIL'} — "
+            f"{len(e6_result.leaking_rows)} leaking row(s), "
+            f"positive control "
+            f"{'ok' if e6_result.positive_control_ok else 'BLIND'}"
+        )
+    elif e6_hard_error is not None:
+        print(
+            f"  E6 (workspace zero-leak): FAILED — deterministic execution error "
+            f"(blocking): {e6_hard_error}"
+        )
+    elif e6_error is not None:
+        print(
+            f"  E6 (workspace zero-leak): NOT RUN — transient execution error "
+            f"(non-blocking): {e6_error}"
+        )
+
     # US-005: a red operational gate finding fails the run. The JSON +
     # summary.md are already written above, so the weekly workflow can still
     # read `ragas.gate_findings` and file issues despite the non-zero exit.
@@ -1617,6 +1744,44 @@ async def amain() -> int:
         )
         for f in red_findings:
             log.error("  [%s] %s", f.tag, f.message)
+        return 1
+
+    # US-009: E6 is a pinned security invariant (CONTEXT E8 "Security/correctness
+    # gate"). A cross-workspace leak, or a positive control that proves the eval
+    # is structurally blind, is a hard fail — non-downgradable, no comment/off
+    # setting. The JSON + summary.md are already written, so the leak detail is
+    # preserved despite the non-zero exit.
+    if e6_result is not None and not e6_result.passed:
+        if e6_result.leak_detected:
+            log.error(
+                "E6 CROSS-WORKSPACE LEAK — a non-member of Workspace B retrieved "
+                "B's gold on %d row(s):",
+                len(e6_result.leaking_rows),
+            )
+            for row in e6_result.leaking_rows[:20]:
+                log.error(
+                    "  %s %s/%s recall@10=%.3f",
+                    row["question_id"], row["mode"], row["filter"],
+                    row["recall_at_10"],
+                )
+        else:
+            log.error(
+                "E6 positive control retrieved NOTHING — the eval is structurally "
+                "blind, so its zero-leak result is a false pass. Failing the run."
+            )
+        return 1
+
+    # US-009: a deterministic / unexpected E6 failure (NOT a transient blip) is
+    # fail-closed. It was recorded above (results["e6_hard_error"] + summary) and
+    # the E4 JSON + summary.md are already written, so E4 output is preserved; the
+    # exit code is only decided now. Because the failure is deterministic it can
+    # never flake-block an innocent PR — it blocks consistently until fixed.
+    if e6_hard_error is not None:
+        log.error(
+            "E6 HARD ERROR (deterministic / unexpected) — failing the run "
+            "(exit 1) AFTER persisting E4 output: %s",
+            e6_hard_error,
+        )
         return 1
     return 0
 
