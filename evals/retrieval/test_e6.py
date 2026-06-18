@@ -24,12 +24,19 @@ import os
 import sys
 
 import asyncpg
+import httpx
 
+import evals.retrieval.e6 as e6
 from evals.retrieval.e6 import (
+    RETRY_ATTEMPTS,
+    E6ExecutionError,
     E6Result,
+    _is_transient,
+    _retry_transient,
     b_chunk_uuid,
     b_document_uuid,
     recall_at_10,
+    render_e6_execution_error,
     render_e6_section,
     seed_workspace_b,
 )
@@ -140,6 +147,97 @@ def _offline_checks() -> None:
     print("offline checks OK")
 
 
+def _http_status_error(code: int) -> httpx.HTTPStatusError:
+    req = httpx.Request("POST", "http://local.test/rpc/match_chunks")
+    resp = httpx.Response(code, request=req)
+    return httpx.HTTPStatusError(f"{code}", request=req, response=resp)
+
+
+async def _retry_checks() -> None:
+    # Keep the bounded backoff instant so the test stays fast.
+    saved = e6.RETRY_INITIAL_DELAY_S
+    e6.RETRY_INITIAL_DELAY_S = 0.0
+    try:
+        # --- transient classification ------------------------------------
+        assert _is_transient(asyncio.TimeoutError())
+        assert _is_transient(ConnectionError("reset"))
+        assert _is_transient(_http_status_error(503))
+        assert _is_transient(_http_status_error(429))
+        # A deterministic 4xx is NOT a transient blip — it is a real defect.
+        assert not _is_transient(_http_status_error(400))
+        assert not _is_transient(_http_status_error(404))
+        assert not _is_transient(ValueError("bug"))
+
+        # --- retry then succeed ------------------------------------------
+        calls = {"n": 0}
+
+        async def flaky_then_ok():
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise asyncio.TimeoutError()
+            return "ok"
+
+        assert await _retry_transient(flaky_then_ok, what="probe") == "ok"
+        assert calls["n"] == 2, "should have retried exactly once"
+
+        # --- exhaust retries -> E6ExecutionError (non-blocking signal) ----
+        attempts = {"n": 0}
+
+        async def always_transient():
+            attempts["n"] += 1
+            raise ConnectionError("network down")
+
+        try:
+            await _retry_transient(always_transient, what="probe")
+        except E6ExecutionError as e:
+            assert isinstance(e, RuntimeError)
+            assert "probe" in str(e)
+        else:
+            raise AssertionError("exhausted transient retries must raise E6ExecutionError")
+        assert attempts["n"] == RETRY_ATTEMPTS, "should try exactly RETRY_ATTEMPTS times"
+
+        # --- non-transient propagates unchanged (a real bug, not flake) ---
+        bug_calls = {"n": 0}
+
+        async def real_bug():
+            bug_calls["n"] += 1
+            raise ValueError("genuine defect")
+
+        try:
+            await _retry_transient(real_bug, what="probe")
+        except E6ExecutionError:
+            raise AssertionError("a real bug must NOT be softened to E6ExecutionError")
+        except ValueError:
+            pass
+        assert bug_calls["n"] == 1, "non-transient errors must not be retried"
+
+        # --- deterministic 4xx propagates (not retried, not softened) -----
+        http_calls = {"n": 0}
+
+        async def bad_request():
+            http_calls["n"] += 1
+            raise _http_status_error(400)
+
+        try:
+            await _retry_transient(bad_request, what="probe")
+        except E6ExecutionError:
+            raise AssertionError("a 4xx must NOT be softened to E6ExecutionError")
+        except httpx.HTTPStatusError:
+            pass
+        assert http_calls["n"] == 1, "a deterministic 4xx must not be retried"
+    finally:
+        e6.RETRY_INITIAL_DELAY_S = saved
+
+    # --- execution-error markdown is loud + non-blocking ------------------
+    err_md = "\n".join(render_e6_execution_error("rate limit after retries"))
+    assert "E6 (US-009)" in err_md
+    assert "NOT RUN" in err_md
+    assert "non-blocking" in err_md.lower()
+    assert "rate limit after retries" in err_md
+
+    print("retry checks OK")
+
+
 async def _db_invariant() -> None:
     url = os.environ.get("CORPUS_SEED_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not url:
@@ -193,6 +291,7 @@ async def _db_invariant() -> None:
 
 async def main() -> None:
     _offline_checks()
+    await _retry_checks()
     await _db_invariant()
 
 

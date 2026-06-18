@@ -47,16 +47,95 @@ it in behind `--include-e6` and fails the run (exit 1) when `passed` is False.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, TypeVar
 
 import asyncpg
 import httpx
+import openai
 from openai import AsyncOpenAI
 
 log = logging.getLogger("agentic_rag.evals.retrieval.e6")
+
+# E6 makes ~300 live calls (3 modes x 50 questions x 2 passes), each embedding a
+# query via OpenAI plus a PostgREST/asyncpg round-trip. A transient blip there
+# (rate-limit, network reset, 5xx, DB hiccup) is NOT a cross-workspace leak, so
+# it must never be conflated with E6's security verdict. These are retried with
+# backoff; if they still won't clear, run_e6 raises E6ExecutionError and the
+# runner surfaces it LOUDLY but NON-BLOCKING — a flaky call cannot fail-block a
+# merge, and an execution error is never a (false) PASS.
+RETRY_ATTEMPTS = 3
+RETRY_INITIAL_DELAY_S = 1.0
+
+# httpx.HTTPStatusError is broad (4xx + 5xx); only these codes are transient. A
+# deterministic 4xx (e.g. a malformed query / bad auth header) is a real defect
+# and propagates unchanged rather than being silently softened to non-blocking.
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+
+E6_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    openai.RateLimitError,
+    openai.InternalServerError,
+    httpx.TransportError,
+    httpx.HTTPStatusError,
+    asyncpg.PostgresConnectionError,
+    asyncpg.InterfaceError,
+    ConnectionError,
+    OSError,
+    asyncio.TimeoutError,
+)
+
+T = TypeVar("T")
+
+
+class E6ExecutionError(RuntimeError):
+    """E6 could not complete because of a transient infra failure, not a leak.
+
+    The runner logs this loudly and records it in the result JSON + summary.md,
+    but does NOT exit 1 for it — only a real verdict (a detected leak or a
+    structurally-blind positive control) hard-blocks the merge. An execution
+    error is therefore non-blocking, yet can never be mistaken for a PASS.
+    """
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True iff `exc` is a retryable infra blip rather than a real defect."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRY_STATUS
+    return isinstance(exc, E6_TRANSIENT_ERRORS)
+
+
+async def _retry_transient(
+    make_coro: Callable[[], Awaitable[T]], *, what: str
+) -> T:
+    """Await `make_coro()`, retrying transient failures with exponential backoff.
+
+    Raises E6ExecutionError once RETRY_ATTEMPTS transient failures are exhausted
+    (the "E6 could not run" signal). Non-transient exceptions propagate unchanged
+    so a genuine bug still surfaces.
+    """
+    delay = RETRY_INITIAL_DELAY_S
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            return await make_coro()
+        except E6_TRANSIENT_ERRORS as e:
+            if not _is_transient(e):
+                raise
+            if attempt == RETRY_ATTEMPTS:
+                raise E6ExecutionError(
+                    f"E6 {what} failed after {RETRY_ATTEMPTS} transient retries: {e!r}"
+                ) from e
+            log.warning(
+                "E6 %s attempt %d/%d transient error: %s — retrying in %.1fs",
+                what, attempt, RETRY_ATTEMPTS, e, delay,
+            )
+            await asyncio.sleep(delay)
+            delay *= 2
+    raise RuntimeError("unreachable")  # loop always returns or raises
 
 # Mirrors the constants the migration + seeder pin (duplicated, not imported,
 # so this module stays decoupled from db_seed exactly like runner.py does).
@@ -398,10 +477,17 @@ async def run_e6(
     """
     sid_to_a_chunk = {sid: cid for cid, sid in stable_id_map.items()}
 
-    conn = await asyncpg.connect(database_url)
+    conn = await _retry_transient(
+        lambda: asyncpg.connect(database_url), what="DB connect"
+    )
     try:
-        stable_to_b_chunk = await seed_workspace_b(conn)
-        await ensure_e6_viewer(conn)
+        # Setup DB ops are all idempotent (purge-then-insert / on-conflict), so
+        # a transient blip is safe to retry; a real error (e.g. seed's "no corpus"
+        # RuntimeError) is non-transient and propagates loudly instead.
+        stable_to_b_chunk = await _retry_transient(
+            lambda: seed_workspace_b(conn), what="seed Workspace B"
+        )
+        await _retry_transient(lambda: ensure_e6_viewer(conn), what="ensure viewer")
 
         # The viewer holds an ACL on BOTH copies of every gold chunk across the
         # whole golden set; membership is then the sole differentiator per row.
@@ -416,12 +502,17 @@ async def run_e6(
             b_cid = stable_to_b_chunk.get(sid)
             if b_cid is not None:
                 acl_chunk_ids.add(b_cid)
-        await set_viewer_acls(conn, acl_chunk_ids)
+        await _retry_transient(
+            lambda: set_viewer_acls(conn, acl_chunk_ids), what="set viewer ACLs"
+        )
 
         all_b_chunk_ids = {str(cid) for cid in stable_to_b_chunk.values()}
 
         # ---- Negative pass: viewer is NOT a member of B -------------------
-        await set_viewer_in_workspace_b(conn, member=False)
+        await _retry_transient(
+            lambda: set_viewer_in_workspace_b(conn, member=False),
+            what="set viewer non-member (negative)",
+        )
         neg_pre: dict[str, list[float]] = {m: [] for m in modes}
         a_gold: dict[str, list[float]] = {m: [] for m in modes}
         neg_pre_rankings: dict[tuple[str, str], list[str]] = {}
@@ -433,9 +524,12 @@ async def run_e6(
                 sid_to_a_chunk[s] for s in gold if s in sid_to_a_chunk
             }
             for mode in modes:
-                rows = await run_query(
-                    mode, openai_client, http, supabase_url, e6_viewer_headers,
-                    q["question"],
+                rows = await _retry_transient(
+                    lambda mode=mode, q=q: run_query(
+                        mode, openai_client, http, supabase_url, e6_viewer_headers,
+                        q["question"],
+                    ),
+                    what=f"negative query {qid}/{mode}",
                 )
                 retrieved = [r.id for r in rows]
                 neg_pre_rankings[(qid, mode)] = retrieved
@@ -443,7 +537,10 @@ async def run_e6(
                 a_gold[mode].append(recall_at_10(a_gold_ids, retrieved))
 
         # ---- Positive control: same viewer ADDED to B --------------------
-        await set_viewer_in_workspace_b(conn, member=True)
+        await _retry_transient(
+            lambda: set_viewer_in_workspace_b(conn, member=True),
+            what="set viewer member (positive control)",
+        )
         pos: dict[str, list[float]] = {m: [] for m in modes}
         pos_rankings: dict[tuple[str, str], list[str]] = {}
         for q in questions:
@@ -451,20 +548,29 @@ async def run_e6(
             gold = q["gold_stable_ids"]
             b_gold = {str(stable_to_b_chunk[s]) for s in gold if s in stable_to_b_chunk}
             for mode in modes:
-                rows = await run_query(
-                    mode, openai_client, http, supabase_url, e6_viewer_headers,
-                    q["question"],
+                rows = await _retry_transient(
+                    lambda mode=mode, q=q: run_query(
+                        mode, openai_client, http, supabase_url, e6_viewer_headers,
+                        q["question"],
+                    ),
+                    what=f"positive query {qid}/{mode}",
                 )
                 retrieved = [r.id for r in rows]
                 pos_rankings[(qid, mode)] = retrieved
                 pos[mode].append(recall_at_10(b_gold, retrieved))
     finally:
         # Always restore the no-member state so a future run's negative pass is
-        # honest, then drop the connection.
+        # honest, then drop the connection. A cleanup failure (e.g. the conn
+        # already died in a transient blip) must NOT mask the primary outcome —
+        # ensure_e6_viewer defensively re-clears any stale B membership next run.
         try:
             await set_viewer_in_workspace_b(conn, member=False)
-        finally:
+        except Exception as e:  # noqa: BLE001 — never mask the real E6 result
+            log.warning("E6 cleanup (reset Workspace-B membership) failed: %s", e)
+        try:
             await conn.close()
+        except Exception as e:  # noqa: BLE001 — never mask the real E6 result
+            log.warning("E6 cleanup (close connection) failed: %s", e)
 
     # ---- Score ----------------------------------------------------------
     leaking_rows: list[dict[str, Any]] = []
@@ -583,3 +689,24 @@ def render_e6_section(result: E6Result) -> list[str]:
                 f"recall@10={row['recall_at_10']:.3f}"
             )
     return lines
+
+
+def render_e6_execution_error(message: str) -> list[str]:
+    """Markdown lines for an E6 run that could not execute (transient infra).
+
+    This is NOT a leak verdict and does NOT block the merge — it records, loudly
+    and visibly, that E6's zero-leak invariant went UNVERIFIED on this run so a
+    flaky embedding/DB call can't masquerade as either a PASS or a hard block.
+    """
+    return [
+        "",
+        "### E6 (US-009) — second-workspace zero-leak (security invariant, pinned `fail`)",
+        "",
+        f"**⚠️ NOT RUN — execution error (non-blocking):** {message}",
+        "",
+        "E6 could not complete after bounded retries with backoff, so the "
+        "zero-leak invariant was **not verified** on this run. This is treated "
+        "as a transient infra failure (rate-limit / network / DB), **not** a "
+        "cross-workspace leak: it is surfaced loudly but does not fail the build. "
+        "A genuine detected leak would still hard-block.",
+    ]
