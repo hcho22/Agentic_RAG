@@ -315,6 +315,11 @@ def build_reranker(
     if name == "llm":
         # OPENAI_RERANK_MODEL lets ops pick a cheaper/faster model than the
         # chat model — reranking only needs ordering, not generation quality.
+        # US-023: this selects the *model* only. `openai_client` is the shared
+        # answerer client passed by the caller — the llm reranker never opens
+        # its own client and has no per-call base_url (one chat host per
+        # deployment for all text generation; ADR-0006). The Cohere/Voyage
+        # branches above are a SEPARATE provider axis, not the model surface.
         model = (
             os.environ.get("OPENAI_RERANK_MODEL")
             or os.environ.get("OPENAI_MODEL")

@@ -23,7 +23,7 @@ import hashlib
 import json
 import logging
 import os
-from typing import AsyncIterator, Literal
+from typing import AsyncIterator
 
 import httpx
 from dotenv import load_dotenv
@@ -37,8 +37,21 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from chunking import chunk_text, get_chunk_config
-from embeddings import embed_texts, get_embedding_model, to_pgvector
+from embeddings import (
+    EmbeddingStamp,
+    check_embedder_drift,
+    embed_texts,
+    get_embedding_model,
+    probe_embed_dim,
+    to_pgvector,
+)
 from metadata import extract_document_metadata, get_metadata_model
+from model_config import (
+    ChatMode,
+    ProviderConfig,
+    build_openai_client,
+    resolve_chat_mode_default,
+)
 from parsing import UnsupportedFormatError, parse_document, warmup as warmup_parsing
 from permissions import (
     AclGrant,
@@ -140,7 +153,11 @@ SUPABASE_ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
 # to the user-JWT lookup, which collapses 403 → 404 for callers who can't
 # see the doc at all (still secure, just less precise).
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or None
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"].strip()
+# US-021: the OpenAI/Azure connection (api key, base_url, Azure params) is now
+# resolved once via model_config.ProviderConfig.from_env (see the client build
+# below), not read ad hoc here. OPENAI_MODEL stays — model selection is
+# per-call-site (ADR-0006). A missing OPENAI_API_KEY is still caught by the
+# _REQUIRED_ENV startup check above.
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_VECTOR_STORE_ID = os.environ.get("OPENAI_VECTOR_STORE_ID") or None
 FRONTEND_ORIGINS = [
@@ -149,14 +166,10 @@ FRONTEND_ORIGINS = [
     if o.strip()
 ]
 
-ChatMode = Literal["responses", "completions"]
-
-_DEFAULT_CHAT_MODE_RAW = os.environ.get("CHAT_MODE_DEFAULT", "responses").strip().lower()
-if _DEFAULT_CHAT_MODE_RAW not in ("responses", "completions"):
-    raise ValueError(
-        f"CHAT_MODE_DEFAULT must be 'responses' or 'completions', got {_DEFAULT_CHAT_MODE_RAW!r}"
-    )
-DEFAULT_CHAT_MODE: ChatMode = _DEFAULT_CHAT_MODE_RAW  # type: ignore[assignment]
+# US-025: `ChatMode` and the resolved `DEFAULT_CHAT_MODE` moved below — the
+# default now depends on the answerer provider (responses is OpenAI-only), so it
+# is resolved against `_ANSWERER_CONFIG` after that config is built. See
+# `resolve_chat_mode_default` (model_config.py) for the fail-closed binding.
 
 # US-011: cap the Chat Completions tool-call loop so a misbehaving model can't
 # spin forever. PRD Technical Considerations section pins this at 5.
@@ -289,7 +302,55 @@ if LANGSMITH_API_KEY:
 else:
     os.environ["LANGSMITH_TRACING"] = "false"
 
-openai_client = wrap_openai(AsyncOpenAI(api_key=OPENAI_API_KEY))
+# US-021/US-022: per-role provider binding. Each role's ProviderConfig is
+# resolved once at startup (openai|azure). The answerer is the primary client;
+# the embedder embeds queries/chunks and the runtime-judge backs the ADR-0003
+# faithfulness gate (consumed in area D — built here so its provider binding is
+# validated at startup, fail-closed). wrap_openai keeps LangSmith tracing intact
+# for every provider. Rerankers (COHERE/VOYAGE in reranking.py) stay a SEPARATE
+# provider axis and are deliberately not part of this surface.
+#
+# US-023: the answerer client is the single chat host for ALL text generation.
+# The five auxiliary helpers — metadata (extract_document_metadata), planner
+# (plan_query), SQL-gen (query_database), subagent (run_document_subagent), and
+# the `llm` reranker (build_reranker) — are each passed THIS `openai_client`,
+# never their own. Model selection is per call-site (METADATA_MODEL /
+# OPENAI_PLANNER_MODEL / OPENAI_SQL_MODEL / OPENAI_SUBAGENT_MODEL /
+# OPENAI_RERANK_MODEL, each → OPENAI_MODEL); provider/base_url is never split
+# per helper (ADR-0006). Grep for `# US-023: answerer-role` at the call sites.
+_ANSWERER_CONFIG = ProviderConfig.from_env("answerer")
+_EMBEDDER_CONFIG = ProviderConfig.from_env("embedder")
+_JUDGE_CONFIG = ProviderConfig.from_env("judge")
+openai_client = wrap_openai(build_openai_client(_ANSWERER_CONFIG))
+
+# US-025 (FR-M4): resolve + validate the process-wide default chat mode against
+# the now-resolved answerer provider. Responses mode (hosted file_search +
+# server-side previous_response_id threading) is OpenAI-provider-only and
+# non-portable, so the portable `completions` path is the cross-provider
+# default, and an explicit CHAT_MODE_DEFAULT=responses under a non-openai
+# answerer fails closed HERE (at startup), never silently downgraded. For an
+# openai answerer the historical `responses` default is preserved.
+DEFAULT_CHAT_MODE: ChatMode = resolve_chat_mode_default(
+    _ANSWERER_CONFIG, os.environ.get("CHAT_MODE_DEFAULT")
+)
+# US-025: the hosted-file_search + server-side-threading Responses path is
+# reachable ONLY on a validated openai answerer. Gates the per-request `mode`
+# override at /api/chat so an explicit mode=responses can't sneak onto a
+# non-openai provider (where file_search/threading don't exist).
+RESPONSES_MODE_AVAILABLE = _ANSWERER_CONFIG.provider == "openai"
+
+
+def _build_role_client(cfg: ProviderConfig) -> AsyncOpenAI:
+    """Reuse the answerer client when a role's resolved config is identical (the
+    common single-provider case → no redundant connection pool); otherwise build
+    a dedicated client for the split provider."""
+    if cfg == _ANSWERER_CONFIG:
+        return openai_client
+    return wrap_openai(build_openai_client(cfg))
+
+
+embedder_client = _build_role_client(_EMBEDDER_CONFIG)
+judge_client = _build_role_client(_JUDGE_CONFIG)
 
 app = FastAPI(title="Agentic RAG backend")
 app.add_middleware(
@@ -338,6 +399,33 @@ async def _on_startup() -> None:
     except SemanticLayerError:
         log.exception("semantic_layer.load_failed")
         raise
+
+    # US-027: fail-closed embedder-drift guard. Probe-embed one string to
+    # measure the LIVE embedder's actual output dim, then compare the running
+    # embedder (model + dim) against the corpus stamp written at index time
+    # (US-026). A genuine drift — different dims, OR the dangerous
+    # same-dims-different-model case — RAISES and stops startup: silently
+    # degrading retrieval is worse than a loud boot failure (same posture as
+    # the semantic-layer load above). An empty corpus (no stamp) or an
+    # unreadable stamp is a no-op; the probe is skipped entirely when there is
+    # nothing to compare against, so an empty corpus pays no embedding call.
+    # A failure to READ the stamp is logged and skipped (it must not mask a
+    # drift — a broken embedder resurfaces on the first real query), but a
+    # confirmed drift propagates.
+    async with httpx.AsyncClient(timeout=30.0) as http:
+        try:
+            stamp = await _fetch_embedding_stamp(http)
+        except Exception:  # noqa: BLE001
+            log.exception("embedder_guard.stamp_read_failed — skipping drift check")
+            stamp = None
+    if stamp is not None:
+        measured_dim = await probe_embed_dim(embedder_client)
+        check_embedder_drift(get_embedding_model(), measured_dim, stamp)
+        log.info(
+            "embedder_guard.ok — embedder %r @ %d dims matches the corpus stamp",
+            get_embedding_model(),
+            measured_dim,
+        )
 
 
 class ChatRequest(BaseModel):
@@ -697,7 +785,7 @@ async def _retrieve_for_agent(
 
     if mode == "hybrid":
         candidates = await hybrid_search(
-            openai_client=openai_client,
+            openai_client=embedder_client,  # US-022: embed under the embedder role
             http=http,
             supabase_url=SUPABASE_URL,
             supabase_headers=_supabase_headers(user),
@@ -707,7 +795,7 @@ async def _retrieve_for_agent(
         )
     elif mode == "keyword":
         candidates = await keyword_only_search(
-            openai_client=openai_client,
+            openai_client=embedder_client,  # US-022: signature parity (unused)
             http=http,
             supabase_url=SUPABASE_URL,
             supabase_headers=_supabase_headers(user),
@@ -717,7 +805,7 @@ async def _retrieve_for_agent(
         )
     else:
         candidates = await search_documents(
-            openai_client=openai_client,
+            openai_client=embedder_client,  # US-022: embed under the embedder role
             http=http,
             supabase_url=SUPABASE_URL,
             supabase_headers=_supabase_headers(user),
@@ -729,6 +817,7 @@ async def _retrieve_for_agent(
     if reranker_name == "none":
         return candidates, mode, reranker_name
 
+    # US-023: answerer-role — the `llm` reranker runs on the answerer client.
     reranker = build_reranker(reranker_name, http=http, openai_client=openai_client)
     results = await rerank_with_timing(reranker, query, candidates, top_k)
     return results, mode, reranker_name
@@ -802,7 +891,7 @@ async def _execute_tool_call(
             if _SEMANTIC_LAYER is None:
                 return json.dumps({"error": "semantic layer not loaded"})
             result = await plan_query(
-                openai_client=openai_client,
+                openai_client=openai_client,  # US-023: answerer-role
                 question=validated_plan.question,
                 layer=_SEMANTIC_LAYER,
             )
@@ -865,7 +954,7 @@ async def _execute_tool_call(
         try:
             validated_sub = SpawnDocumentAgentInput(**args)
             result = await run_document_subagent(
-                openai_client=openai_client,
+                openai_client=openai_client,  # US-023: answerer-role
                 http=http,
                 supabase_url=SUPABASE_URL,
                 supabase_headers=_supabase_headers(user),
@@ -1094,6 +1183,20 @@ async def chat(
     user: AuthedUser = Depends(get_user),
 ):
     mode: ChatMode = req.mode or DEFAULT_CHAT_MODE
+    # US-025: keep the Responses path (hosted file_search + previous_response_id
+    # threading) reachable only on a validated openai answerer. A per-request
+    # mode=responses on a non-openai provider fails closed (400) rather than
+    # silently falling back to completions — consistent with the startup guard.
+    if mode == "responses" and not RESPONSES_MODE_AVAILABLE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "chat mode 'responses' requires answerer provider=openai (current "
+                f"provider is {_ANSWERER_CONFIG.provider!r}); use mode=completions. "
+                "Responses mode (hosted file_search + server-side threading) is "
+                "OpenAI-only and non-portable."
+            ),
+        )
     streamer = (
         _stream_responses_reply if mode == "responses" else _stream_completions_reply
     )
@@ -1112,7 +1215,11 @@ async def get_config() -> dict:
     """Public config surface: the frontend uses this to seed its mode toggle."""
     return {
         "default_chat_mode": DEFAULT_CHAT_MODE,
-        "supported_chat_modes": ["responses", "completions"],
+        # US-025: only advertise `responses` when the answerer is openai, so the
+        # frontend mode toggle never offers a mode the /api/chat guard would 400.
+        "supported_chat_modes": (
+            ["responses", "completions"] if RESPONSES_MODE_AVAILABLE else ["completions"]
+        ),
         "file_search_enabled": bool(OPENAI_VECTOR_STORE_ID),
         "sql_tool_enabled": sql_tool_enabled(),
         # US-030: separate flag for the new plan_query + sql_search path.
@@ -1228,7 +1335,7 @@ async def _reconcile_chunks(
     user: AuthedUser,
     document_id: str,
     chunks: list[str],
-) -> dict[str, int]:
+) -> tuple[dict[str, int], int | None]:
     """US-015: diff `chunks` against existing rows by SHA-256 and replace.
 
     Existing chunks whose content hash matches a new chunk have their
@@ -1241,8 +1348,13 @@ async def _reconcile_chunks(
     mid-pipeline failure never leaves half-written chunks behind (matches the
     pre-US-015 safety boundary).
 
-    Returns per-position metrics: `chunks_added`, `chunks_removed`,
-    `chunks_unchanged`, `chunks_total`.
+    Returns `(metrics, produced_dim)` where metrics is the per-position counts
+    (`chunks_added`, `chunks_removed`, `chunks_unchanged`, `chunks_total`) and
+    `produced_dim` is the length of the freshly-produced embedding vectors (None
+    when this ingest reused every chunk and produced no new embedding). US-026
+    uses it to stamp the corpus embedding model + dim; pgvector rejects a
+    wrong-length insert, so once the rows are written `produced_dim` necessarily
+    equals the `chunks.embedding` column dim.
     """
     new_hashes = [_hash_chunk(c) for c in chunks]
     existing = await _fetch_existing_chunks(http, user, document_id)
@@ -1265,8 +1377,12 @@ async def _reconcile_chunks(
             to_embed_texts.append(text)
 
     new_embeddings: list[list[float]] = (
-        await embed_texts(openai_client, to_embed_texts) if to_embed_texts else []
+        await embed_texts(embedder_client, to_embed_texts) if to_embed_texts else []
     )
+    # US-026: the actually-produced vector length, for the embedding_config
+    # stamp. None when nothing new was embedded (all chunks reused) — the stamp
+    # was then already written by the ingest that first produced these vectors.
+    produced_dim = len(new_embeddings[0]) if new_embeddings else None
     position_to_new_embedding = dict(zip(to_embed_positions, new_embeddings))
 
     rows: list[dict] = []
@@ -1297,12 +1413,81 @@ async def _reconcile_chunks(
         if not row.get("content_hash") or row["content_hash"] not in new_hash_set
     )
 
-    return {
-        "chunks_added": chunks_added,
-        "chunks_removed": chunks_removed,
-        "chunks_unchanged": chunks_unchanged,
-        "chunks_total": len(rows),
-    }
+    return (
+        {
+            "chunks_added": chunks_added,
+            "chunks_removed": chunks_removed,
+            "chunks_unchanged": chunks_unchanged,
+            "chunks_total": len(rows),
+        },
+        produced_dim,
+    )
+
+
+async def _stamp_embedding_config(
+    http: httpx.AsyncClient,
+    user: AuthedUser,
+    model: str,
+    dim: int,
+) -> None:
+    """US-026: stamp the single-row `embedding_config` with the embedder model +
+    the actually-produced vector dim, so a later embedder change is detectable
+    (US-027's startup probe) instead of silently degrading retrieval.
+
+    **Insert-if-absent, never update** (`resolution=ignore-duplicates` +
+    `on_conflict=singleton` → `ON CONFLICT DO NOTHING`): the first ingest that
+    produces embeddings seeds the row; every later ingest is a no-op. A routine
+    per-user ingest must NOT rewrite the corpus's recorded model — if it did, an
+    accidental model swap would re-stamp itself and blind US-027's drift guard.
+    Overwriting the stamp is reserved for a deliberate bulk re-index (the
+    seeders, service-role). The insert-only RLS on the table enforces this even
+    if a caller tried to update. Best-effort: a stamp failure must not fail an
+    otherwise-successful ingest, so errors are logged, not raised.
+    """
+    try:
+        r = await http.post(
+            f"{SUPABASE_URL}/rest/v1/embedding_config",
+            params={"on_conflict": "singleton"},
+            headers={
+                **_supabase_headers(user),
+                "Prefer": "resolution=ignore-duplicates, return=minimal",
+            },
+            json={"singleton": True, "model": model, "dim": dim},
+        )
+        r.raise_for_status()
+    except httpx.HTTPError:
+        log.warning("embedding_config stamp failed (model=%s dim=%d)", model, dim, exc_info=True)
+
+
+async def _fetch_embedding_stamp(http: httpx.AsyncClient) -> EmbeddingStamp | None:
+    """US-027: read the single-row `embedding_config` corpus stamp for the
+    startup drift guard.
+
+    This is a *system* read with no user in scope, and the stamp's RLS exposes
+    it only to `authenticated` / service-role (never `anon`), so it goes through
+    the service-role key. Returns None — making the guard a no-op — when:
+      * no service-role key is configured (the stamp can't be read at all; the
+        guard is disabled and that is logged loudly), or
+      * the corpus has no stamp yet (empty corpus — nothing has been indexed).
+    """
+    headers = _service_role_headers()
+    if headers is None:
+        log.warning(
+            "embedder_guard.disabled — SUPABASE_SERVICE_ROLE_KEY is unset, so the "
+            "embedding_config stamp can't be read at startup (its RLS hides it from "
+            "anon). Set the service-role key to enable US-027 drift detection."
+        )
+        return None
+    r = await http.get(
+        f"{SUPABASE_URL}/rest/v1/embedding_config",
+        params={"select": "model,dim", "limit": "1"},
+        headers=headers,
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        return None
+    return EmbeddingStamp(model=rows[0]["model"], dim=int(rows[0]["dim"]))
 
 
 async def _patch_document(
@@ -1401,7 +1586,7 @@ async def ingest_document(
             # embedding already in the DB. _reconcile_chunks is the
             # atomic-ish boundary (PostgREST has no real tx, but re-running
             # ingest stays idempotent via the delete-then-insert inside).
-            metrics = await _reconcile_chunks(http, user, document_id, chunks)
+            metrics, produced_dim = await _reconcile_chunks(http, user, document_id, chunks)
             chunk_count = metrics["chunks_total"]
             log.info(
                 "ingest.reconcile document_id=%s chunks_added=%d "
@@ -1412,6 +1597,16 @@ async def ingest_document(
                 metrics["chunks_unchanged"],
                 chunk_count,
             )
+
+            # US-026: stamp the corpus with the embedder model + the dim it just
+            # produced. Only when this ingest actually embedded something
+            # (produced_dim is not None) — a reuse-only ingest leaves the
+            # existing stamp untouched. Insert-if-absent, so the first such
+            # ingest seeds it and the rest no-op.
+            if produced_dim is not None:
+                await _stamp_embedding_config(
+                    http, user, get_embedding_model(), produced_dim
+                )
 
             if to_replay:
                 replayed = await replay_doc_acls(
@@ -1451,7 +1646,7 @@ async def ingest_document(
                 "error_message": None,
             }
             extracted = await extract_document_metadata(
-                openai_client, text, doc["filename"]
+                openai_client, text, doc["filename"]  # US-023: answerer-role
             )
             if extracted is not None:
                 ready_fields["metadata"] = extracted.model_dump(mode="json")
@@ -1725,7 +1920,7 @@ async def search(
 ) -> dict:
     async with httpx.AsyncClient(timeout=30.0) as http:
         results = await search_documents(
-            openai_client=openai_client,
+            openai_client=embedder_client,  # US-022: embed under the embedder role
             http=http,
             supabase_url=SUPABASE_URL,
             supabase_headers=_supabase_headers(user),
@@ -1772,7 +1967,7 @@ async def search_hybrid(
 ) -> dict:
     async with httpx.AsyncClient(timeout=30.0) as http:
         results = await hybrid_search(
-            openai_client=openai_client,
+            openai_client=embedder_client,  # US-022: embed under the embedder role
             http=http,
             supabase_url=SUPABASE_URL,
             supabase_headers=_supabase_headers(user),
@@ -1828,7 +2023,7 @@ async def sql_query(
         )
     try:
         result = await query_database(
-            openai_client=openai_client,
+            openai_client=openai_client,  # US-023: answerer-role
             question=req.question,
             row_limit=req.row_limit,
             schema_snapshot=_SQL_SCHEMA_SNAPSHOT,
@@ -1871,7 +2066,7 @@ async def subagent_endpoint(
     async with httpx.AsyncClient(timeout=120.0) as http:
         try:
             result = await run_document_subagent(
-                openai_client=openai_client,
+                openai_client=openai_client,  # US-023: answerer-role
                 http=http,
                 supabase_url=SUPABASE_URL,
                 supabase_headers=_supabase_headers(user),
@@ -1885,4 +2080,28 @@ async def subagent_endpoint(
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    return {"ok": True, "model": OPENAI_MODEL, "file_search": bool(OPENAI_VECTOR_STORE_ID)}
+    return {
+        "ok": True,
+        "model": OPENAI_MODEL,
+        "file_search": bool(OPENAI_VECTOR_STORE_ID),
+        # US-022: per-role provider binding, so ops can confirm a split
+        # deployment (e.g. answer on azure, embed on openai) took effect.
+        "providers": {
+            "answerer": _ANSWERER_CONFIG.provider,
+            "embedder": _EMBEDDER_CONFIG.provider,
+            "judge": _JUDGE_CONFIG.provider,
+        },
+        # US-024: surface the resolved Azure deployment per azure-bound role so
+        # ops can confirm deployment-name addressing took effect (None = the
+        # per-call model arg is used as the deployment). Omitted for openai roles.
+        "azure_deployments": {
+            role: cfg.azure_deployment
+            for role, cfg in (
+                ("answerer", _ANSWERER_CONFIG),
+                ("embedder", _EMBEDDER_CONFIG),
+                ("judge", _JUDGE_CONFIG),
+            )
+            if cfg.provider == "azure"
+        },
+        "embedding_model": get_embedding_model(),
+    }

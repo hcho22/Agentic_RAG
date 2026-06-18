@@ -53,7 +53,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from chunking import chunk_text  # noqa: E402
-from embeddings import embed_texts, to_pgvector  # noqa: E402
+from embeddings import embed_texts, get_embedding_model, to_pgvector  # noqa: E402
 
 log = logging.getLogger("agentic_rag.db_seed.corpus")
 
@@ -233,6 +233,38 @@ async def _insert_chunks(
     )
 
 
+async def stamp_embedding_config(
+    conn: asyncpg.Connection, model: str, dim: int
+) -> None:
+    """US-026: upsert the single-row `embedding_config` corpus stamp.
+
+    Shared by the corpus + wikipedia seeders (both produce embeddings via direct
+    asyncpg inserts, bypassing the production ingest endpoint — so the stamp has
+    to be written here too, or a freshly-seeded corpus would have chunks but no
+    stamp and US-027's startup guard would have nothing to compare against).
+
+    Bulk-(re)index semantics: a seeder rebuilds the corpus under the *current*
+    embedder, so it OVERWRITES the stamp (`do update`) to match what it just
+    produced. That is deliberately different from the production ingest endpoint,
+    which is insert-if-absent so a routine per-doc ingest can't silently rewrite
+    the recorded model (US-027's drift guard depends on that). Service-role /
+    asyncpg bypasses the table's insert-only RLS, so the overwrite is permitted
+    on this path.
+    """
+    await conn.execute(
+        """
+        insert into public.embedding_config (singleton, model, dim)
+        values (true, $1, $2)
+        on conflict (singleton) do update
+          set model = excluded.model,
+              dim = excluded.dim,
+              indexed_at = now()
+        """,
+        model,
+        dim,
+    )
+
+
 async def seed() -> dict[str, int]:
     """Truncate + reseed the corpus. Returns row counts."""
     url = os.environ.get("CORPUS_SEED_DATABASE_URL") or os.environ.get("DATABASE_URL")
@@ -250,6 +282,7 @@ async def seed() -> dict[str, int]:
     conn = await asyncpg.connect(url)
 
     total_chunks = 0
+    produced_dim: int | None = None
     try:
         await _ensure_test_user(conn)
         await _ensure_workspace_membership(conn)
@@ -263,6 +296,8 @@ async def seed() -> dict[str, int]:
             if not chunks:
                 raise RuntimeError(f"chunking produced 0 chunks for {filename}")
             embeddings = await embed_texts(openai_client, chunks)
+            if embeddings and produced_dim is None:
+                produced_dim = len(embeddings[0])
             document_id = document_uuid(slug)
             await _insert_document(
                 conn,
@@ -273,6 +308,12 @@ async def seed() -> dict[str, int]:
             )
             await _insert_chunks(conn, document_id, slug, chunks, embeddings)
             total_chunks += len(chunks)
+
+        # US-026: stamp the corpus with the embedder model + produced dim. The
+        # seeder just rebuilt the whole corpus, so this is the authoritative
+        # (re)index — overwrite the stamp to match what was produced.
+        if produced_dim is not None:
+            await stamp_embedding_config(conn, get_embedding_model(), produced_dim)
     finally:
         await conn.close()
 

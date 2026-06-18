@@ -124,6 +124,11 @@ def get_sql_model() -> str:
 
     Falls through `OPENAI_SQL_MODEL` → `OPENAI_MODEL` → `gpt-4o-mini` so ops
     can pin a cheaper/faster model just for SQL without affecting chat.
+
+    US-023: this selects the *model* only — never the provider/base_url. The
+    client is the shared answerer client passed in by the caller; this helper
+    never constructs its own client, and a per-call base_url is unsupported
+    (one chat host per deployment for all text generation; ADR-0006).
     """
     return (
         os.environ.get("OPENAI_SQL_MODEL")

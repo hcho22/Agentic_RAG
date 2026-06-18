@@ -95,6 +95,11 @@ def get_metadata_model() -> str:
 
     Falls back to OPENAI_MODEL so single-model setups keep working; override
     with METADATA_MODEL when you want a cheaper model just for extraction.
+
+    US-023: this selects the *model* only — never the provider/base_url. The
+    client is the shared answerer client passed in by the caller; this helper
+    never constructs its own client, and a per-call base_url is unsupported
+    (one chat host per deployment for all text generation; ADR-0006).
     """
     return (
         os.environ.get("METADATA_MODEL")
