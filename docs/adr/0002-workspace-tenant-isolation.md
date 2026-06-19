@@ -77,7 +77,7 @@ a backend-supplied tenant ID.
 
 ## Alternatives considered and rejected
 
-- **Inherit orgs from Clerk (ADR-0006).** Rejected by A2 — Supabase Auth is woven
+- **Inherit orgs from Clerk.** Rejected by A2 — Supabase Auth is woven
   through every RLS policy; migrating the IdP means rewriting the security core.
   Workspaces are built in-schema instead.
 - **Backend-passed `workspace_id` as the boundary.** Rejected — it moves the
