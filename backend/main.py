@@ -1253,7 +1253,11 @@ async def get_config() -> dict:
         "supported_chat_modes": (
             ["responses", "completions"] if RESPONSES_MODE_AVAILABLE else ["completions"]
         ),
-        "file_search_enabled": bool(OPENAI_VECTOR_STORE_ID),
+        # US-025: file_search is the hosted Responses tool (_build_tools), reachable
+        # only via _stream_responses_reply. Gate it on responses-availability so a
+        # non-responses-capable answerer (Azure / base_url-override) never advertises
+        # a capability /api/chat can't run, mirroring supported_chat_modes above.
+        "file_search_enabled": bool(OPENAI_VECTOR_STORE_ID) and RESPONSES_MODE_AVAILABLE,
         "sql_tool_enabled": sql_tool_enabled(),
         # US-030: separate flag for the new plan_query + sql_search path.
         # Kept distinct from sql_tool_enabled (Module 7's query_database)
