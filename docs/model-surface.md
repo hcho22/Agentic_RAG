@@ -75,6 +75,18 @@ A `ProviderConfig` carries no model name — model selection stays per call-site
 all within the answerer provider (the aux helpers never switch `base_url`). Each
 selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 
+> **Azure caveat — a pinned deployment makes these selectors inert.** When an
+> azure-bound role pins `AZURE_OPENAI_DEPLOYMENT` (mode (a) below),
+> `AsyncAzureOpenAI` URL-templates *every* request to
+> `/openai/deployments/{deployment}/` and Azure routes by URL **path**, ignoring
+> the request-body `model`. So for that role the per-call selectors
+> (`OPENAI_MODEL`, `METADATA_MODEL`, `OPENAI_PLANNER_MODEL`, `OPENAI_SQL_MODEL`,
+> `OPENAI_SUBAGENT_MODEL`, `OPENAI_RERANK_MODEL`) are **inert**: all five answerer
+> helpers run on the single pinned chat deployment regardless of their overrides.
+> To vary models per call-site on Azure, use **mode (b)** — name each Azure
+> deployment identically to its model id and leave `AZURE_OPENAI_DEPLOYMENT`
+> unset, so the per-call model id becomes the deployment.
+
 | Var | Call-site | Falls back to |
 | --- | --- | --- |
 | `OPENAI_MODEL` | Answerer + default for all aux helpers | `gpt-4o-mini` |
@@ -109,9 +121,13 @@ AZURE_OPENAI_ENDPOINT=https://my-resource.openai.azure.com
 AZURE_OPENAI_API_VERSION=2024-10-21
 AZURE_OPENAI_API_KEY=<azure-key>
 
-# Answerer: deployment NAME (what you called it in the Azure portal) ...
+# Answerer: deployment NAME (what you called it in the Azure portal). Because
+# this is pinned (mode (a)), ALL five answerer helpers run on this one
+# deployment — the per-call *_MODEL selectors are inert (see the Azure caveat
+# above). Use mode (b) if you need to vary models per call-site.
 AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini-prod
-# ... and the per-call model id the helpers select within that provider:
+# Per-call model id. With the deployment pinned above, Azure ignores this in the
+# request body and routes by URL path; it only takes effect in mode (b).
 OPENAI_MODEL=gpt-4o-mini
 
 # Embedder: its own deployment — a chat deployment cannot embed. (Endpoint,

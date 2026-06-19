@@ -486,9 +486,13 @@ async def get_user(authorization: str | None = Header(default=None)) -> AuthedUs
 
 
 def _service_role_headers() -> dict[str, str] | None:
-    """Headers that bypass RLS — used only by the doc-owner authorization
-    check on the share endpoints (US-039). Returns None when no service role
-    key is configured so callers can fall back to user-scoped reads."""
+    """Headers that bypass RLS. Three call paths use them:
+      * the doc-owner authorization check on the share endpoints (US-039),
+      * `_stamp_embedding_config` — the production `embedding_config` stamp
+        WRITE (US-026), and
+      * `_fetch_embedding_stamp` — the drift-guard stamp READ (US-027).
+    Returns None when no service role key is configured so callers can fall
+    back to user-scoped reads (or, for the stamp paths, skip)."""
     if not SUPABASE_SERVICE_ROLE_KEY:
         return None
     return {
