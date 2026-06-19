@@ -27,7 +27,6 @@ from openai import AsyncAzureOpenAI, AsyncOpenAI  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 from model_config import (  # noqa: E402
-    DEFAULT_AZURE_API_VERSION,
     ProviderConfig,
     build_openai_client,
 )

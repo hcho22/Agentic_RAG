@@ -94,7 +94,6 @@ from text_to_sql import (
     get_schema_snapshot,
     is_enabled as sql_tool_enabled,
     query_database,
-    query_database_tool_schema,
 )
 from web_search import (
     WebSearchInput,
@@ -117,8 +116,6 @@ from semantic_layer import (
     load_and_validate as load_semantic_layer,
 )
 from planner import (
-    PlanMatched,
-    PlanNoMatch,
     PlanQueryInput,
     plan_query,
     plan_query_tool_schema,
