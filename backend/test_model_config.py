@@ -351,6 +351,53 @@ def test_role_provider_typo_fails_closed() -> None:
         )
 
 
+def test_role_base_url_override_requires_own_key() -> None:
+    """Credential safety: a role pointing at its own distinct host (its own
+    *_BASE_URL) must carry its own *_API_KEY — the answerer's OPENAI_API_KEY is
+    never forwarded to a different host."""
+    with _env(
+        OPENAI_API_KEY="sk-answerer",
+        EMBEDDER_BASE_URL="https://self-hosted.example/v1",  # distinct host, no key
+    ):
+        _expect_value_error(
+            lambda: ProviderConfig.from_env("embedder"),
+            "EMBEDDER_BASE_URL override without EMBEDDER_API_KEY",
+        )
+    with _env(
+        OPENAI_API_KEY="sk-answerer",
+        JUDGE_BASE_URL="https://self-hosted.example/v1",
+    ):
+        _expect_value_error(
+            lambda: ProviderConfig.from_env("judge"),
+            "JUDGE_BASE_URL override without JUDGE_API_KEY",
+        )
+
+
+def test_role_base_url_override_with_own_key() -> None:
+    """A role that sets BOTH its own base_url and api_key resolves to that host
+    with that key (no inheritance of the answerer's key)."""
+    with _env(
+        OPENAI_API_KEY="sk-answerer",
+        EMBEDDER_BASE_URL="https://self-hosted.example/v1",
+        EMBEDDER_API_KEY="sk-embedder",
+    ):
+        embedder = ProviderConfig.from_env("embedder")
+        _check(embedder.base_url == "https://self-hosted.example/v1", "embedder uses its own base_url")
+        _check(embedder.api_key == "sk-embedder", "embedder uses its own key, not the answerer's")
+    print("ok: role base_url override + role key -> distinct host with its own credential")
+
+
+def test_role_inherits_base_url_and_key_when_neither_set() -> None:
+    """The pure-inheritance case is unchanged: a role that overrides neither
+    base_url nor api_key inherits BOTH from the answerer (same host)."""
+    with _env(OPENAI_API_KEY="sk-answerer", OPENAI_BASE_URL="https://compat.example/v1"):
+        answerer = ProviderConfig.from_env("answerer")
+        embedder = ProviderConfig.from_env("embedder")
+        _check(embedder.base_url == answerer.base_url, "embedder inherits the answerer base_url")
+        _check(embedder.api_key == answerer.api_key, "embedder inherits the answerer key (same host)")
+    print("ok: no role base_url/key overrides -> inherit both from the answerer (same host)")
+
+
 def main() -> int:
     tests = [
         test_minimal_openai_config,
@@ -369,6 +416,9 @@ def main() -> int:
         test_embedder_field_level_overrides,
         test_judge_can_diverge,
         test_role_provider_typo_fails_closed,
+        test_role_base_url_override_requires_own_key,
+        test_role_base_url_override_with_own_key,
+        test_role_inherits_base_url_and_key_when_neither_set,
     ]
     for t in tests:
         t()

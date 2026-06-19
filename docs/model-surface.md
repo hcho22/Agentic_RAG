@@ -59,7 +59,7 @@ when unset:
 | Var (embedder shown; `JUDGE_*` identical) | Falls back to |
 | --- | --- |
 | `EMBEDDER_PROVIDER` | answerer provider |
-| `EMBEDDER_API_KEY` | answerer api-key (same provider only) |
+| `EMBEDDER_API_KEY` | answerer api-key (same provider only, **and only when `EMBEDDER_BASE_URL` is not overridden** — see below) |
 | `EMBEDDER_BASE_URL` | answerer `base_url` (openai only) |
 | `EMBEDDER_AZURE_OPENAI_ENDPOINT` | answerer Azure endpoint |
 | `EMBEDDER_AZURE_OPENAI_API_VERSION` | answerer Azure api-version |
@@ -68,6 +68,14 @@ when unset:
 The Azure **deployment** is the one var that is deliberately *not* inherited: a
 chat deployment is the wrong target for embeddings, so each azure-bound role
 either sets its own deployment or lets its per-call model id be the deployment.
+
+> **Credential safety — overriding `*_BASE_URL` requires a role key.** A role
+> that sets its own `EMBEDDER_BASE_URL` / `JUDGE_BASE_URL` points at a **distinct
+> host**, so it must supply its own `EMBEDDER_API_KEY` / `JUDGE_API_KEY`. Setting
+> the base_url override **without** a role api-key **fails closed at startup** —
+> the answerer's `OPENAI_API_KEY` is never forwarded to a different host. The
+> api-key is inherited only when the role talks to the *same* host (no base_url
+> override).
 
 ## Model-selection variables (per call-site)
 

@@ -35,7 +35,11 @@ role-specific vars (`EMBEDDER_PROVIDER` / `EMBEDDER_API_KEY` / `EMBEDDER_BASE_UR
 answerer config** when unset. The answerer is the base role and reads the bare
 vars (`LLM_PROVIDER`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `AZURE_OPENAI_*`).
 So "answer on Azure, embed on OpenAI" is just two env vars, and a single-provider
-deployment sets nothing extra — embedder/judge inherit the answerer.
+deployment sets nothing extra — embedder/judge inherit the answerer. One
+exception (credential safety): a role that overrides its own `*_BASE_URL` points
+at a distinct host, so it must supply its own `*_API_KEY` — the answerer's
+openai api_key is inherited only when the role does NOT override base_url (same
+host); overriding base_url without a role key fails closed.
 
 Model *selection* stays per call-site (e.g. `OPENAI_MODEL` / `EMBEDDER_MODEL`):
 a ProviderConfig deliberately carries no model name. Rerankers (Cohere/Voyage,
@@ -213,8 +217,24 @@ class ProviderConfig(BaseModel):
             )
 
         # openai (and any OpenAI-compatible endpoint via *_BASE_URL).
+        role_api_key = _role_env(prefix, "API_KEY")
+        role_base_url = _role_env(prefix, "BASE_URL")
+        # Fail closed: a role that overrides its own base_url is pointing at a
+        # DISTINCT host, so it must carry its own api key. Inheriting the
+        # answerer's api_key (or bare OPENAI_API_KEY) here would silently forward
+        # that credential to a third-party/self-hosted host the operator only
+        # meant to redirect traffic to — a credential-exposure footgun. The key
+        # is inherited only when the role talks to the same host (no base_url
+        # override).
+        if role_base_url is not None and role_api_key is None:
+            raise ValueError(
+                f"{_role_label(prefix)} openai provider sets "
+                f"{_var_label(prefix, 'BASE_URL')} (a distinct host) but no "
+                f"{_var_label(prefix, 'API_KEY')} — refusing to forward the answerer "
+                f"OPENAI_API_KEY to a different host; set {_var_label(prefix, 'API_KEY')}."
+            )
         api_key = (
-            _role_env(prefix, "API_KEY")
+            role_api_key
             or (base.api_key if base is not None and base.provider == "openai" else None)
             or _env("OPENAI_API_KEY")
         )
@@ -223,7 +243,7 @@ class ProviderConfig(BaseModel):
                 f"{_role_label(prefix)} openai provider requires an API key "
                 f"(set {_var_label(prefix, 'API_KEY')} / OPENAI_API_KEY)"
             )
-        base_url = _role_env(prefix, "BASE_URL")
+        base_url = role_base_url
         if base_url is None:
             base_url = (
                 base.base_url if base is not None and base.provider == "openai" else None
