@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from abc import ABC, abstractmethod
 from io import BytesIO
@@ -115,9 +116,16 @@ def _make_converter() -> DocumentConverter:
 
 
 # Instantiating DocumentConverter is expensive (loads backends, compiles
-# regexes). Keep a module-level singleton — the converter is stateless across
-# `convert()` calls so sharing across requests is safe.
+# regexes), so keep a module-level singleton shared across requests. The ingest
+# path now offloads `parse` to an asyncio worker thread (`asyncio.to_thread`,
+# main.py), so concurrent docling ingests would otherwise call `convert()` on
+# this shared converter from multiple threads at once — docling's pipeline holds
+# per-format model state and is not documented as thread-safe. `_convert_lock`
+# serializes the docling conversion path so concurrent parses don't race on that
+# state, preserving its prior effective serial behavior while the event loop
+# stays free.
 _converter: DocumentConverter | None = None
+_convert_lock = threading.Lock()
 
 
 def _get_converter() -> DocumentConverter:
@@ -185,22 +193,23 @@ class DoclingParser(DocumentParser):
                 "accepted: .pdf, .docx, .html, .md, .txt"
             )
 
-        try:
-            stream = DocumentStream(name=filename or f"document{_default_suffix(fmt)}", stream=BytesIO(raw))
-            result = _get_converter().convert(stream)
-            text = result.document.export_to_markdown().strip()
-        except Exception as e:  # noqa: BLE001 — see fallback below
-            # docling's PDF pipeline depends on torch-based layout models. When
-            # torch<2.4 is installed (some older base images / dev venvs), the
-            # layout step blows up and the whole conversion errors out. For PDFs
-            # specifically, fall back to pypdfium2 raw text extraction so ingestion
-            # still works on text-based PDFs — at the cost of losing heading
-            # structure docling would have reconstructed. Other formats rethrow.
-            if fmt is InputFormat.PDF:
-                log.warning("docling PDF pipeline failed (%s); falling back to pypdfium2", e)
-                text = _pdf_text_fallback(raw).strip()
-            else:
-                raise ValueError(f"failed to parse {fmt.name.lower()}: {e}") from e
+        with _convert_lock:
+            try:
+                stream = DocumentStream(name=filename or f"document{_default_suffix(fmt)}", stream=BytesIO(raw))
+                result = _get_converter().convert(stream)
+                text = result.document.export_to_markdown().strip()
+            except Exception as e:  # noqa: BLE001 — see fallback below
+                # docling's PDF pipeline depends on torch-based layout models. When
+                # torch<2.4 is installed (some older base images / dev venvs), the
+                # layout step blows up and the whole conversion errors out. For PDFs
+                # specifically, fall back to pypdfium2 raw text extraction so ingestion
+                # still works on text-based PDFs — at the cost of losing heading
+                # structure docling would have reconstructed. Other formats rethrow.
+                if fmt is InputFormat.PDF:
+                    log.warning("docling PDF pipeline failed (%s); falling back to pypdfium2", e)
+                    text = _pdf_text_fallback(raw).strip()
+                else:
+                    raise ValueError(f"failed to parse {fmt.name.lower()}: {e}") from e
 
         if not text:
             raise ValueError(
@@ -337,7 +346,7 @@ class LlamaParseParser(DocumentParser):
             # instead of a top-level `markdown` — join them in page order.
             pages = body.get("pages") or []
             markdown = "\n\n".join(
-                p.get("md", "") for p in pages if isinstance(p, dict)
+                (p.get("md") or "") for p in pages if isinstance(p, dict)
             )
         if not isinstance(markdown, str):
             raise ValueError(
