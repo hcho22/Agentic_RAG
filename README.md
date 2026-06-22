@@ -102,6 +102,7 @@ explanation — the kind of context a code review won't recover:
 | [`docs/adr/0002-workspace-tenant-isolation.md`](docs/adr/0002-workspace-tenant-isolation.md) | Phase 2 — the Workspace tenant boundary layered above owner-OR-ACL: where the boundary is enforced (membership clause inside the retrieval predicate, never a backend-passed tenant id), how existing data migrates into a Default Workspace, the alternatives rejected, and the **Identity Boundary** (AU3) — what an integrator may swap in the auth stack (federation-edge only) versus the welded Supabase-JWT pass-through floor. |
 | [`docs/evals.md`](docs/evals.md) | Corpus design, the 50-question golden set, what each metric measures and what it *doesn't*, a worked example of CI catching a regression (Δ -0.510 on `recall@5` from a one-line chunk-size change), and a frank list of the eval's limitations. |
 | [`docs/structured-rag.md`](docs/structured-rag.md) | The semantic-layer-aware text-to-SQL compiler, allowlisted schemas, the read-only role boundary. |
+| [`docs/ingestion-parser-adapters.md`](docs/ingestion-parser-adapters.md) | Write your own `DocumentParser` — the load-bearing markdown-string contract, the edits to add one (subclass + `PARSER` validation + `build_parser`), `PARSER` selection, proving the round-trip, and Unstructured.io as the canonical buyer-written adapter. |
 
 The eval tables in `docs/permissions-aware-rag.md` are auto-embedded
 from the runner-generated `summary.md` files via marker comments:
@@ -164,6 +165,8 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | `OPENAI_API_KEY` | yes | |
 | `OPENAI_MODEL` | no | Default `gpt-4o-mini` |
 | `OPENAI_VECTOR_STORE_ID` | no | Enables `file_search` retrieval when set |
+| `PARSER` | no | Ingestion parser: `docling` (default) / `llamaparse` / `unstructured`. Invalid value fails fast at startup. To add your own, see [docs/ingestion-parser-adapters.md](docs/ingestion-parser-adapters.md) |
+| `LLAMA_CLOUD_API_KEY` | only if `PARSER=llamaparse` | LlamaParse cloud key; checked at startup, not first ingest |
 | `FRONTEND_ORIGIN` | yes (prod) | Comma-separated list of allowed CORS origins. Defaults to `http://localhost:5173` for dev |
 | `CHAT_MODE_DEFAULT` | no | `responses` or `completions`. Defaults to `responses` on an `openai` answerer, `completions` on any other provider. `responses` is OpenAI-only and fails closed at startup on a non-`openai` answerer — see [docs/model-surface.md](docs/model-surface.md) |
 | `CHAT_HISTORY_MAX_TURNS` | no | Default 10 |
