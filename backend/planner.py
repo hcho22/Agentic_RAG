@@ -112,7 +112,12 @@ def get_planner_model() -> str:
     """Falls through `OPENAI_PLANNER_MODEL` → `OPENAI_MODEL` → `gpt-4o-mini`.
     Lets ops point the planner at a cheaper / faster model independent of
     the main chat model — function-calling accuracy is fine on 4o-mini at
-    the prompt complexity we're at."""
+    the prompt complexity we're at.
+
+    US-023: this selects the *model* only — never the provider/base_url. The
+    client is the shared answerer client passed in by the caller; this helper
+    never constructs its own client, and a per-call base_url is unsupported
+    (one chat host per deployment for all text generation; ADR-0006)."""
     return (
         os.environ.get("OPENAI_PLANNER_MODEL")
         or os.environ.get("OPENAI_MODEL")

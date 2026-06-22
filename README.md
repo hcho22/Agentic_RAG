@@ -165,7 +165,7 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | `OPENAI_MODEL` | no | Default `gpt-4o-mini` |
 | `OPENAI_VECTOR_STORE_ID` | no | Enables `file_search` retrieval when set |
 | `FRONTEND_ORIGIN` | yes (prod) | Comma-separated list of allowed CORS origins. Defaults to `http://localhost:5173` for dev |
-| `CHAT_MODE_DEFAULT` | no | `responses` (default) or `chat_completions` |
+| `CHAT_MODE_DEFAULT` | no | `responses` or `completions`. Defaults to `responses` on an `openai` answerer, `completions` on any other provider. `responses` is OpenAI-only and fails closed at startup on a non-`openai` answerer — see [docs/model-surface.md](docs/model-surface.md) |
 | `CHAT_HISTORY_MAX_TURNS` | no | Default 10 |
 | `RETRIEVAL_MODE` | no | `hybrid` (default) / `vector` / `keyword`. Safety escape hatch — production uses hybrid |
 | `SEARCH_SIMILARITY_THRESHOLD` | no | Cosine threshold for `match_chunks` filter. Default 0.3 |
@@ -184,6 +184,27 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | `ALLOWED_SQL_SCHEMAS` | no | Comma-separated schema allowlist for SQL tools. Default `analytics,crm` |
 | `SQL_QUERY_TIMEOUT_MS` | no | Statement timeout for SQL tools. Default 10000 |
 | `ANTHROPIC_API_KEY` | only for eval generation | Required by `evals/retrieval/runner.py --include-generation` (the LLM judge runs Claude). Never read by the live backend |
+
+#### Model surface (provider / model selection)
+
+Bring your own model host. Provider binds **per role** (answerer / embedder /
+judge); model binds **per call-site**. Two targets are tested — `openai` and
+`azure` — and `openai` accepts a `base_url` for any OpenAI-compatible endpoint.
+The embedder/judge inherit the answerer config unless overridden, so a
+single-provider deploy sets only the answerer (bare) vars. **Full reference,
+role-fallback precedence, worked Azure example, capability matrix, and the
+embedder re-index procedure: [docs/model-surface.md](docs/model-surface.md).**
+
+| Var | Required | Notes |
+| --- | --- | --- |
+| `LLM_PROVIDER` | no | Answerer provider: `openai` (default) or `azure` |
+| `OPENAI_BASE_URL` | no | Any OpenAI-compatible endpoint (supported-but-untested) |
+| `AZURE_OPENAI_ENDPOINT` / `AZURE_OPENAI_API_VERSION` / `AZURE_OPENAI_API_KEY` | only if `provider=azure` | All three required — `provider=azure` fails closed at startup if any is missing |
+| `AZURE_OPENAI_DEPLOYMENT` | no | Azure deployment **name** (≠ model id); unset → per-call model id is the deployment |
+| `EMBEDDER_PROVIDER` / `EMBEDDER_API_KEY` / `EMBEDDER_BASE_URL` / `EMBEDDER_AZURE_OPENAI_*` | no | Embedder-role overrides; fall back to the answerer config (deployment is per-role, not inherited) |
+| `JUDGE_PROVIDER` / `JUDGE_API_KEY` / `JUDGE_BASE_URL` / `JUDGE_AZURE_OPENAI_*` | no | Runtime-judge-role overrides; same fallback rules as the embedder |
+| `EMBEDDER_MODEL` | no | Embedder model. Falls back to `EMBEDDING_MODEL` → `text-embedding-3-small` |
+| `METADATA_MODEL` / `OPENAI_PLANNER_MODEL` / `OPENAI_SQL_MODEL` / `OPENAI_SUBAGENT_MODEL` / `OPENAI_RERANK_MODEL` | no | Per-call-site model selectors within the answerer provider; each falls back to `OPENAI_MODEL` |
 
 ### Frontend (`frontend/.env`)
 

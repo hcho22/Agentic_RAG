@@ -35,7 +35,8 @@ Run:
 
 Reads:
     CORPUS_SEED_DATABASE_URL  (or DATABASE_URL fallback) — writable Postgres
-    OPENAI_API_KEY            — required for embedding generation
+    Embedder connection       — resolved from the embedder-role ProviderConfig
+        (EMBEDDER_* / OPENAI_API_KEY / AZURE_OPENAI_*; see backend/model_config.py)
     WIKITEXT_REVISION         — optional override of the YAML's hf_revision
 """
 
@@ -56,13 +57,17 @@ from typing import Any
 
 import asyncpg
 import yaml
-from openai import AsyncOpenAI
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from chunking import chunk_text  # noqa: E402
-from embeddings import embed_texts, to_pgvector  # noqa: E402
+from embeddings import embed_texts, get_embedding_model, to_pgvector  # noqa: E402
+
+# US-026/US-027: reuse the corpus seeder's single-row embedding_config upsert and
+# its embedder-ProviderConfig client builder so both embedding-producing seed
+# paths stamp the corpus identically and embed via the SAME configured provider.
+from db_seed.corpus_seed import build_embedder_client, stamp_embedding_config  # noqa: E402
 
 log = logging.getLogger("agentic_rag.db_seed.wikipedia")
 
@@ -365,10 +370,6 @@ async def seed(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
             "set CORPUS_SEED_DATABASE_URL (or DATABASE_URL) to a writable "
             "Postgres connection string"
         )
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required to embed wikipedia chunks")
-
     cfg = load_config(config_path)
     corpus_cfg = cfg["corpus"]
     viewers = cfg["viewers"]
@@ -393,10 +394,11 @@ async def seed(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
         len(documents), sum(len(d) for d in documents),
     )
 
-    openai_client = AsyncOpenAI(api_key=api_key)
+    openai_client = build_embedder_client()
     conn = await asyncpg.connect(url)
 
     chunk_id_by_global_index: list[uuid.UUID] = []
+    produced_dim: int | None = None
     try:
         await _ensure_users(conn, viewers)
         purged = await _purge_existing(conn)
@@ -405,6 +407,8 @@ async def seed(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
 
         for doc_idx, chunks in enumerate(documents):
             embeddings = await embed_texts(openai_client, chunks)
+            if embeddings and produced_dim is None:
+                produced_dim = len(embeddings[0])
             doc_byte_size = sum(len(c.encode("utf-8")) for c in chunks)
             document_id = document_uuid(doc_idx)
             await _insert_document(conn, document_id, doc_idx, len(chunks), doc_byte_size)
@@ -415,6 +419,13 @@ async def seed(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
                 "wikipedia_seed: doc %d/%d done (%d chunks)",
                 doc_idx + 1, len(documents), len(chunks),
             )
+
+        # US-026: stamp the corpus with the embedder model + produced dim (same
+        # single-row stamp as the corpus seeder — the scale filler is embedded by
+        # the same embedder, so a standalone wikipedia seed still leaves a valid
+        # stamp for US-027's startup guard).
+        if produced_dim is not None:
+            await stamp_embedding_config(conn, get_embedding_model(), produced_dim)
 
         acl_counts = await _write_acls(conn, viewers, chunk_id_by_global_index, salt)
     finally:

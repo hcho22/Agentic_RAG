@@ -109,7 +109,12 @@ def get_subagent_max_iterations() -> int:
 def get_subagent_model() -> str:
     """Model used for the sub-agent. Falls through `OPENAI_SUBAGENT_MODEL`
     → `OPENAI_MODEL` → `gpt-4o-mini` so deployers can pin a cheaper /
-    longer-context model just for sub-agent runs without affecting chat."""
+    longer-context model just for sub-agent runs without affecting chat.
+
+    US-023: this selects the *model* only — never the provider/base_url. The
+    client is the shared answerer client passed in by the caller; this helper
+    never constructs its own client, and a per-call base_url is unsupported
+    (one chat host per deployment for all text generation; ADR-0006)."""
     return (
         os.environ.get("OPENAI_SUBAGENT_MODEL")
         or os.environ.get("OPENAI_MODEL")
