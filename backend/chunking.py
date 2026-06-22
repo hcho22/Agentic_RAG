@@ -5,7 +5,7 @@ downstream OpenAI embedding + completion models. Defaults (500/50) come from
 the PRD; CHUNK_SIZE_TOKENS / CHUNK_OVERLAP_TOKENS override via env.
 
 US-018: chunking now respects structural boundaries. Input is expected to be
-Markdown-shaped (what docling's `export_to_markdown` produces, or plain text
+Markdown-shaped (what the ingestion parser boundary emits, or plain text
 with blank-line paragraph separators). We greedily pack blocks — where a
 block is a heading-plus-paragraph group separated by blank lines — up to the
 token budget, so a chunk never starts mid-heading or mid-paragraph. Blocks

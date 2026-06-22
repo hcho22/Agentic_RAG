@@ -395,10 +395,10 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 ### US-036: Verify the docling seam is clean (I5)
 **Description:** As a kit maintainer, I want a verification that nothing docling-typed escapes `parsing.py` and that the chunker consumes only `str`, so that I can close I5 as "verified" with evidence rather than assertion.
 **Acceptance Criteria:**
-- [ ] A test/check proves `docling` is imported in exactly one module — `backend/parsing.py` (the entry `parse_document` at `backend/parsing.py:112`); no other `backend/*.py` imports `docling`, `DocumentConverter`, `InputFormat`, or `DocumentStream`.
-- [ ] A check proves `backend/chunking.py` accepts and operates on `str` only — `chunk_text(text: str, ...)` (`backend/chunking.py:109`) has no `docling`/`InputFormat`/`DocumentStream` reference and no non-`str` document type in its signature.
-- [ ] The verified state is documented inline (CONTEXT "Ingestion boundary (I5 / I6)" + ADR-0007), stating I5 = verified, the PRD "PARTIAL/refactor if threaded" is moot.
-- [ ] Typecheck/lint passes
+- [x] A test/check proves `docling` is imported in exactly one module — `backend/parsing.py` (the entry `parse_document` at `backend/parsing.py:112`); no other `backend/*.py` imports `docling`, `DocumentConverter`, `InputFormat`, or `DocumentStream`.
+- [x] A check proves `backend/chunking.py` accepts and operates on `str` only — `chunk_text(text: str, ...)` (`backend/chunking.py:109`) has no `docling`/`InputFormat`/`DocumentStream` reference and no non-`str` document type in its signature.
+- [x] The verified state is documented inline (CONTEXT "Ingestion boundary (I5 / I6)" + ADR-0007), stating I5 = verified, the PRD "PARTIAL/refactor if threaded" is moot.
+- [x] Typecheck/lint passes
 **Validation Test:**
 - **Setup:** Clean checkout; `cd backend`.
 - **Steps:**
@@ -411,10 +411,10 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 ### US-037: Define the `DocumentParser` protocol (boundary contract)
 **Description:** As a kit maintainer, I want a one-method `DocumentParser` ABC modeled on `Reranker` (`backend/reranking.py:69`) / `WebSearchProvider` (`backend/web_search.py:85`), so that the implicit function seam becomes a discoverable, typed extension point consistent with the other two boundaries.
 **Acceptance Criteria:**
-- [ ] A `DocumentParser` ABC exists in `backend/parsing.py` (or a sibling it imports) with `name: str` and a single abstractmethod `parse(self, raw: bytes, filename: str, content_type: str | None) -> str`, matching today's `parse_document` signature exactly (`backend/parsing.py:112`).
-- [ ] The docstring pins the contract: input is bytes + filename + content_type; output is **normalized markdown string** (v1); a parser with native structured output MUST flatten to markdown here (the chunker is markdown/heading-aware only).
-- [ ] The ABC shape mirrors the existing pattern (class-level `name`, one abstractmethod), so a reader who knows `Reranker` recognizes it immediately.
-- [ ] Typecheck/lint passes
+- [x] A `DocumentParser` ABC exists in `backend/parsing.py` (or a sibling it imports) with `name: str` and a single abstractmethod `parse(self, raw: bytes, filename: str, content_type: str | None) -> str`, matching today's `parse_document` signature exactly (`backend/parsing.py:112`).
+- [x] The docstring pins the contract: input is bytes + filename + content_type; output is **normalized markdown string** (v1); a parser with native structured output MUST flatten to markdown here (the chunker is markdown/heading-aware only).
+- [x] The ABC shape mirrors the existing pattern (class-level `name`, one abstractmethod), so a reader who knows `Reranker` recognizes it immediately.
+- [x] Typecheck/lint passes
 **Validation Test:**
 - **Setup:** `cd backend`.
 - **Steps:**
@@ -426,11 +426,11 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 ### US-038: Wrap docling as the default `DoclingParser` adapter
 **Description:** As a kit maintainer, I want today's docling logic (including the `pypdfium2` PDF fallback) wrapped behind the protocol as `DoclingParser`, so that the default path is the first concrete `DocumentParser` and behavior is unchanged.
 **Acceptance Criteria:**
-- [ ] `DoclingParser(DocumentParser)` with `name = "docling"` exists; its `parse(...)` delegates to the existing docling conversion + `_pdf_text_fallback` logic (`backend/parsing.py:141-163`) and returns identical output for the same input.
-- [ ] The `pypdfium2` PDF fallback stays **inside** the docling adapter (a docling-path concern per ADR-0007), not promoted to the boundary.
-- [ ] `parse_document(...)` remains available as a thin wrapper (back-compat for `main.py:1348`) that delegates to the selected parser, OR the call site is migrated in US-039 — no behavior change either way.
-- [ ] Existing US-018 multi-format behavior (`.pdf/.docx/.html/.md` → markdown, `.txt` verbatim, `UnsupportedFormatError` on unknown) is preserved.
-- [ ] Typecheck/lint passes
+- [x] `DoclingParser(DocumentParser)` with `name = "docling"` exists; its `parse(...)` delegates to the existing docling conversion + `_pdf_text_fallback` logic (`backend/parsing.py:141-163`) and returns identical output for the same input.
+- [x] The `pypdfium2` PDF fallback stays **inside** the docling adapter (a docling-path concern per ADR-0007), not promoted to the boundary.
+- [x] `parse_document(...)` remains available as a thin wrapper (back-compat for `main.py:1348`) that delegates to the selected parser, OR the call site is migrated in US-039 — no behavior change either way.
+- [x] Existing US-018 multi-format behavior (`.pdf/.docx/.html/.md` → markdown, `.txt` verbatim, `UnsupportedFormatError` on unknown) is preserved.
+- [x] Typecheck/lint passes
 **Validation Test:**
 - **Setup:** `cd backend`; use `test-fixtures/us018/` (`sample.pdf`, `sample.docx`, `sample.html`, `sample.md`, `sample.txt`).
 - **Steps:**
@@ -442,11 +442,11 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 ### US-039: `PARSER` env selection + `build_parser` factory
 **Description:** As an operator, I want `PARSER=docling|unstructured|llamaparse` to select the parser via a `build_parser` factory mirroring `build_reranker` (`backend/reranking.py:290`) / `build_web_search_provider` (`backend/web_search.py:222`), so that swapping the ingestion parser is a config switch (+ an API key for commercial adapters).
 **Acceptance Criteria:**
-- [ ] `get_parser_name()` reads `PARSER` (default `docling`), validates against `docling|unstructured|llamaparse`, and raises a clear `ValueError` on an unknown value — same shape as `get_reranker_name()` (`backend/reranking.py:45`).
-- [ ] `build_parser(name)` returns the concrete `DocumentParser`; commercial adapters raise at **build time** on a missing API key (e.g. `PARSER=llamaparse requires LLAMA_CLOUD_API_KEY`), matching the build-time key check in `build_reranker` / `build_web_search_provider`.
-- [ ] The ingest path (`backend/main.py:1348`) routes through the selected parser instead of calling the docling-only function directly; default `PARSER=docling` preserves today's behavior exactly.
-- [ ] `unstructured` is a **named, accepted value** but may be a documented "bring your own adapter" slot (not required to ship a working impl in v1 — only LlamaParse is the shipped commercial adapter); selecting it without an implementation must fail loudly, never silently fall back to docling.
-- [ ] Typecheck/lint passes
+- [x] `get_parser_name()` reads `PARSER` (default `docling`), validates against `docling|unstructured|llamaparse`, and raises a clear `ValueError` on an unknown value — same shape as `get_reranker_name()` (`backend/reranking.py:45`).
+- [x] `build_parser(name)` returns the concrete `DocumentParser`; commercial adapters raise at **build time** on a missing API key (e.g. `PARSER=llamaparse requires LLAMA_CLOUD_API_KEY`), matching the build-time key check in `build_reranker` / `build_web_search_provider`.
+- [x] The ingest path (`backend/main.py:1348`) routes through the selected parser instead of calling the docling-only function directly; default `PARSER=docling` preserves today's behavior exactly.
+- [x] `unstructured` is a **named, accepted value** but may be a documented "bring your own adapter" slot (not required to ship a working impl in v1 — only LlamaParse is the shipped commercial adapter); selecting it without an implementation must fail loudly, never silently fall back to docling.
+- [x] Typecheck/lint passes
 **Validation Test:**
 - **Setup:** `cd backend`.
 - **Steps:**
@@ -457,14 +457,15 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 - **Failure Indicator:** An unknown `PARSER` value silently defaults to docling, the missing-key error only surfaces on first ingest (not at build), or `unstructured` silently falls back to docling.
 
 ### US-040: LlamaParse adapter implementation (I6)
+**Status:** ✅ Done — `LlamaParseParser` in `backend/parsing.py` (upload → poll job → fetch `/result/markdown` over raw `httpx`), wired into `build_parser`; `backend/test_llamaparse_parser.py` green (7 checks via `httpx.MockTransport`, no key/network). mypy-clean (the 2 pre-existing `parsing.py` errors — `_classify`/`_pdf_text_fallback` — are unchanged; the new code adds none). Verified 2026-06-22.
 **Description:** As a buyer with scanned / complex-layout / OCR documents (PRD §3.3 out-of-scope for the default docling parser), I want a real working `LlamaParseParser` behind the protocol, so that the OCR escape hatch is a config switch + API key, not a stub.
 **Acceptance Criteria:**
-- [ ] `LlamaParseParser(DocumentParser)` with `name = "llamaparse"` calls the LlamaParse cloud API (`LLAMA_CLOUD_API_KEY`), requesting **markdown** result type, and returns the markdown string — flattening any structured output (tables/layout) to markdown **at the boundary** per the v1 contract.
-- [ ] Constructor injects the HTTP client / key (testable seam), matching how `CohereReranker` / `TavilyProvider` take `http` + `api_key` (`backend/reranking.py:112`, `backend/web_search.py:118`).
-- [ ] Chosen for the simplest API + strongest OCR/complex-layout coverage — the gap docling cannot cover; documented as the reason LlamaParse (not Unstructured) is the shipped example (ADR-0007 alternatives).
-- [ ] The LlamaParse SDK/dep (or a documented raw-HTTP call) is added to `backend/requirements.txt` with a comment tying it to I6, consistent with the existing dep-comment convention.
-- [ ] Errors surface as `ValueError`/HTTP errors that the ingest path turns into `documents.error_message`, consistent with the docling path (`backend/main.py:1342-1354`).
-- [ ] Typecheck/lint passes
+- [x] `LlamaParseParser(DocumentParser)` with `name = "llamaparse"` calls the LlamaParse cloud API (`LLAMA_CLOUD_API_KEY`), requesting **markdown** result type, and returns the markdown string — flattening any structured output (tables/layout) to markdown **at the boundary** per the v1 contract. *(REST flow: `POST /api/v1/parsing/upload` → poll `GET /job/{id}` to a terminal state → `GET /job/{id}/result/markdown`; requesting the markdown result is what makes LlamaParse flatten tables/layout server-side, so a structured object never crosses the seam. The `parse` signature stays sync per the US-037 boundary contract and blocks like docling.)*
+- [x] Constructor injects the HTTP client / key (testable seam), matching how `CohereReranker` / `TavilyProvider` take `http` + `api_key` (`backend/reranking.py:112`, `backend/web_search.py:118`). *(Takes a sync `httpx.Client` — not `AsyncClient` — because `parse` is synchronous; the stub test injects an `httpx.MockTransport` and constructing makes no network call.)*
+- [x] Chosen for the simplest API + strongest OCR/complex-layout coverage — the gap docling cannot cover; documented as the reason LlamaParse (not Unstructured) is the shipped example (ADR-0007 alternatives). *(Recorded in the `LlamaParseParser` docstring and already in ADR-0007 §Alternatives.)*
+- [x] The LlamaParse SDK/dep (or a documented raw-HTTP call) is added to `backend/requirements.txt` with a comment tying it to I6, consistent with the existing dep-comment convention. *(Raw-HTTP over the existing `httpx` dep — no `llama-cloud-services` SDK pulled in; the I6 coupling is documented in a comment above the `httpx` pin.)*
+- [x] Errors surface as `ValueError`/HTTP errors that the ingest path turns into `documents.error_message`, consistent with the docling path (`backend/main.py:1342-1354`). *(`raise_for_status()` → `httpx.HTTPStatusError`; job `ERROR`/`CANCELED`, empty markdown, and a missing job id each raise `ValueError`; all caught by the ingest endpoint's outer `except` and written to `error_message`.)*
+- [x] Typecheck/lint passes
 **Validation Test:**
 - **Setup:** `cd backend`; inject a stub HTTP transport returning a canned LlamaParse markdown response (no live key needed for the unit-level test).
 - **Steps:**
@@ -475,13 +476,14 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 - **Failure Indicator:** `.parse()` returns non-markdown (raw JSON / structured object), leaks a LlamaParse-typed object past the boundary, or hard-requires a live network call to construct.
 
 ### US-041: LlamaParse real round-trip smoke test (I6)
+**Status:** ✅ Done — `backend/test_llamaparse_smoke.py`: a standalone `python -m` script that drives `PARSER=llamaparse` → `get_parser_name()` → `build_parser()` → `LlamaParseParser` → live API on `test-fixtures/us018/sample.pdf` and asserts non-empty markdown containing the fixture's title (case/whitespace-normalized for live-reflow tolerance). Opt-in by key: **skips** (exit 0, not fail) when `LLAMA_CLOUD_API_KEY` is absent — verified the keyless path skips even with `PARSER=llamaparse` set (the guard fires before build). mypy-clean. Run one-liner in the module docstring. Verified 2026-06-22 (keyless skip path; the keyed live call is operator-run with a real key).
 **Description:** As a kit maintainer, I want a smoke test that runs a **real** LlamaParse round-trip on a fixture when a key is present, so that "the swap works" is proven, not asserted — a stub would not prove I6.
 **Acceptance Criteria:**
-- [ ] A smoke test sets `PARSER=llamaparse`, builds the parser via `build_parser`, and parses a real fixture (`test-fixtures/us018/sample.pdf`) through to a non-empty markdown string.
-- [ ] The smoke test runs against the live LlamaParse API when `LLAMA_CLOUD_API_KEY` is set, and **skips** (not fails) when the key is absent — so CI without the key stays green while a keyed run proves the round-trip (mirrors the opt-in-by-key posture of the reranker/web-search suites).
-- [ ] The test asserts the result is markdown (`str`, non-empty, contains recognizable content from the fixture), proving end-to-end: `PARSER` env → factory → adapter → live API → markdown → ready for `chunk_text`.
-- [ ] Documented one-liner to run it locally with a key.
-- [ ] Typecheck/lint passes
+- [x] A smoke test sets `PARSER=llamaparse`, builds the parser via `build_parser`, and parses a real fixture (`test-fixtures/us018/sample.pdf`) through to a non-empty markdown string. *(Builds via `build_parser(get_parser_name())` — the same env→factory wiring the ingest path uses — then `parser.parse(raw, "sample.pdf", "application/pdf")`.)*
+- [x] The smoke test runs against the live LlamaParse API when `LLAMA_CLOUD_API_KEY` is set, and **skips** (not fails) when the key is absent — so CI without the key stays green while a keyed run proves the round-trip (mirrors the opt-in-by-key posture of the reranker/web-search suites). *(Top-level key guard → `print("SKIP: …"); sys.exit(0)` before any import/build; `.env` is loaded for local convenience but a directly-exported key works too. Verified keyless → SKIP/exit 0.)*
+- [x] The test asserts the result is markdown (`str`, non-empty, contains recognizable content from the fixture), proving end-to-end: `PARSER` env → factory → adapter → live API → markdown → ready for `chunk_text`. *(Asserts `isinstance(str)`, non-empty, and the normalized title `"Ingestion Boundary Sample"` is present — the fixture content the US-038 docling test proves is extractable from `sample.pdf`.)*
+- [x] Documented one-liner to run it locally with a key. *(`LLAMA_CLOUD_API_KEY=llx-… PARSER=llamaparse python -m backend.test_llamaparse_smoke` — in the module docstring.)*
+- [x] Typecheck/lint passes *(mypy clean on the new file; the 2 `parsing.py` errors it surfaces on import are pre-existing and unchanged.)*
 **Validation Test:**
 - **Setup:** Export a valid `LLAMA_CLOUD_API_KEY`; `cd backend`; `PARSER=llamaparse`.
 - **Steps:**
@@ -491,11 +493,12 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 - **Failure Indicator:** The keyed run returns empty/non-markdown or errors; or the keyless run **fails** (rather than skipping), breaking CI for contributors without a LlamaParse account.
 
 ### US-042: Feed selected-parser output into the chunker unchanged (contract integration)
+**Status:** ✅ Done — verify-and-formalize (like US-036): the ingest path already feeds `chunk_text(get_selected_parser().parse(...))` with no parser-specific branch (the only code between parse and chunk is the document-level content-hash backfill). Added a US-042 marker comment at the `main.py` call site and `backend/test_parser_chunker_contract.py` (3 checks) proving both `DoclingParser` (real, `sample.md`) and `LlamaParseParser` (stubbed transport, `sample.pdf`) outputs flow through one identical `chunk_text` call to non-empty `list[str]`. mypy-clean. Verified 2026-06-22.
 **Description:** As a kit maintainer, I want any adapter's markdown output to flow into `chunk_text` (`backend/chunking.py:109`) with no parser-specific handling, so that the markdown-string contract is what actually couples the boundary to the chunker.
 **Acceptance Criteria:**
-- [ ] Ingestion calls `chunk_text(parser.parse(...))` with no `isinstance`/`name ==` branch on the parser between parse and chunk — the chunker stays parser-agnostic.
-- [ ] A test parses one fixture through both `DoclingParser` and `LlamaParseParser` (stubbed) and confirms both outputs are accepted by `chunk_text` and yield non-empty chunk lists.
-- [ ] Typecheck/lint passes
+- [x] Ingestion calls `chunk_text(parser.parse(...))` with no `isinstance`/`name ==` branch on the parser between parse and chunk — the chunker stays parser-agnostic. *(Already true at `main.py:1589→1613`; the only intervening code is the US-014 content-hash backfill (hashes `raw`, not parser-specific). Formalized with a US-042 marker comment at the `chunk_text(text)` call site.)*
+- [x] A test parses one fixture through both `DoclingParser` and `LlamaParseParser` (stubbed) and confirms both outputs are accepted by `chunk_text` and yield non-empty chunk lists. *(`test_parser_chunker_contract.py`: docling on real `sample.md` and a `MockTransport`-stubbed LlamaParse on `sample.pdf` both → non-empty `list[str]` via a single parser-agnostic `_chunk_via` helper; asserts each chunk is a non-empty `str` and carries the parsed content.)*
+- [x] Typecheck/lint passes *(new test mypy-clean; the 2 `parsing.py` import-surfaced errors are pre-existing/unchanged; the `main.py` change is comment-only.)*
 **Validation Test:**
 - **Setup:** `cd backend`; stub the LlamaParse transport.
 - **Steps:**
@@ -506,13 +509,14 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 - **Failure Indicator:** The chunker needs to know which parser produced the text, or one adapter's output is rejected by `chunk_text`.
 
 ### US-043: "Write your own adapter" authoring guide
+**Status:** ✅ Done — new `docs/ingestion-parser-adapters.md` (canonical how-to, sibling to `docs/model-surface.md`); referenced from the README docs table + new `PARSER`/`LLAMA_CLOUD_API_KEY` env rows, CONTEXT.md "Ingestion boundary", and ADR-0007 Consequences. The documented steps were **verified end-to-end** by following the guide to author/register/select a throwaway `EchoParser` (`PARSER=echo` → `get_parser_name` → `build_parser` → `parse` → non-empty `list[str]` via `chunk_text`), then reverting; all US-036–042 parser tests still green. Verified 2026-06-22.
 **Description:** As a buyer who needs a parser other than docling/LlamaParse (e.g. Unstructured.io, a homegrown OCR pipeline), I want a documented guide to author a `DocumentParser`, so that adding a parser is a known, supported path — not reverse-engineering.
 **Acceptance Criteria:**
-- [ ] A doc (e.g. `docs/` or backend README section) shows the minimal `DocumentParser` subclass (set `name`, implement `parse(...) -> str`), how to register it in `build_parser`, and how to select it via `PARSER`.
-- [ ] The guide states the **load-bearing rule**: the parser MUST return a normalized markdown **string**; structured output (tables/bboxes/layout) MUST be flattened to markdown here because the chunker is markdown/heading-aware only.
-- [ ] The guide names **Unstructured.io** as the canonical buyer-written example behind the same protocol (the rejected-as-default-but-valid alternative from ADR-0007), and links the LlamaParse adapter as the worked reference.
-- [ ] The guide points at the LlamaParse smoke test (US-041) as the template for proving a new adapter's round-trip.
-- [ ] The guide notes the future widening (structured output → layout-aware chunker) is explicitly out of v1, so an author should not try to return non-`str`.
+- [x] A doc (e.g. `docs/` or backend README section) shows the minimal `DocumentParser` subclass (set `name`, implement `parse(...) -> str`), how to register it in `build_parser`, and how to select it via `PARSER`. *(`docs/ingestion-parser-adapters.md` → "Worked example: a minimal `EchoParser`": Step 1 subclass, Step 2 add to **both** `PARSER` validation points (`ParserName` Literal + `get_parser_name` tuple — the doc calls out both so mypy stays green and an unknown value still fails fast), Step 3 register a `build_parser` branch, Step 4 `PARSER=<name>`.)*
+- [x] The guide states the **load-bearing rule**: the parser MUST return a normalized markdown **string**; structured output (tables/bboxes/layout) MUST be flattened to markdown here because the chunker is markdown/heading-aware only. *(Leads the doc — "The one rule: return a normalized Markdown string" — with the chunker-is-heading-aware-only rationale and the flatten-server-side-if-you-can note.)*
+- [x] The guide names **Unstructured.io** as the canonical buyer-written example behind the same protocol (the rejected-as-default-but-valid alternative from ADR-0007), and links the LlamaParse adapter as the worked reference. *(Dedicated "Unstructured.io: the canonical buyer-written adapter" section; `LlamaParseParser` linked as the worked reference for a real commercial/cloud adapter throughout.)*
+- [x] The guide points at the LlamaParse smoke test (US-041) as the template for proving a new adapter's round-trip. *("Prove the round-trip (don't just assert it)" section links `backend/test_llamaparse_smoke.py` as the template + `test_llamaparse_parser.py` for the stubbed unit-test shape, incl. the skip-without-key posture.)*
+- [x] The guide notes the future widening (structured output → layout-aware chunker) is explicitly out of v1, so an author should not try to return non-`str`. *(Blockquote under the load-bearing rule pins the `str` contract as a deliberate v1 decision with a known upgrade path, cross-referencing ADR-0007 → US-045; the closing checklist repeats "never return a non-`str`/vendor-typed object".)*
 **Validation Test:**
 - **Setup:** Follow the guide from scratch to author a trivial `EchoParser` returning `raw.decode()`.
 - **Steps:**
@@ -522,12 +526,12 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 - **Failure Indicator:** A step is missing/wrong (e.g. the registration point or the `PARSER` validation list isn't mentioned), or the guide implies a parser may return non-markdown/non-`str`.
 
 ### US-044: F3 capability-matrix rows for the ingestion boundary
-**Description:** As a buyer evaluating ingestion fidelity, I want the accepted gaps recorded in the F3 capability matrix, so that the markdown-string ceiling and OCR posture are honestly disclosed, per the "every accepted gap gets an F3 row" discipline.
+**Status:** ✅ Done — new `## F3 capability matrix` section in `docs/ingestion-parser-adapters.md` (the ingestion sibling of the model-surface F3 matrix in `docs/model-surface.md`; same `Capability | Status | Notes` table shape), cross-referenced from CONTEXT.md "Ingestion boundary" and ADR-0007 Consequences. Verified 2026-06-22.
 **Acceptance Criteria:**
-- [ ] F3 row: default parser is docling (text-based PDF/DOCX/HTML/MD); **OCR/scanned/image-only is out-of-scope for the default** (PRD §3.3) — covered only by selecting the LlamaParse adapter.
-- [ ] F3 row: the boundary output contract is a **markdown string (v1)** — table structure / layout fidelity beyond what markdown preserves is a documented **future widening**, not a v1 feature.
-- [ ] F3 row: `PARSER=unstructured` is a buyer-written adapter slot, not a shipped working adapter (LlamaParse is the one shipped commercial example).
-- [ ] Rows cite ADR-0007.
+- [x] F3 row: default parser is docling (text-based PDF/DOCX/HTML/MD); **OCR/scanned/image-only is out-of-scope for the default** (PRD §3.3) — covered only by selecting the LlamaParse adapter. *(Two rows: docling default = ✅ Tested; "OCR / scanned / image-only" = ❌ Out of scope for the default, "covered only by selecting the LlamaParse adapter", citing PRD §3.3 + ADR-0007.)*
+- [x] F3 row: the boundary output contract is a **markdown string (v1)** — table structure / layout fidelity beyond what markdown preserves is a documented **future widening**, not a v1 feature. *("Boundary output contract = markdown `str` (v1)" = ⚠️ Markdown-string ceiling; notes the future structure-carrying widening touches `chunking.py` (US-045).)*
+- [x] F3 row: `PARSER=unstructured` is a buyer-written adapter slot, not a shipped working adapter (LlamaParse is the one shipped commercial example). *("`PARSER=unstructured`" = ❌ Buyer-written adapter slot (not shipped); fails loudly, never falls back to docling; LlamaParse is the one shipped commercial example.)*
+- [x] Rows cite ADR-0007. *(Every row's Notes cell ends in "ADR-0007"; the section preamble states "All rows are decided in ADR-0007".)*
 **Validation Test:**
 - **Setup:** Open the F3 matrix.
 - **Steps:** 1. Locate the three ingestion rows. 2. Confirm each cites ADR-0007 and matches the decisions here.
@@ -535,11 +539,11 @@ docling already sits behind a clean implicit seam: it lives only in `backend/par
 - **Failure Indicator:** The matrix overstates ingestion (claims OCR/table fidelity by default), or omits the markdown-string ceiling.
 
 ### US-045: Document the future structured-output widening (non-goal boundary)
-**Description:** As a kit maintainer, I want the layout-aware / structured-output future change captured as a documented non-goal seam, so that v1's markdown-string contract is a deliberate pin with a known upgrade path, not an oversight.
+**Status:** ✅ Done — verify-and-formalize: the widening is now documented as a deliberate non-goal seam in all three places (ADR-0007 Alternatives, CONTEXT "Ingestion boundary", `docs/ingestion-parser-adapters.md`), each US-045-tagged; AC3 re-verified via the US-036 grep + `test_parsing_seam.py`. Verified 2026-06-22.
 **Acceptance Criteria:**
-- [ ] ADR-0007 (already) + CONTEXT record that widening the boundary's output type to carry structure (tables/bboxes/layout) for a layout-aware chunker is a **future** change that touches `chunking.py`, explicitly not built in v1.
-- [ ] The "write your own adapter" guide (US-043) references this so an author understands why `parse` returns `str` today.
-- [ ] No v1 code carries a non-`str` document type across the boundary (consistent with US-036's verification).
+- [x] ADR-0007 (already) + CONTEXT record that widening the boundary's output type to carry structure (tables/bboxes/layout) for a layout-aware chunker is a **future** change that touches `chunking.py`, explicitly not built in v1. *(ADR-0007 §"Alternatives considered and rejected" → "Widen the boundary output type now to carry structure (tables / bounding boxes / layout) … Rejected for v1 … also touches `chunking.py` … a deliberate v1 pin with a known upgrade path (US-045)". CONTEXT "Ingestion boundary" → "Markdown-string output contract (v1, pinned)" bullet, now tagged "future change (US-045) that also touches `chunking.py` — explicitly not v1".)*
+- [x] The "write your own adapter" guide (US-043) references this so an author understands why `parse` returns `str` today. *(`docs/ingestion-parser-adapters.md` → the "Why `str` and not something richer?" blockquote under "The one rule" ("…a future *layout-aware* chunker… also rewrites `chunking.py` — it is out of v1 (ADR-0007 → US-045). Do not try to return a non-`str` today"), reinforced by the F3 matrix "Markdown-string ceiling" row and the closing checklist item.)*
+- [x] No v1 code carries a non-`str` document type across the boundary (consistent with US-036's verification). *(Re-ran the US-036 grep — docling confined to `backend/parsing.py` only; `chunking.py` has 0 docling refs; all three `DocumentParser.parse` impls return `-> str`; `backend/test_parsing_seam.py` green — 3/3 checks.)*
 **Validation Test:**
 - **Setup:** Read ADR-0007 + CONTEXT "Ingestion boundary" + the authoring guide.
 - **Steps:** 1. Confirm each states the markdown-string pin and the future widening. 2. Re-run US-036's grep to confirm no non-`str` document type crosses the seam in v1.

@@ -53,7 +53,7 @@ from model_config import (
     resolve_chat_mode_default,
     responses_capable,
 )
-from parsing import UnsupportedFormatError, parse_document, warmup as warmup_parsing
+from parsing import UnsupportedFormatError, get_selected_parser, warmup as warmup_parsing
 from permissions import (
     AclGrant,
     PrincipalType,
@@ -371,9 +371,16 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _on_startup() -> None:
-    # US-018: front-load the docling DocumentConverter so the first
-    # file-upload ingest doesn't pay multi-second import + backend init on the
-    # request path. Failures are swallowed — the lazy path still works.
+    # US-039: resolve the PARSER-selected parser once at startup so a
+    # misconfigured PARSER (unknown value, or a commercial adapter with no API
+    # key) fails CLOSED at boot rather than on the first upload. Default
+    # PARSER=docling, so today's behavior is unchanged.
+    get_selected_parser()
+    # US-018: front-load the document parser (its heavy import + model init)
+    # so the first file-upload ingest doesn't pay that multi-second cost on the
+    # request path. Failures are swallowed — the lazy path still works. Parser
+    # internals stay behind parsing.py (the ADR-0007 seam); main.py only knows
+    # the boundary entry points (warmup_parsing / get_selected_parser / parse).
     warmup_parsing()
     # US-023: introspect the analytics schema once at startup so the system
     # prompt + tool description don't pay an extra DB round-trip per chat
@@ -1572,13 +1579,14 @@ async def ingest_document(
 
         try:
             raw = await _download_storage_object(http, user, doc["storage_path"])
-            # US-018: multi-format parsing via docling. `parse_document`
-            # raises `UnsupportedFormatError` on unknown types and `ValueError`
-            # with a human-readable message on parse failure — both are caught
-            # by the outer except below and surfaced as `status=error` with
-            # `error_message` so the UI can show why a given file failed.
+            # US-018/US-039: multi-format parsing via the PARSER-selected parser
+            # (ADR-0007). `.parse` raises `UnsupportedFormatError` on unknown
+            # types and `ValueError` with a human-readable message on parse
+            # failure — both are caught by the outer except below and surfaced
+            # as `status=error` with `error_message` so the UI can show why a
+            # given file failed.
             try:
-                text = parse_document(
+                text = get_selected_parser().parse(
                     raw,
                     filename=doc.get("filename", ""),
                     content_type=doc.get("content_type"),
@@ -1597,6 +1605,11 @@ async def ingest_document(
                     content_hash=hashlib.sha256(raw).hexdigest(),
                 )
 
+            # US-042 (ADR-0007): the markdown `str` is the ONLY coupling between
+            # the parser boundary and the chunker — `chunk_text` is fed every
+            # parser's output identically, with no isinstance/`name ==` branch on
+            # the selected parser between parse and chunk. Proven by
+            # `test_parser_chunker_contract.py`.
             chunks = chunk_text(text)
 
             # US-038: re-chunking caveat. Deleting chunks cascades and drops

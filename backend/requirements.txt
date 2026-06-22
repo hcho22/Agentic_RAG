@@ -1,5 +1,10 @@
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
+# US-040 (I6): the LlamaParse ingestion adapter (parsing.py:LlamaParseParser)
+# talks to the LlamaCloud parsing REST API directly over httpx (upload → poll →
+# fetch markdown) — no llama-cloud-services SDK dependency is added, the API is
+# small and the SDK would pull a large transitive tree. httpx is already a core
+# dep below; this comment documents the I6 commercial-adapter coupling to it.
 httpx==0.27.2
 openai>=1.70.0
 supabase>=2.15.0
