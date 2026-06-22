@@ -19,6 +19,7 @@ messages table, and runs a manual tool-call loop that exposes the
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -376,11 +377,12 @@ async def _on_startup() -> None:
     # key) fails CLOSED at boot rather than on the first upload. Default
     # PARSER=docling, so today's behavior is unchanged.
     get_selected_parser()
-    # US-018: front-load the document parser (its heavy import + model init)
-    # so the first file-upload ingest doesn't pay that multi-second cost on the
-    # request path. Failures are swallowed — the lazy path still works. Parser
-    # internals stay behind parsing.py (the ADR-0007 seam); main.py only knows
-    # the boundary entry points (warmup_parsing / get_selected_parser / parse).
+    # US-018: front-load docling's heavy import + model init (only when
+    # PARSER=docling, the default) so the first file-upload ingest doesn't pay
+    # that multi-second cost on the request path; a non-docling parser skips it.
+    # Failures are swallowed — the lazy path still works. Parser internals stay
+    # behind parsing.py (the ADR-0007 seam); main.py only knows the boundary
+    # entry points (warmup_parsing / get_selected_parser / parse).
     warmup_parsing()
     # US-023: introspect the analytics schema once at startup so the system
     # prompt + tool description don't pay an extra DB round-trip per chat
@@ -1586,7 +1588,8 @@ async def ingest_document(
             # as `status=error` with `error_message` so the UI can show why a
             # given file failed.
             try:
-                text = get_selected_parser().parse(
+                text = await asyncio.to_thread(
+                    get_selected_parser().parse,
                     raw,
                     filename=doc.get("filename", ""),
                     content_type=doc.get("content_type"),

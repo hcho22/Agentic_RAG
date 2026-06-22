@@ -304,14 +304,16 @@ class LlamaParseParser(DocumentParser):
 
     def _await_terminal(self, job_id: str, status: str) -> None:
         """Poll the job to a terminal state. Raises on failure / timeout."""
-        for _ in range(self.max_polls):
-            status = (status or "").upper()
+        status = (status or "").upper()
+        for poll in range(self.max_polls + 1):
             if status in self._SUCCESS_STATES:
                 return
             if status in self._FAILURE_STATES:
                 raise ValueError(
                     f"LlamaParse job {job_id} ended with status {status}"
                 )
+            if poll == self.max_polls:
+                break
             time.sleep(self.poll_interval)
             r = self.http.get(
                 f"{self.BASE_URL}/job/{job_id}", headers=self._headers()
@@ -473,6 +475,8 @@ def _default_suffix(fmt: InputFormat) -> str:
 # this at boot to front-load the cost.
 def warmup() -> None:
     if os.environ.get("SKIP_DOCLING_WARMUP"):
+        return
+    if get_parser_name() != "docling":
         return
     try:
         _get_converter()
