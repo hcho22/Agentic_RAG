@@ -8,7 +8,7 @@
 Document ingestion converts an uploaded file (PDF / DOCX / HTML / MD / TXT)
 into normalized text that the chunker can split. Today that conversion is done
 by `docling`, which lives only in `backend/parsing.py`: the single entry
-`parse_document(raw, filename, content_type) -> str` (`backend/parsing.py:112`)
+`parse_document(raw, filename, content_type) -> str` (`backend/parsing.py:439`)
 returns normalized markdown, `.txt` bypasses docling and is returned verbatim,
 and the `pypdfium2` PDF fallback is contained inside the same module. Nothing
 docling-typed is consumed downstream — `backend/chunking.py`'s
