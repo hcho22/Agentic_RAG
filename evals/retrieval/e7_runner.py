@@ -161,6 +161,42 @@ P3_LABEL = "should_escalate"
 # not the runtime gate, so the two thresholds are not interchangeable.
 DEFAULT_FAITHFULNESS_JUDGE_MIN = 4
 
+# Issue #26: the P3 mislabel-ratio guard ceiling. The false-resolve safety ceiling
+# (US-055/059) is only proven over P3 rows that actually EXERCISE the faithfulness
+# gate (cleared retrieval, drafted, and got a verdict). A row that escalates earlier
+# is `mislabeled` — a gold-authoring / config defect (e.g. τ_sim drift or a degraded
+# answerer making rows escalate before the gate), not a pipeline result — and it
+# shrinks the effective sample. The existing positive control (`E7P3Result.passed`)
+# only fails the run when EVERY row is mislabeled (zero exercised); this ceiling
+# governs the PARTIAL case: when the mislabeled FRACTION over the full presented P3
+# population exceeds it, the leg is failed/flagged low-confidence so heavy gold drift
+# trips the gate instead of quietly diluting the false-resolve rate (latent today at
+# the 3-row gold, a real masking path as the P3 gold grows). Default 0.5 (a majority-
+# mislabeled P3 leg is a gold defect); override via E7_P3_MISLABEL_RATIO_MAX or
+# --p3-mislabel-ratio-max. The denominator is the full presented population
+# (`n_questions`), matching the false-resolve rate's — NOT `len(exercised)`.
+DEFAULT_P3_MISLABEL_RATIO_MAX = 0.5
+
+
+def get_p3_mislabel_ratio_max() -> float:
+    """Resolve the issue-#26 P3 mislabel-ratio ceiling from E7_P3_MISLABEL_RATIO_MAX
+    (a fraction in [0,1]); falls back to DEFAULT_P3_MISLABEL_RATIO_MAX. An unparseable
+    or out-of-range value fails CLOSED (ValueError) rather than silently disabling the
+    guard — a misconfigured safety ceiling must not read as "no ceiling"."""
+    raw = os.environ.get("E7_P3_MISLABEL_RATIO_MAX")
+    if raw is None or not raw.strip():
+        return DEFAULT_P3_MISLABEL_RATIO_MAX
+    try:
+        val = float(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"E7_P3_MISLABEL_RATIO_MAX must be a float in [0,1], got {raw!r}"
+        ) from e
+    if not 0.0 <= val <= 1.0:
+        raise ValueError(f"E7_P3_MISLABEL_RATIO_MAX must be in [0,1], got {val}")
+    return val
+
+
 # A retrieval callable: question -> ranked results (each carrying the pre-fusion
 # `cosine_similarity`, US-046). Injected so the orchestrator is unit-testable with
 # a call-counting fake AND so the production path wires it to the real
@@ -875,11 +911,39 @@ class E7P3Result:
     @property
     def false_resolve_rate(self) -> float | None:
         """Wrongly auto-resolved / unanswerable over the P3 population — the
-        SAFETY number the false-resolve ceiling governs (US-055/059). `None` over
-        an empty population (a rate over zero questions is structurally blind)."""
+        SAFETY number the false-resolve ceiling governs (US-055/059).
+
+        Denominator is the FULL presented P3 population (`len(self.decisions)` ==
+        `n_questions`), INCLUDING `mislabeled` rows; numerator is the false-resolves
+        only (a mislabeled row escalated, so it is never a false-resolve and is
+        excluded from the numerator but kept in the denominator). This is the
+        operating-metric meaning — "of all unanswerable questions presented, what
+        fraction did we wrongly auto-resolve" — consistent with how P1a/P1b feed the
+        same summed consolidated rate. It is deliberately NOT `len(exercised)`: an
+        exercised-only denominator would contradict this docstring and mix per-
+        population denominators in the sum-based consolidated rate (the rejected
+        "denominator misread", issue #26). The dilution risk a high mislabeled
+        fraction creates is guarded separately by the mislabel-ratio gate
+        (`mislabel_ratio`, issue #26), not by changing this denominator.
+
+        `None` over an empty population (a rate over zero questions is structurally
+        blind)."""
         if not self.decisions:
             return None
         return len(self.false_resolves) / len(self.decisions)
+
+    @property
+    def mislabel_ratio(self) -> float | None:
+        """Fraction of the presented P3 population that was `mislabeled` (escalated
+        before exercising the faithfulness gate). Denominator is the full presented
+        population (`len(self.decisions)` == `n_questions`), matching
+        `false_resolve_rate`. A high ratio shrinks the effective sample the
+        false-resolve ceiling is measured over and is guarded by the issue-#26
+        mislabel-ratio gate in `e7_pinned_invariants_failed`. `None` over an empty
+        population (a ratio over zero rows is structurally blind, like the rate)."""
+        if not self.decisions:
+            return None
+        return len(self.mislabeled) / len(self.decisions)
 
     @property
     def total_draft_calls(self) -> int:
@@ -918,6 +982,7 @@ class E7P3Result:
             "n_escalated_at_faithfulness": len(self.escalated_at_faithfulness),
             "n_false_resolve": len(self.false_resolves),
             "n_mislabeled": len(self.mislabeled),
+            "mislabel_ratio": self.mislabel_ratio,
             "false_resolve_rate": self.false_resolve_rate,
             "total_draft_calls": self.total_draft_calls,
             "total_judge_calls": self.total_judge_calls,
@@ -1730,8 +1795,14 @@ def compute_e7_metrics(
     is inert there and the retrieval-leg invariants own per-PR safety. A P3 row that
     escalated before the faithfulness gate (`mislabeled`) is a *safe* outcome — it
     stays in the P3 (faithfulness-leg) denominator but is NOT counted toward the
-    false-resolve numerator. This function only computes the rates; US-059 enforces
-    the ceiling.
+    false-resolve numerator. The P3 false-resolve denominator is therefore the FULL
+    presented P3 population (`p3.n_questions`, mislabeled rows included), NOT the
+    exercised-only subset: that full-population denominator is the operating-metric
+    meaning and keeps this sum-based consolidated rate from mixing per-population
+    denominators (the rejected "exercised-only" misread, issue #26). The dilution a
+    heavily-mislabeled P3 leg would cause is caught by the separate mislabel-ratio
+    guard (issue #26), never by shrinking this denominator. This function only
+    computes the rates; US-059 enforces the ceiling.
     """
     deflection = ConsolidatedRate(name="deflection", safety=False)
     false_escalate = ConsolidatedRate(name="false_escalate", safety=False)
@@ -2367,6 +2438,7 @@ def e7_pinned_invariants_failed(
     non_disclosure: E7P1bNonDisclosure | None,
     p3_result: E7P3Result | None,
     ceiling_verdict: FalseResolveCeilingVerdict,
+    p3_mislabel_ratio_max: float = DEFAULT_P3_MISLABEL_RATIO_MAX,
 ) -> bool:
     """US-059: the E7 runner's pinned exit-code decision — pure over the scored
     legs so the per-PR and weekly fail conditions are unit-testable (amain only
@@ -2394,6 +2466,13 @@ def e7_pinned_invariants_failed(
         non-empty but entirely-mislabeled P3 leg (every row escalates at the
         retrieval/draft leg, so the rate reads a vacuous measured 0% that never
         breaches). Either way the gold drifted out from under the ceiling;
+      * a P3 mislabel-RATIO breach (issue #26): the positive control above closes
+        only the TOTAL-dilution case (zero exercised); a leg that is HEAVILY but not
+        entirely mislabeled still exercises ≥1 row, passes the positive control, yet
+        measures the false-resolve ceiling over a shrunken sample that can mask a bad
+        faithfulness gate as the P3 gold grows. This guard fails the run when the
+        mislabeled fraction over the full presented population exceeds
+        `p3_mislabel_ratio_max`, catching that partial dilution;
       * a MEASURED faithfulness-leg (P3) false-resolve rate above the buyer's ceiling.
 
     A per-PR run carries no P3 leg (p3_result is None), so the P3 guards never trip
@@ -2501,6 +2580,39 @@ def e7_pinned_invariants_failed(
                     f"{d.question_id}({d.escalate_leg})" for d in p3_result.mislabeled
                 ),
             )
+        failed = True
+
+    # Issue #26: the P3 mislabel-RATIO guard — the PARTIAL-dilution complement of the
+    # positive control above. That control fails closed only when EVERY P3 row is
+    # mislabeled (zero exercised); a leg that is heavily but not entirely mislabeled
+    # still exercises ≥1 row (so `passed` is True) yet runs the false-resolve ceiling
+    # over a shrunken sample — latent today at the 3-row gold, a real masking path as
+    # the P3 gold grows. Gated on `passed` so the empty / all-mislabeled cases stay
+    # owned by the positive control above (one clear failure reason each); fires only
+    # when the mislabeled FRACTION over the full presented population STRICTLY exceeds
+    # the ceiling. Inert per-PR (p3_result is None → no P3 leg).
+    if (
+        p3_result is not None
+        and p3_result.passed
+        and p3_result.mislabel_ratio is not None
+        and p3_result.mislabel_ratio > p3_mislabel_ratio_max
+    ):
+        log.error(
+            "E7 P3 MISLABEL-RATIO BREACH — %d/%d P3 row(s) (%.0f%%) escalated before "
+            "the faithfulness gate (mislabeled), exceeding the max %.0f%% "
+            "(E7_P3_MISLABEL_RATIO_MAX, issue #26). The false-resolve ceiling is then "
+            "measured over only %d exercised row(s) — a diluted sample that can mask a "
+            "bad faithfulness gate. Re-author the drifted P3 gold so retrieval reads "
+            "strong (or check τ_sim / a degraded answerer): %s",
+            len(p3_result.mislabeled),
+            p3_result.n_questions,
+            p3_result.mislabel_ratio * 100.0,
+            p3_mislabel_ratio_max * 100.0,
+            len(p3_result.exercised),
+            ", ".join(
+                f"{d.question_id}({d.escalate_leg})" for d in p3_result.mislabeled
+            ),
+        )
         failed = True
 
     # US-059: the false-resolve ceiling is a pinned SAFETY invariant — a MEASURED
@@ -2643,9 +2755,29 @@ async def amain() -> int:
             "(US-050)."
         ),
     )
+    parser.add_argument(
+        "--p3-mislabel-ratio-max",
+        type=float,
+        default=None,
+        help=(
+            "Issue #26: max fraction of P3 rows allowed to be `mislabeled` "
+            "(escalated before the faithfulness gate) before the weekly run fails. "
+            "Guards against a heavily-mislabeled P3 gold quietly diluting the "
+            "false-resolve sample (complements the positive control, which only "
+            "fails on a fully-mislabeled leg). Default: E7_P3_MISLABEL_RATIO_MAX via "
+            "get_p3_mislabel_ratio_max() (0.5)."
+        ),
+    )
     args = parser.parse_args()
     if not 1 <= args.faithfulness_judge_min <= 5:
         parser.error("--faithfulness-judge-min must be in [1,5]")
+    p3_mislabel_ratio_max = (
+        args.p3_mislabel_ratio_max
+        if args.p3_mislabel_ratio_max is not None
+        else get_p3_mislabel_ratio_max()
+    )
+    if not 0.0 <= p3_mislabel_ratio_max <= 1.0:
+        parser.error("--p3-mislabel-ratio-max must be in [0,1]")
 
     sweep_tau_sims: list[float] = []
     sweep_n_mins: list[int] = []
@@ -3047,6 +3179,7 @@ async def amain() -> int:
         non_disclosure=non_disclosure,
         p3_result=p3_result,
         ceiling_verdict=ceiling_verdict,
+        p3_mislabel_ratio_max=p3_mislabel_ratio_max,
     )
     return 1 if failed else 0
 

@@ -128,6 +128,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -139,6 +140,7 @@ from escalation import GENERIC_DEFERRAL, EscalationConfig  # noqa: E402
 from retrieval import SearchDocumentsResult  # noqa: E402
 
 from evals.retrieval.e7_runner import (  # noqa: E402
+    DEFAULT_P3_MISLABEL_RATIO_MAX,
     E7Metrics,
     E7P1aResult,
     E7P1bNonDisclosure,
@@ -156,6 +158,7 @@ from evals.retrieval.e7_runner import (  # noqa: E402
     assert_p1b_non_disclosure,
     compute_e7_metrics,
     e7_pinned_invariants_failed,
+    get_p3_mislabel_ratio_max,
     render_e7_false_resolve_ceiling_section,
     render_e7_p1b_non_disclosure_section,
     run_e7_p1a,
@@ -895,9 +898,12 @@ def test_p3_to_dict_shape() -> None:
     for key in ("population", "label", "tau_sim", "n_min", "match_threshold",
                 "faithfulness_judge_min", "judge_model", "n_questions",
                 "n_escalated_at_faithfulness", "n_false_resolve", "n_mislabeled",
-                "false_resolve_rate", "total_draft_calls", "total_judge_calls",
-                "false_resolves", "mislabeled", "passed", "decisions"):
+                "mislabel_ratio", "false_resolve_rate", "total_draft_calls",
+                "total_judge_calls", "false_resolves", "mislabeled", "passed",
+                "decisions"):
         _check(key in d, f"P3 result dict missing {key!r}")
+    _check(d["mislabel_ratio"] == 0.0,
+           f"a fully-exercised P3 leg has 0 mislabel_ratio, got {d['mislabel_ratio']}")
     _check(d["population"] == "P3", f"population must be P3, got {d['population']!r}")
     _check(d["label"] == "should_escalate", f"label must be should_escalate, got {d['label']!r}")
     dec = d["decisions"][0]
@@ -1326,6 +1332,148 @@ def test_exit_p1a_gate_clear_fails() -> None:
     )
     _check(failed is True, "a P1a gate clear hard-fails the run regardless of the P3 ceiling")
     print("ok: a P1a retrieval-gate clear still hard-fails through the extracted decision")
+
+
+# --- Issue #26: P3 mislabel-ratio guard (partial-dilution complement) -------
+
+
+def test_p3_mislabel_ratio_property() -> None:
+    """Issue #26: `mislabel_ratio` is mislabeled / full presented population (the
+    same denominator as `false_resolve_rate`, NOT exercised-only), and `None` over an
+    empty population. Here 2 of 3 rows escalate at the retrieval gate (mislabeled) and
+    1 exercises the faithfulness gate -> 2/3."""
+    weak_a = _p3("e7-p3-mr-a", "q-weak-a")
+    weak_b = _p3("e7-p3-mr-b", "q-weak-b")
+    strong = _p3("e7-p3-mr-c", "q-strong-c")
+    result, _, _, _ = _run_p3(
+        [weak_a, weak_b, strong],
+        {weak_a["question"]: WEAK, weak_b["question"]: WEAK, strong["question"]: STRONG},
+        scores_by_question={strong["question"]: {"faithfulness": 2, "helpfulness": 2}},
+    )
+    _check(result.n_questions == 3, f"3 P3 rows, got {result.n_questions}")
+    _check(len(result.mislabeled) == 2 and len(result.exercised) == 1,
+           "2 mislabeled (weak) + 1 exercised (strong, escalated at faithfulness)")
+    _check(abs(result.mislabel_ratio - 2 / 3) < 1e-9,
+           f"mislabel_ratio is 2/3 over the full population, got {result.mislabel_ratio}")
+    _check(result.false_resolve_rate == 0.0,
+           "no false-resolve, and the mislabeled rows stay in the rate's denominator")
+
+    empty, _, _, _ = _run_p3([], {})
+    _check(empty.mislabel_ratio is None, "mislabel_ratio over an empty population is None")
+    print("ok: mislabel_ratio is mislabeled/full-population (None when empty)")
+
+
+def test_exit_p3_partial_mislabel_over_max_fails() -> None:
+    """Issue #26 core: a HEAVILY but not entirely mislabeled P3 leg hard-fails the
+    weekly run. 2 of 3 rows are mislabeled (2/3 ≈ 67% > the 0.5 max) while 1 row
+    exercises the gate, so `passed` is True (the positive control does NOT fire) and,
+    with 0 false-resolves, the ceiling is NOT breached — the mislabel-ratio guard is
+    therefore the SOLE reason the run fails, exactly the partial-dilution gap the
+    issue closes."""
+    p1a = _clean_p1a()
+    weak_a = _p3("e7-p3-pm-a", "q-weak-a")
+    weak_b = _p3("e7-p3-pm-b", "q-weak-b")
+    strong = _p3("e7-p3-pm-c", "q-strong-c")
+    p3, _, _, _ = _run_p3(
+        [weak_a, weak_b, strong],
+        {weak_a["question"]: WEAK, weak_b["question"]: WEAK, strong["question"]: STRONG},
+        scores_by_question={strong["question"]: {"faithfulness": 2, "helpfulness": 2}},
+    )
+    _check(p3.passed is True, "≥1 row exercised the gate, so the positive control passes")
+    _check(p3.false_resolves == [], "no false-resolve, so the ceiling itself is not breached")
+    verdict = _verdict_over(p1a, p3, 0.05)
+    _check(verdict.breached is False, "0% measured false-resolve does not breach a 5% ceiling")
+
+    failed = e7_pinned_invariants_failed(
+        p1a_result=p1a, p1b_result=None, non_disclosure=None,
+        p3_result=p3, ceiling_verdict=verdict, p3_mislabel_ratio_max=0.5,
+    )
+    _check(failed is True,
+           "a partially-but-heavily mislabeled P3 leg (2/3 > 0.5) must fail the run")
+    print("ok: a partial-mislabel P3 leg over the ratio max fails the run (issue #26 guard)")
+
+
+def test_exit_p3_mislabel_ratio_boundary_and_configurable() -> None:
+    """Issue #26: the guard fires only when the ratio STRICTLY exceeds the max, and
+    the max is configurable. A 1-mislabeled-of-2 leg (ratio exactly 0.5) does NOT trip
+    a 0.5 max (`>`, not `>=`), but DOES trip a stricter 0.4 max — the same leg, two
+    thresholds."""
+    p1a = _clean_p1a()
+    weak = _p3("e7-p3-bd-a", "q-weak-a")
+    strong = _p3("e7-p3-bd-b", "q-strong-b")
+    p3, _, _, _ = _run_p3(
+        [weak, strong],
+        {weak["question"]: WEAK, strong["question"]: STRONG},
+        scores_by_question={strong["question"]: {"faithfulness": 2, "helpfulness": 2}},
+    )
+    _check(p3.passed is True and p3.mislabel_ratio == 0.5,
+           f"1 of 2 rows mislabeled -> ratio 0.5, passed; got {p3.mislabel_ratio}")
+    verdict = _verdict_over(p1a, p3, 0.05)
+
+    at_max = e7_pinned_invariants_failed(
+        p1a_result=p1a, p1b_result=None, non_disclosure=None,
+        p3_result=p3, ceiling_verdict=verdict, p3_mislabel_ratio_max=0.5,
+    )
+    _check(at_max is False, "ratio exactly at the max does not fire (the bar is 'exceeds', strict >)")
+
+    stricter = e7_pinned_invariants_failed(
+        p1a_result=p1a, p1b_result=None, non_disclosure=None,
+        p3_result=p3, ceiling_verdict=verdict, p3_mislabel_ratio_max=0.4,
+    )
+    _check(stricter is True, "the same 0.5-ratio leg fails under a stricter 0.4 max (configurable)")
+    print("ok: the mislabel-ratio guard is strict-> and configurable (0.5 passes 0.5, fails 0.4)")
+
+
+def test_exit_p3_all_mislabeled_owned_by_positive_control_not_ratio_guard() -> None:
+    """Issue #26: the empty / all-mislabeled cases stay owned by the positive control
+    (one clear failure reason). An all-mislabeled leg has `passed=False`, so the
+    ratio guard is gated OFF for it — the run still fails (via the positive control),
+    and lowering the ratio guard's threshold to 0 cannot change that outcome, proving
+    the two guards partition the space rather than double-decide it."""
+    p1a = _clean_p1a()
+    a = _p3("e7-p3-am-a", "q-weak-a")
+    b = _p3("e7-p3-am-b", "q-weak-b")
+    p3, _, _, _ = _run_p3([a, b], {a["question"]: WEAK, b["question"]: WEAK})
+    _check(p3.passed is False and p3.exercised == [],
+           "an all-mislabeled leg never exercises the gate (positive control owns it)")
+    verdict = _verdict_over(p1a, p3, 0.05)
+
+    failed = e7_pinned_invariants_failed(
+        p1a_result=p1a, p1b_result=None, non_disclosure=None,
+        p3_result=p3, ceiling_verdict=verdict, p3_mislabel_ratio_max=0.99,
+    )
+    _check(failed is True,
+           "an all-mislabeled leg fails via the positive control even at a lax 0.99 ratio max")
+    print("ok: all-mislabeled stays owned by the positive control, not the ratio guard")
+
+
+def test_get_p3_mislabel_ratio_max_env() -> None:
+    """Issue #26: the ratio max resolves from E7_P3_MISLABEL_RATIO_MAX with a default
+    fallback, and fails CLOSED (ValueError) on an unparseable or out-of-range value —
+    a misconfigured safety ceiling must never read as 'no ceiling'."""
+    saved = os.environ.get("E7_P3_MISLABEL_RATIO_MAX")
+    try:
+        os.environ.pop("E7_P3_MISLABEL_RATIO_MAX", None)
+        _check(get_p3_mislabel_ratio_max() == DEFAULT_P3_MISLABEL_RATIO_MAX,
+               "unset env falls back to the default")
+
+        os.environ["E7_P3_MISLABEL_RATIO_MAX"] = "0.3"
+        _check(get_p3_mislabel_ratio_max() == 0.3, "a valid env value is honored")
+
+        for bad in ("1.5", "-0.1", "abc", "nan"):
+            os.environ["E7_P3_MISLABEL_RATIO_MAX"] = bad
+            raised = False
+            try:
+                get_p3_mislabel_ratio_max()
+            except ValueError:
+                raised = True
+            _check(raised, f"a bad ratio max {bad!r} must fail closed (ValueError)")
+    finally:
+        if saved is None:
+            os.environ.pop("E7_P3_MISLABEL_RATIO_MAX", None)
+        else:
+            os.environ["E7_P3_MISLABEL_RATIO_MAX"] = saved
+    print("ok: get_p3_mislabel_ratio_max honors env + default and fails closed on bad input")
 
 
 # --- US-056 knob sweep + knee fixtures + tests ----------------------------
@@ -1943,6 +2091,11 @@ def main() -> int:
         test_exit_per_pr_shape_without_p3_does_not_fail,
         test_exit_measured_ceiling_breach_fails,
         test_exit_p1a_gate_clear_fails,
+        test_p3_mislabel_ratio_property,
+        test_exit_p3_partial_mislabel_over_max_fails,
+        test_exit_p3_mislabel_ratio_boundary_and_configurable,
+        test_exit_p3_all_mislabeled_owned_by_positive_control_not_ratio_guard,
+        test_get_p3_mislabel_ratio_max_env,
         test_sweep_curve_and_knee,
         test_sweep_memoizes_llm_calls_per_question,
         test_sweep_no_point_under_ceiling_is_reported,

@@ -201,6 +201,13 @@ Because the false-resolve ceiling is fed **solely** by the P3 faithfulness leg (
 The P3 positive control (`E7P3Result.passed`) requires at least one P3 row to actually reach a faithfulness verdict — clear retrieval, draft a non-empty answer, and get judged — not merely to exist.
 That closes **both** ways gold drift could silently disarm the ceiling: an **empty** P3 leg (the rate is `None`, unmeasured, never a breach) **and** a non-empty but **entirely-mislabeled** P3 leg (every row escalates at the retrieval/draft leg, so the rate reads a vacuous measured 0% that never breaches).
 In either case the runner exits non-zero rather than reporting green with the pinned safety invariant silently unmeasured.
+
+The positive control only catches **total** dilution — a leg where *every* row is mislabeled (or empty), so zero rows exercise the gate and the rate is `None` or a vacuous 0%.
+A leg that is **heavily but not entirely** mislabeled still exercises ≥1 row, so it *passes* the positive control, yet it measures the false-resolve ceiling over a shrunken sample that can mask a bad faithfulness gate (latent today at the 3-row gold, a real masking path as the P3 gold grows).
+The **mislabel-ratio guard** (issue #26) closes that partial case: gated on the positive control passing, it fails the run when the mislabeled **fraction over the full presented P3 population** strictly exceeds `E7_P3_MISLABEL_RATIO_MAX` (default `0.5` — a majority-mislabeled P3 leg is a gold defect; override via that env var or the `--p3-mislabel-ratio-max` flag, an unparseable or out-of-range value failing **closed** so a misconfigured ceiling never reads as "no ceiling").
+The two guards partition the space cleanly — the positive control owns the empty / all-mislabeled cases (one clear failure reason each), the ratio guard owns the partial dilution.
+Both the gated `false_resolve_rate` and the surfaced `mislabel_ratio` (additive in the P3 result JSON) use the **full presented population** (`n_questions`) as the denominator, INCLUDING mislabeled rows, never the exercised-only subset: that is the operating-metric meaning ("of all unanswerable questions presented, what fraction did we wrongly auto-resolve") and it keeps the sum-based consolidated rate from mixing per-population denominators.
+The dilution a heavily-mislabeled leg creates is therefore handled by the ratio guard, not by shrinking the denominator.
 This mirrors the P1a/P1b/non-disclosure blindness guards, so the safety ceiling can never be disarmed by a P3 population that drifts out from under it. The exit-code decision lives in `e7_pinned_invariants_failed` (a pure function over the scored legs, unit-tested directly).
 
 ### The two metric classes
