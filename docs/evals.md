@@ -165,3 +165,57 @@ The eval is useful, but it is small and biased in ways worth naming explicitly.
 **The eval is anchored to specific model versions.** Embeddings come from `text-embedding-3-small`; OpenAI may evolve the model under the same name. The eval doesn't pin the embedding model's checksum or fingerprint, so a silent OpenAI model update could shift the numbers without any code change. The `generated_at` timestamp + the human reading the results is the current safeguard; a stricter pinning step is a defensible future addition.
 
 The reason these limitations are listed prominently rather than buried at the bottom: the eval's value isn't that it gives a precise score. It's that it gives a *delta* — the same eval, run before and after a PR, surfaces relative change. A delta-vs-`main` workflow (Module 10's US-035) is robust to many of these limitations because the biases are present on both sides of the comparison.
+
+## 6. E7 escalation eval: per-PR tripwire vs weekly sweep (ADR-0003, US-059)
+
+The **E7** eval scores the support-face *deflection pipeline* (escalate-vs-answer), not raw retrieval recall.
+It runs the escalation golden set (`evals/retrieval/escalation_gold.yaml`) through `python -m evals.retrieval.e7_runner` over three hand-authored populations — **P1a** (genuinely no context), **P2** (answerable + faithful), **P3** (strong retrieval but no faithful answer, the moat) — plus the derived **P1b** (a P2 question replayed under a no-access viewer).
+
+The legs split sharply on **determinism**, and that split decides where each runs in CI (US-059):
+
+| Leg | Decided by | Determinism | CI placement | Blocks merge? |
+|---|---|---|---|---|
+| P1a retrieval gate | pure arithmetic on the pre-fusion cosine | deterministic | **per-PR tripwire** | **yes** |
+| P1b no-access replay + US-058 non-disclosure byte-equality | retrieval gate + byte comparison | deterministic | **per-PR tripwire** | **yes** |
+| P2 / P3 deflection scoring + the knob sweep | the OFFLINE cross-family Claude faithfulness judge | LLM-judged | **weekly sweep** | no (files an issue) |
+
+### Per-PR tripwire (deterministic, may block merge)
+
+The PR retrieval-eval workflow (`.github/workflows/retrieval-eval.yml`) runs `e7_runner --include-p1b` right after seeding the corpus.
+It exercises **only the deterministic legs** — no LLM judge, no `ANTHROPIC_API_KEY`.
+Three things are **pinned `fail`** and block the merge, exactly like the E6 zero-leak gate:
+
+- a **P1a** row that *clears* the retrieval gate (it would draft for a genuinely-no-context question — a retrieval-leg false-resolve);
+- a **P1b** row that clears the gate (the gold leaked to a no-access viewer — an isolation/disclosure failure);
+- a **P1b non-disclosure** mismatch (a no-access customer sees bytes that differ from the generic deferral, leaking that restricted content exists).
+
+Because the decision is pure arithmetic on cosine scores, a real verdict can't flake — so it is allowed to hard-block, unlike the LLM-judged quality metrics.
+
+### Weekly sweep (LLM-judged, files an issue, never blocks a merge)
+
+The weekly workflow (`.github/workflows/escalation-eval-weekly.yml`, Sundays 06:00 UTC + `workflow_dispatch`) runs the **full** sweep — `e7_runner --include-p1b --include-p2 --include-p3 --sweep` — with the offline Claude judge, alongside the weekly RAGAS workflow.
+It publishes a snapshot to `docs/escalation-weekly/<DATE>.{json,md}`.
+A judge wobble must never red-bar an innocent merge, so this **never blocks**; on a red verdict it files one deduped GitHub issue and fails the *scheduled* workflow so a maintainer is paged.
+
+Because the false-resolve ceiling is fed **solely** by the P3 faithfulness leg (see below), the weekly run also **fails closed on a P3 leg that never exercises the faithfulness gate**.
+The P3 positive control (`E7P3Result.passed`) requires at least one P3 row to actually reach a faithfulness verdict — clear retrieval, draft a non-empty answer, and get judged — not merely to exist.
+That closes **both** ways gold drift could silently disarm the ceiling: an **empty** P3 leg (the rate is `None`, unmeasured, never a breach) **and** a non-empty but **entirely-mislabeled** P3 leg (every row escalates at the retrieval/draft leg, so the rate reads a vacuous measured 0% that never breaches).
+In either case the runner exits non-zero rather than reporting green with the pinned safety invariant silently unmeasured.
+This mirrors the P1a/P1b/non-disclosure blindness guards, so the safety ceiling can never be disarmed by a P3 population that drifts out from under it. The exit-code decision lives in `e7_pinned_invariants_failed` (a pure function over the scored legs, unit-tested directly).
+
+### The two metric classes
+
+The consolidated metrics (US-055) divide into two classes the gate treats differently (US-059 AC3):
+
+- **`false-resolve` is the pinned SAFETY number** (the Risk #3 failure: an unanswerable question auto-resolved). The buyer sets one risk knob — `ESCALATION_FALSE_RESOLVE_CEILING` (default 5%) — and a *measured* false-resolve rate above it fails the run (`assert_false_resolve_ceiling`), never downgraded to a comment. It is enforced in `e7_runner`'s exit code, so the weekly workflow merely reflects it. The gated rate is the **faithfulness-leg (P3)** false-resolve — the population where a false-resolve can actually occur once a draft clears the retrieval gate. The retrieval-leg P1a/P1b false-resolves are deliberately *excluded* from this rate (see below), so it cannot be diluted by always-escalating true-negatives as the gold set grows.
+- **`deflection` and `false-escalate` are tunable QUALITY metrics.** A regression there is governed by the configurable E8 gate (Area F) — comment-vs-fail — not a hard block. Until E8 lands they are advisory (reported in the weekly snapshot).
+
+### The accepted detection-latency gap (F3 / P5)
+
+A false-resolve can arise on two legs, gated **differently**.
+The **retrieval leg** (P1a no-context / P1b no-access rows that *clear the gate*) is a zero-tolerance invariant: any nonzero count is a no-context draft or a gold leak, so the P1a/P1b gate checks hard-fail the run **unconditionally**, regardless of rate, and this is deterministic and caught **per-PR**.
+The **faithfulness leg** (P3 rows that auto-resolve) is the rate the buyer's ceiling governs — and it is what the consolidated `false-resolve` number measures, so a true-negative P1a/P1b row can never dilute it.
+The faithfulness leg is LLM-judged, so it is only scored in the **weekly** sweep — meaning a faithfulness-leg false-resolve regression has an **accepted up-to-a-week detection latency**.
+This is a deliberate trade (a per-PR LLM-judged gate would make merges flaky on judge noise), and it is mitigated by the per-PR retrieval-leg tripwire, which catches the deterministic class of false-resolve immediately.
+The retrieval-leg P1a/P1b counts are still surfaced in the consolidated false-resolve breakdown (flagged monitor-only) so a leak remains visible there too, even though the ceiling-gated rate is the faithfulness leg alone.
+This gap is the F3 capability-matrix row + the P5 threat-model line for ADR-0003's CI placement.

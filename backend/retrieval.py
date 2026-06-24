@@ -25,6 +25,13 @@ Reciprocal Rank Fusion (RRF). The fused score replaces `similarity` on
 returned rows. The `search_documents` tool dispatches through this by
 default; `RETRIEVAL_MODE=vector` flips back to vector-only as a safety
 escape hatch.
+
+US-046: every result also carries `cosine_similarity` — the raw, pre-fusion
+vector cosine in `[0,1]` — so the escalation retrieval gate (US-047) can
+threshold "weak retrieval" on a calibrated cosine rather than the RRF rank
+artifact in `similarity`. Vector rows set it equal to `similarity`; keyword-
+only rows leave it `None`; fusion and reranking preserve it while overwriting
+`similarity`.
 """
 
 from __future__ import annotations
@@ -141,6 +148,14 @@ class SearchDocumentsResult(BaseModel):
     content: str
     similarity: float
     filename: str
+    # US-046: the raw, pre-fusion vector cosine in a calibrated [0,1], carried
+    # separately from `similarity` so the escalation retrieval gate (US-047) can
+    # threshold "weak retrieval" on a real cosine instead of the RRF rank
+    # artifact. Vector rows set this equal to `similarity` (both are the cosine);
+    # keyword-only rows have no embedding, so it is `None`. `hybrid_search`
+    # overwrites `similarity` with the RRF score but preserves this field, and a
+    # reranker likewise overwrites `similarity` while leaving the cosine intact.
+    cosine_similarity: float | None = None
     # US-041: explains *why* the viewer can see the chunk. Owner chunks carry
     # `granting_principal_id=None, granting_principal_display='owner'`. Direct
     # user grants surface the viewer's own email; group grants surface the
@@ -279,7 +294,15 @@ async def search_documents(
         json=payload,
     )
     r.raise_for_status()
-    return [SearchDocumentsResult(**row) for row in r.json()]
+    # US-046: match_chunks' `similarity` *is* the raw vector cosine, so mirror it
+    # onto `cosine_similarity`. This is the canonical source of the cosine that
+    # survives RRF fusion and reranking (both of which overwrite `similarity`).
+    return [
+        SearchDocumentsResult(**row).model_copy(
+            update={"cosine_similarity": float(row["similarity"])}
+        )
+        for row in r.json()
+    ]
 
 
 async def keyword_search(
@@ -310,6 +333,10 @@ async def keyword_search(
         json=payload,
     )
     r.raise_for_status()
+    # US-046: keyword rows have no embedding — `similarity` here is the unbounded
+    # ts_rank_cd score, not a cosine — so `cosine_similarity` stays at its `None`
+    # default. The retrieval gate therefore reads no cosine off a keyword-only
+    # hit (and in hybrid the vector side supplies it through fusion).
     return [SearchDocumentsResult(**row) for row in r.json()]
 
 
@@ -355,6 +382,12 @@ def _rrf_fuse(
     """
     scores: dict[str, float] = {}
     by_id: dict[str, SearchDocumentsResult] = {}
+    # US-046: the fused row overwrites `similarity` with the RRF score, which
+    # would otherwise bury the raw cosine. Carry the cosine separately, taking
+    # the first non-None value seen — the vector ranking is iterated first, so
+    # its cosine wins; a chunk that surfaces only in the keyword ranking has no
+    # cosine and stays None.
+    cosine_by_id: dict[str, float | None] = {}
     for ranked in rankings:
         for rank, item in enumerate(ranked, start=1):
             scores[item.id] = scores.get(item.id, 0.0) + 1.0 / (k + rank)
@@ -363,11 +396,20 @@ def _rrf_fuse(
             # really just picking one to surface. Vector ranking is iterated
             # first (caller's responsibility) to keep its filename casing.
             by_id.setdefault(item.id, item)
+            if cosine_by_id.get(item.id) is None and item.cosine_similarity is not None:
+                cosine_by_id[item.id] = item.cosine_similarity
     ordered_ids = sorted(scores.keys(), key=lambda i: (-scores[i], i))
     fused: list[SearchDocumentsResult] = []
     for chunk_id in ordered_ids[:top_k]:
         row = by_id[chunk_id]
-        fused.append(row.model_copy(update={"similarity": scores[chunk_id]}))
+        fused.append(
+            row.model_copy(
+                update={
+                    "similarity": scores[chunk_id],
+                    "cosine_similarity": cosine_by_id.get(chunk_id),
+                }
+            )
+        )
     return fused
 
 

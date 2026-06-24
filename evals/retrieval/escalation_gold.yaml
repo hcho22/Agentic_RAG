@@ -1,0 +1,137 @@
+# US-051: E7 escalation golden set (ADR-0003 / E9 support-face layer).
+#
+# Scores the deflection pipeline (US-047 retrieval gate + US-048 faithfulness
+# gate), NOT raw retrieval recall — so it is additive to the E4 sweep in
+# `retrieval_gold.yaml` and never touches it. Loaded + validated by
+# `evals.retrieval.e7.load_escalation_questions`.
+#
+# Each question carries exactly ONE `escalation` label; the populations are
+# DERIVED from the existing gold-chunk anchor, not authored as a parallel set:
+#
+#   no_context          (P1a) — genuinely-no-context. The answer is absent from
+#                               the corpus, so there are NO gold chunks. Expected
+#                               to escalate at the retrieval gate (weak cosine),
+#                               no draft/judge call. (US-052)
+#   answerable_faithful (P2)  — strong retrieval AND a faithful grounded answer
+#                               exists from the gold chunks. Expected to
+#                               auto-resolve; deflection is measured here. (US-053)
+#   should_escalate     (P3)  — strong retrieval BUT no faithful grounded answer
+#                               (topic on-corpus, the specific fact is not, or the
+#                               doc defers to a human). Expected to clear retrieval
+#                               yet fail the faithfulness gate. A P3 that
+#                               auto-resolves is a false-resolve — the safety
+#                               metric the ceiling governs. (US-054/055/059)
+#
+# P1b is NOT a label: it is the derived viewer-parameterized no-access case
+# (US-057), rebuilt at run time from a P2/P3 row via the runner's
+# `compute_visible_stable_ids` no_access construction — never hand-authored.
+#
+# Field semantics:
+#   id              — e7-{pop}-NN, unique, never reused
+#   escalation      — no_context | answerable_faithful | should_escalate
+#   question        — the natural-language customer message passed to the pipeline
+#   gold_stable_ids — content anchor (db_seed.corpus_seed stable_ids,
+#                     "{filename_slug}:{chunk_index}"); REQUIRED non-empty for
+#                     answerable_faithful/should_escalate, ABSENT for no_context
+#   reference       — hand-authored gold answer; REQUIRED non-empty for
+#                     answerable_faithful (P2, US-053) and should_escalate
+#                     (P3, US-054), scored end-to-end by the OFFLINE cross-family
+#                     Claude judge. For P2 it is the faithful answer; for P3 it is
+#                     the should-escalate gold (no grounded answer exists → defer
+#                     to a human). Not used by P1a.
+#   notes           — authoring rationale (P2-vs-P3 is the only human judgment);
+#                     not consumed by the loader
+#
+# Anchored against the 7-doc / 14-chunk e-commerce support corpus
+# (db_seed/corpus): shipping-faq, warranty-terms, refund-policy, returns-process,
+# loyalty-program, product-catalog, customer-service-sop — 2 chunks each.
+
+questions:
+  # ── no_context / P1a (genuinely off-topic — no gold chunk) ───────────────
+  - id: e7-p1a-01
+    escalation: no_context
+    question: How many moons does Jupiter have?
+    notes: >-
+      Astronomy — maximally off-topic for an e-commerce support corpus (no brand cue,
+      no shipping/warranty/refund/returns/product vocabulary at all). Re-authored from
+      "What is Acme Co's stock ticker symbol?" which scored top1_cosine 0.4023 — just
+      above τ_sim=0.40 on text-embedding-3-small's baseline-similarity floor for
+      Acme-branded support-register text — so the genuinely-no-context row wrongly read
+      "strong" at the retrieval gate. A maximally-distant topic reads weak (well below
+      0.40, like e7-p1a-03's 0.3879). Still a genuine no-context question.
+
+  - id: e7-p1a-02
+    escalation: no_context
+    question: How are sedimentary rocks formed?
+    notes: >-
+      Geology — maximally off-topic for an e-commerce support corpus (no brand cue, no
+      corpus-register vocabulary). Re-authored from "What is the parental leave policy
+      for Acme Co employees?" which scored top1_cosine 0.4377 (the word "policy"
+      lexically resonated with refund-policy / warranty terms, the highest baseline of
+      the three) so the no-context row wrongly read "strong". A maximally-distant topic
+      reads weak (well below 0.40). Still a genuine no-context question.
+
+  - id: e7-p1a-03
+    escalation: no_context
+    question: Which charities does Acme Co sponsor?
+    notes: CSR/philanthropy; no corpus document covers sponsorships or donations.
+
+  # ── answerable_faithful / P2 (strong retrieval + faithful answer) ────────
+  - id: e7-p2-01
+    escalation: answerable_faithful
+    question: How long is the electronics warranty?
+    gold_stable_ids: [warranty-terms:0]
+    reference: Electronics carry a 12-month limited warranty against manufacturing defects, starting on the order's shipped_at date.
+    notes: warranty-terms:0 Electronics section — 12-month limited warranty from shipped_at.
+
+  - id: e7-p2-02
+    escalation: answerable_faithful
+    question: How long does standard domestic shipping take?
+    gold_stable_ids: [shipping-faq:0]
+    reference: Standard shipping takes 3–5 business days within the contiguous US (rural ZIP codes may add 1–2 days).
+    notes: shipping-faq:0 — 3–5 business days within the contiguous US.
+
+  - id: e7-p2-03
+    escalation: answerable_faithful
+    question: Within how many days of the shipped_at date can I request a refund?
+    gold_stable_ids: [refund-policy:0]
+    reference: You can request a refund within 30 days of the order's shipped_at date.
+    notes: refund-policy:0 Eligibility Window — 30 days from shipped_at.
+
+  - id: e7-p2-04
+    escalation: answerable_faithful
+    question: What is the return shipping fee for an item between 5 and 20 pounds that I changed my mind about?
+    gold_stable_ids: [returns-process:0]
+    reference: For a changed-mind (customer-fault) return of an item weighing 5–20 lbs, the return shipping fee is $14.95, deducted from the refund or charged to the original payment method.
+    notes: returns-process:0 — customer-fault returns 5–20 lbs are $14.95.
+
+  # ── should_escalate / P3 (strong retrieval, NO faithful answer) ──────────
+  - id: e7-p3-01
+    escalation: should_escalate
+    question: What is the warranty period for jewelry?
+    gold_stable_ids: [warranty-terms:0]
+    reference: The warranty policy covers Electronics, Apparel, and Home Goods but does not list jewelry, so no warranty period for jewelry can be grounded in the corpus; this should be escalated to a human rather than answered with an invented period.
+    notes: >-
+      strong retrieval of the warranty doc, but its categories are Electronics /
+      Apparel / Home Goods / Books / Food — jewelry is not covered, so no faithful
+      answer exists and the row must escalate (not invent a period).
+
+  - id: e7-p3-02
+    escalation: should_escalate
+    question: How many business days does standard shipping to Hawaii take?
+    gold_stable_ids: [shipping-faq:0]
+    reference: The shipping FAQ gives the standard delivery window only for the contiguous US and never addresses Hawaii, so no specific Hawaii timeline can be grounded in the corpus; this should be escalated to a human rather than answered with a guessed number of days.
+    notes: >-
+      shipping-faq:0 states the standard window only for the *contiguous* US;
+      Hawaii (non-contiguous) is never addressed, so the specific timeline is
+      absent — topically strong retrieval, no grounded answer.
+
+  - id: e7-p3-03
+    escalation: should_escalate
+    question: If my delivery is delayed past the estimated date, exactly what refund amount am I owed?
+    gold_stable_ids: [refund-policy:0]
+    reference: The refund policy places delivery-delay cases on a partial refund of 10–80% at the agent's discretion, so no exact refund amount can be grounded in the corpus; this should be escalated to a human rather than auto-resolved with a fabricated figure.
+    notes: >-
+      refund-policy:0 places delivery-delay cases on a partial refund of 10–80%
+      "at the agent's discretion" — no fixed amount exists in the corpus, so the
+      exact-amount question must escalate to a human rather than auto-resolve.

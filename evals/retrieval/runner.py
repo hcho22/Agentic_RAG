@@ -490,6 +490,7 @@ async def run_query(
     supabase_url: str,
     supabase_headers: dict[str, str],
     question: str,
+    top_k: int = TOP_K,
 ) -> list[SearchDocumentsResult]:
     if mode == "vector":
         return await search_documents(
@@ -498,7 +499,7 @@ async def run_query(
             supabase_url=supabase_url,
             supabase_headers=supabase_headers,
             query=question,
-            top_k=TOP_K,
+            top_k=top_k,
         )
     if mode == "keyword":
         return await keyword_only_search(
@@ -507,7 +508,7 @@ async def run_query(
             supabase_url=supabase_url,
             supabase_headers=supabase_headers,
             query=question,
-            top_k=TOP_K,
+            top_k=top_k,
         )
     if mode == "hybrid":
         return await hybrid_search(
@@ -516,7 +517,7 @@ async def run_query(
             supabase_url=supabase_url,
             supabase_headers=supabase_headers,
             query=question,
-            top_k=TOP_K,
+            top_k=top_k,
         )
     raise ValueError(f"unknown mode: {mode!r}")
 

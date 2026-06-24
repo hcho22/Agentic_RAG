@@ -6,3 +6,4 @@ __pycache__/
 .playwright-mcp/
 .claude/settings.local.json
 supabase/.temp/
+tmp/

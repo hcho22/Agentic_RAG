@@ -104,7 +104,16 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 | `OPENAI_SUBAGENT_MODEL` | Document subagent | `OPENAI_MODEL` |
 | `OPENAI_RERANK_MODEL` | `llm` reranker (only when `RERANKER=llm`) | `OPENAI_MODEL` |
 | `EMBEDDER_MODEL` | Embedder | `EMBEDDING_MODEL` → `text-embedding-3-small` |
+| `JUDGE_MODEL` | Runtime faithfulness gate (US-048) | `gpt-4o-mini` (does **not** chain to `OPENAI_MODEL`) |
 | `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (OpenAI proper, no `base_url`) / `completions` (Azure or `openai` + `base_url`) |
+
+> **`JUDGE_MODEL` is a `judge`-role selector, not an answerer one.** Its
+> provider/connection comes from the `judge` role's `JUDGE_*` binding (above),
+> not the answerer, and unlike the aux-helper selectors it defaults to a cheap
+> model **without** chaining through `OPENAI_MODEL` — the per-reply runtime gate
+> stays cheap even behind a large answerer. On a non-OpenAI judge, set
+> `JUDGE_MODEL` to your deployment/model id; an unset/wrong value just makes the
+> judge call fail, which fails **closed** (escalate), never auto-sends a reply.
 
 Rerankers (`COHERE_RERANK_MODEL` / `VOYAGE_RERANK_MODEL`) are a **separate
 provider axis** (dedicated rerank endpoints) and are not part of this surface.

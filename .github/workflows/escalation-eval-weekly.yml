@@ -1,0 +1,236 @@
+# US-059: weekly E7 escalation-eval workflow. Runs the FULL deflection-pipeline
+# eval — the deterministic P1a/P1b legs PLUS the LLM-judged P2/P3 legs and the
+# knob sweep (deflection-vs-false-resolve curve + knee) — on a weekly schedule and
+# on manual `workflow_dispatch`. The LLM-judged legs draft answers and score their
+# faithfulness with the OFFLINE cross-family Claude judge, so they belong here
+# (scheduled) and NEVER on the per-PR path: a judge wobble must not red-bar an
+# innocent merge. The deterministic P1a/P1b retrieval-gate tripwire + the US-058
+# non-disclosure assertion ALSO run per-PR (retrieval-eval.yml) and block merge
+# there; here they run again as part of the full sweep.
+#
+# CI placement (US-059 AC3):
+#   * The false-resolve ceiling (the buyer's risk number,
+#     ESCALATION_FALSE_RESOLVE_CEILING) is a PINNED SAFETY invariant: a measured
+#     faithfulness-leg (P3) false-resolve rate above it exits the runner non-zero,
+#     fails THIS workflow, and files an issue. It is never downgraded to a comment.
+#     That faithfulness leg IS the gated rate and is only scored here, so it carries
+#     an accepted up-to-a-week detection latency (documented in docs/evals.md "E7 CI
+#     placement"; mitigated by the per-PR retrieval-leg tripwire, which hard-fails
+#     unconditionally on any P1a/P1b retrieval-leg false-resolve immediately).
+#     Because that ceiling is fed SOLELY by P3, a P3 leg that never EXERCISES the
+#     faithfulness gate ALSO exits the runner non-zero. The P3 positive control
+#     requires >=1 row to actually reach a faithfulness verdict (clear retrieval,
+#     draft, get judged), closing BOTH disarm paths gold drift could open: an empty
+#     P3 leg (rate None, unmeasured) AND a non-empty but entirely-mislabeled one
+#     (every row escalates before the gate -> a vacuous measured 0% that never
+#     breaches). It fails closed so neither can leave the safety invariant silently
+#     unmeasured (mirrors the P1a/P1b/non-disclosure blindness guards; the exit-code
+#     decision is e7_pinned_invariants_failed).
+#   * The tunable quality metrics (deflection / false-escalate) are reported in the
+#     snapshot but do NOT fail the run — the configurable E8 gate (Area F) governs
+#     comment-vs-fail on those; until E8 lands they are advisory here.
+#
+# Snapshots land under `docs/escalation-weekly/<DATE>.{json,md}` — a rolling
+# history. A red verdict files one deduped GitHub issue and fails the workflow so a
+# maintainer is paged; a green scheduled run auto-closes stale gate issues. Keeps
+# its own concurrency group + snapshot dir so it never tangles with the daily
+# nightly retrieval workflow or the weekly RAGAS workflow.
+
+name: Escalation eval (weekly)
+
+on:
+  schedule:
+    # 06:00 UTC Sundays — staggered off the nightly retrieval (02:00 UTC) and the
+    # weekly RAGAS (04:00 UTC) so the three never compete for runner resources.
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+
+permissions:
+  # contents: write — commit the weekly snapshot to docs/escalation-weekly/.
+  # issues: write — file / close gate-finding issues.
+  contents: write
+  issues: write
+
+concurrency:
+  group: escalation-eval-weekly
+  cancel-in-progress: false
+
+jobs:
+  weekly-escalation:
+    name: Weekly E7 deflection sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          # Need the full token to push the weekly snapshot back.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Supabase CLI
+        # Pinned to match local dev + retrieval-eval.yml + the weekly RAGAS
+        # workflow: an unpinned `latest` drifted to a CLI whose default auth key
+        # format breaks the eval runner's self-minted JWTs (403). See
+        # retrieval-eval.yml for the full rationale; keep these pins in lockstep.
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.90.0
+
+      - name: Start local Supabase stack
+        run: |
+          supabase start
+          # Surface the stack's coordinates. ANON_KEY + JWT_SECRET are surfaced
+          # (not just SERVICE_ROLE_KEY) because e7_runner mints authenticated
+          # viewer JWTs and calls match_chunks under them — the corpus owner (P1a)
+          # and the no-access viewer (P1b) — exactly like retrieval-eval.yml, so it
+          # needs the running stack's real JWT secret + anon apikey rather than the
+          # runner's baked-in local-dev fallbacks.
+          supabase status -o env > /tmp/supabase.env
+          grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|JWT_SECRET|DB_URL)=' /tmp/supabase.env \
+            | sed -E 's/^(.*)="(.*)"$/\1=\2/' \
+            >> "$GITHUB_ENV"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          # requirements.txt (not requirements-ci.txt) so `anthropic` is present
+          # for the OFFLINE cross-family Claude faithfulness judge the P2/P3 legs
+          # + the sweep use.
+          pip install -r evals/retrieval/requirements.txt
+
+      - name: Seed corpus + run full E7 sweep
+        id: e7
+        env:
+          SUPABASE_URL: ${{ env.API_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
+          CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
+          DATABASE_URL: ${{ env.DB_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python -m db_seed.corpus_seed
+          # The FULL sweep: deterministic P1a + P1b (+ the US-058 non-disclosure
+          # assertion) AND the LLM-judged P2/P3 legs + the knob sweep. The runner
+          # exits 1 on any PINNED safety invariant — a P1a/P1b gate clear, a
+          # non-disclosure byte mismatch, or a consolidated false-resolve rate above
+          # the buyer's ceiling — but writes the JSON + markdown FIRST, so the
+          # snapshot is always publishable. Capture the code rather than aborting.
+          # stdout (the rendered markdown report) is tee'd to the .md snapshot;
+          # logging goes to stderr and stays in the workflow log.
+          set +e
+          python -m evals.retrieval.e7_runner \
+            --include-p1b --include-p2 --include-p3 --sweep \
+            --out /tmp/e7-weekly.json | tee /tmp/e7-weekly.md
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          echo "runner exited ${code}"
+
+      - name: Publish to docs/escalation-weekly/
+        if: always()
+        run: |
+          if [ ! -f /tmp/e7-weekly.json ]; then
+            echo "runner produced no snapshot — nothing to publish"
+            exit 0
+          fi
+          DATE=$(date -u +"%Y-%m-%d")
+          mkdir -p docs/escalation-weekly
+          cp /tmp/e7-weekly.json "docs/escalation-weekly/${DATE}.json"
+          cp /tmp/e7-weekly.md "docs/escalation-weekly/${DATE}.md"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add docs/escalation-weekly
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+          else
+            git commit -m "chore(evals): weekly E7 escalation eval ${DATE}"
+            git push
+          fi
+
+      - name: File / close gate-finding issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNNER_EXIT: ${{ steps.e7.outputs.exit_code }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ ! -f /tmp/e7-weekly.json ]; then
+            echo "no snapshot — skipping issue management"
+            exit 0
+          fi
+          LABEL=e7-weekly-gate
+          if [ "${RUNNER_EXIT}" != "0" ]; then
+            # A pinned safety invariant fired. Build a body naming which one(s),
+            # straight off the result JSON, then dedup against an open issue.
+            body=$(jq -r '
+              [
+                (if .e7_false_resolve_ceiling.breached then
+                  "- **False-resolve ceiling breach** (the Risk #3 safety number): measured "
+                  + ((.e7_false_resolve_ceiling.rate * 100 | floor | tostring) + "%")
+                  + " (" + (.e7_false_resolve_ceiling.numerator|tostring) + "/"
+                  + (.e7_false_resolve_ceiling.denominator|tostring) + ") exceeds the buyer ceiling "
+                  + ((.e7_false_resolve_ceiling.ceiling * 100 | floor | tostring) + "%")
+                  + " (ESCALATION_FALSE_RESOLVE_CEILING)."
+                else empty end),
+                (if (.e7_p1a.passed == false) then
+                  "- **P1a retrieval-gate regression**: no-context row(s) cleared the gate (would draft): "
+                  + ((.e7_p1a.cleared_gate // []) | join(", "))
+                else empty end),
+                (if (.e7_p1b.passed == false) then
+                  "- **P1b no-access leak**: gold reached a no-access viewer (cleared the gate): "
+                  + ((.e7_p1b.cleared_gate // []) | join(", "))
+                else empty end),
+                (if (.e7_p1b_non_disclosure.passed == false) then
+                  "- **P1b non-disclosure leak**: a no-access customer output differs from the generic deferral ("
+                  + ((.e7_p1b_non_disclosure.n_leaks // 0)|tostring) + " row(s))."
+                else empty end)
+              ] | join("\n")
+            ' /tmp/e7-weekly.json)
+            if [ -z "${body}" ]; then
+              body="- The runner exited ${RUNNER_EXIT} on a pinned safety invariant; see the attached snapshot."
+            fi
+            footer="Full report - docs/escalation-weekly/$(date -u +%Y-%m-%d).md. This is the scheduled weekly E7 sweep (US-059); it does not block merges, but a pinned safety invariant fired."
+            body="${body}"$'\n\n'"${footer}"
+            gh label create "${LABEL}" --color B60205 \
+              --description "E7 weekly escalation gate finding" --force || true
+            open=$(gh issue list --label "${LABEL}" --state open --json number --jq 'length')
+            if [ "${open}" = "0" ]; then
+              gh issue create --label "${LABEL}" \
+                --title "E7 weekly escalation gate: pinned safety invariant fired" \
+                --body "${body}"
+              echo "filed E7 weekly gate issue"
+            else
+              echo "open E7 weekly gate issue already exists — dedup, skipping"
+            fi
+          elif [ "${EVENT_NAME}" = "schedule" ]; then
+            # Green scheduled run: auto-close stale gate issues. Only a scheduled
+            # run auto-closes — a manual dispatch may be a partial re-run and must
+            # not clear a still-real finding.
+            for num in $(gh issue list --label "${LABEL}" --state open \
+              --json number --jq '.[].number'); do
+              gh issue close "${num}" \
+                --comment "Auto-closed: the scheduled weekly E7 sweep was green (no pinned safety invariant fired)."
+              echo "auto-closed issue #${num}"
+            done
+          fi
+
+      - name: Reflect runner exit code
+        if: always() && steps.e7.outputs.exit_code == '1'
+        run: |
+          echo "E7 runner exited 1 — a pinned safety invariant fired (false-resolve"
+          echo "ceiling breach, a P3 leg that never exercised the faithfulness gate"
+          echo "(empty or all-mislabeled), a P1a/P1b gate clear, or a non-disclosure"
+          echo "mismatch)."
+          echo "The finding has been filed as a GitHub issue; failing the workflow."
+          exit 1

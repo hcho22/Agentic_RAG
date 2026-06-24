@@ -17,6 +17,17 @@
 # retried with backoff, then surfaced loudly but NON-BLOCKING, so an infra blip
 # can't fail-block an innocent PR.
 #
+# US-059: the PR run ALSO executes the E7 escalation tripwire — the DETERMINISTIC
+# deflection-pipeline legs only (P1a retrieval-gate decisions + the P1b no-access
+# replay + the US-058 P1b non-disclosure byte-equality assertion), reusing this
+# job's already-seeded corpus + Supabase stack. Like E6 it is a HARD gate: a
+# P1a/P1b row that clears the retrieval gate (a retrieval-leg false-resolve / a
+# gold leak to a no-access viewer) or a non-disclosure byte mismatch exits the
+# runner non-zero and blocks the merge. It is pure arithmetic on cosine scores —
+# NO LLM judge — so a real verdict can't flake. The LLM-judged P2/P3 deflection
+# sweep is deliberately NOT here (it lives in escalation-eval-weekly.yml); a judge
+# wobble must never red-bar an innocent merge.
+#
 # Reranker modes (cohere / voyage / llm) are NOT exercised here — they
 # cost real money per call and add API-dependency flake to PR checks.
 # The nightly workflow (retrieval-eval-nightly.yml) is where rerankers
@@ -40,6 +51,9 @@ on:
       - 'backend/retrieval.py'
       - 'backend/chunking.py'
       - 'backend/embeddings.py'
+      # US-059: backend/escalation.py owns the deterministic retrieval gate the
+      # E7 per-PR tripwire (below) exercises, so a gate change must re-run it.
+      - 'backend/escalation.py'
       - 'backend/**/*prompt*'
       - 'evals/retrieval/**'
       - 'db_seed/corpus/**'
@@ -174,6 +188,48 @@ jobs:
           # JSON + summary.md are written, so E4 output is never discarded.
           python -m evals.retrieval.runner \
             --viewers all --include-e6 --out /tmp/pr.json
+
+      - name: E7 escalation tripwire (PR, deterministic — US-059)
+        working-directory: pr
+        env:
+          SUPABASE_URL: ${{ env.API_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
+          CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
+          DATABASE_URL: ${{ env.DB_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # US-059 per-PR tripwire: the DETERMINISTIC escalation legs ONLY — the
+          # P1a retrieval-gate decisions (pure arithmetic on the pre-fusion cosine,
+          # no LLM), the P1b no-access replay, and the US-058 P1b non-disclosure
+          # byte-equality assertion. All three are PINNED `fail`: a P1a/P1b row that
+          # clears the retrieval gate (a retrieval-leg false-resolve / a gold leak
+          # to a no-access viewer) or a P1b customer output that differs from the
+          # generic deferral exits the runner non-zero, FAILS this step, and BLOCKS
+          # the merge — exactly like the E6 zero-leak gate above. Leak detection is
+          # deterministic, so a real verdict is trustworthy and non-downgradable;
+          # the runner writes /tmp/e7-pr.json FIRST, then exits 1, so the detail is
+          # never discarded. The consolidated false-resolve ceiling gate (US-059)
+          # also runs here but is structurally INERT per-PR — its gated rate is the
+          # faithfulness leg (P3), which is not scored here, so it is unmeasured and
+          # cannot breach; the retrieval-leg P1a/P1b false-resolves are pinned above.
+          #
+          # NO --include-p2/--include-p3/--sweep: those draft + call the OFFLINE
+          # Claude faithfulness judge, so they are LLM-judged and live in the weekly
+          # escalation workflow (escalation-eval-weekly.yml). A judge wobble must
+          # never red-bar an innocent merge; the faithfulness-leg false-resolve
+          # carries an accepted up-to-a-week detection latency, mitigated by this
+          # deterministic retrieval-leg tripwire (docs/evals.md "E7 CI placement").
+          # No ANTHROPIC_API_KEY is needed or passed — this runs on the slim
+          # requirements-ci.txt env installed above (e7_runner's deterministic path
+          # imports only escalation/retrieval, both already on that env).
+          #
+          # Reuses THIS job's already-seeded corpus + running Supabase stack; the
+          # P1b leg rewrites chunk_acl per question via asyncpg (DATABASE_URL), the
+          # same E4 reset_viewer_acls machinery the PR eval above already exercised.
+          # The main reseed below restores corpus state for the main runner.
+          python -m evals.retrieval.e7_runner --include-p1b --out /tmp/e7-pr.json
 
       - name: Reseed corpus + run eval (main)
         working-directory: main
