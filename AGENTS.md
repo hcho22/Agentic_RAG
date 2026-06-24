@@ -46,3 +46,19 @@ from public.conversations;
 
 The runtime "first escalating turn stops the bot pipeline" behaviour is wired separately in US-080; this migration is only the DB-level latch it relies on.
 Test: `python -m backend.test_conversation_status_machine` (DB-level, asyncpg as `postgres`; skips cleanly when the local DB / `conversations` table is absent).
+
+## Self-signed Supabase-compatible JWT minting (US-068, ADR-0008)
+
+`backend/supabase_jwt.py:mint_supabase_jwt(sub, ttl_seconds)` is the **single** place the backend issues a Supabase-shaped identity token.
+It self-signs a short-lived HS256 JWT with `SUPABASE_JWT_SECRET` (the *same* secret GoTrue signs with), claims `sub` / `role='authenticated'` / `aud='authenticated'` / `iat` / `exp = iat + ttl`, so the token is - to PostgREST and every RLS predicate - indistinguishable from a GoTrue-issued one (`auth.uid()` resolves to `sub`).
+This is a new **issuer** beside GoTrue, **not** a new enforcement path - the membership/ACL boundary in the DB is untouched.
+Chosen over a GoTrue admin-API session per request (avoids a per-turn round-trip and keeps the service-role key out of the request hot path).
+
+Its only caller is the support bot (US-070): each customer turn mints a ~60s token for `sub = bot_user_id`, calls `match_chunks` as that principal, and discards it.
+
+- `SUPABASE_JWT_SECRET` is a **NEW** env and a **NEW signing surface** (P5 threat-model line): before US-068 the backend held only the anon key (public, non-signing). Whoever holds this secret can forge any identity - server-side only, never embedded client-side. It is **optional**: required only when support is enabled, so the minting helper reads it fail-closed at call time (a knowledge-assistant-only deployment may leave it unset; `main.py` documents it but does not gate startup on it).
+- The minted token is **server-side only** and must NEVER reach an HTTP response body, SSE event, or log line bound for the iframe/client.
+- The helper mints ONLY for a server-resolved `bot_user_id`, never for a customer- or request-supplied `sub`. PyJWT is now a direct runtime dep (pinned in `requirements.txt`; previously transitive via `supabase`/gotrue).
+
+Test: `python -m backend.test_supabase_jwt` - a unit layer (always runs, no DB/secrets: claim shape, signature-bound-to-secret, TTL validation, fail-closed on missing secret, strict-verifier expiry) plus an integration layer (skips cleanly without local Supabase: a minted token is accepted by PostgREST and resolves `auth.uid()` to `sub`, a token for a different `sub` reads 0 rows, an expired token is rejected with PGRST303).
+Note: PostgREST applies a ~30s clock-skew tolerance on `exp`, so the integration expiry check hand-rolls a long-past-`exp` token rather than waiting out a short-TTL minted one.

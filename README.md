@@ -162,6 +162,7 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | `SUPABASE_URL` | yes | `https://<project>.supabase.co` (hosted) or `http://127.0.0.1:54321` (local) |
 | `SUPABASE_ANON_KEY` | yes | Used to call GoTrue for JWT validation |
 | `SUPABASE_SERVICE_ROLE_KEY` | yes | Reserved for system-level ops (share API owner-lookup, ingestion); never used to touch user data on the retrieval path (RLS enforced via user JWT) |
+| `SUPABASE_JWT_SECRET` | only for support bot | The project JWT secret GoTrue signs with. The support bot self-signs its short-lived bot token with it so `auth.uid()`/RLS resolve it natively (US-068, `backend/supabase_jwt.py`); a knowledge-assistant-only deploy leaves it blank. NEW signing surface - keep server-side only, never embed client-side |
 | `OPENAI_API_KEY` | yes | |
 | `OPENAI_MODEL` | no | Default `gpt-4o-mini` |
 | `OPENAI_VECTOR_STORE_ID` | no | Enables `file_search` retrieval when set |

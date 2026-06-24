@@ -158,6 +158,16 @@ SUPABASE_ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
 # to the user-JWT lookup, which collapses 403 → 404 for callers who can't
 # see the doc at all (still secure, just less precise).
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or None
+# US-068 (ADR-0008): the project JWT secret GoTrue signs with. NEW signing
+# surface — before this the backend held only the anon key (public, non-signing)
+# and forwarded user tokens it never minted. Optional: required only when the
+# support bot is enabled (it is the secret `backend.supabase_jwt.mint_supabase_jwt`
+# self-signs the ~60s bot token with, US-070), so a knowledge-assistant-only
+# deployment may leave it unset. P5 threat-model: whoever holds this can forge
+# any identity — keep it server-side only, never embed it client-side. The
+# minting helper reads the env itself (fail-closed) so this is documentation +
+# forward-discovery, not a hard requirement gate.
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET") or None
 # US-021: the OpenAI/Azure connection (api key, base_url, Azure params) is now
 # resolved once via model_config.ProviderConfig.from_env (see the client build
 # below), not read ad hoc here. OPENAI_MODEL stays — model selection is

@@ -30,3 +30,8 @@ asyncpg>=0.29
 # facto standard; we use safe_load to keep arbitrary !python/object tags
 # out of the configuration surface.
 pyyaml>=6.0
+# US-068 (ADR-0008): the support bot self-signs short-lived HS256 Supabase-
+# compatible JWTs (backend/supabase_jwt.py). PyJWT already arrives transitively
+# via supabase>=2.15 (gotrue); pinned explicitly here because it is now a direct
+# runtime dependency of the minting primitive, not just a transitive one.
+PyJWT>=2.10,<3
