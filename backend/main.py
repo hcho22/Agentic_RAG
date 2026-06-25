@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
 import httpx
@@ -38,6 +39,11 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from chunking import chunk_text, get_chunk_config
+from conversation_tokens import (
+    CONVERSATION_TOKEN_TTL_SECONDS,
+    generate_conversation_token,
+    hash_conversation_token,
+)
 from embeddings import (
     EmbeddingStamp,
     check_embedder_drift,
@@ -522,6 +528,21 @@ def _service_role_headers() -> dict[str, str] | None:
         "Content-Type": "application/json",
         "Prefer": "return=representation",
     }
+
+
+def _require_service_role_headers() -> dict[str, str]:
+    """Service-role headers, or a 503 when the support widget is unconfigured.
+
+    The backend-mediated conversation-token surface (US-071) writes/reads under
+    the service role; without `SUPABASE_SERVICE_ROLE_KEY` there is no path, so
+    fail closed with a clear 503 instead of proceeding unauthenticated."""
+    headers = _service_role_headers()
+    if headers is None:
+        raise HTTPException(
+            status_code=503,
+            detail="support widget is not configured (SUPABASE_SERVICE_ROLE_KEY unset)",
+        )
+    return headers
 
 
 def _supabase_headers(user: AuthedUser) -> dict[str, str]:
@@ -2155,6 +2176,173 @@ async def subagent_endpoint(
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
     return result.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# US-071: opaque per-conversation customer token — issuance, hashed storage,
+# resume. The anonymous customer is structurally OFF the Supabase trust surface
+# (ADR-0008): these public widget endpoints accept the RAW opaque token (in the
+# X-Conversation-Token header, NOT an Authorization bearer / Supabase JWT), the
+# backend hashes it and resolves it via the service-role-only `resume_conversation`
+# RPC. Issuance (`_issue_conversation_token`) is invoked by US-078's first-message
+# conversation-creation flow; resume/transcript below let a reloaded iframe
+# revalidate and reconnect. Public-widget CORS is US-074's concern — these routes
+# do not widen the authenticated `/api/*` CORS posture.
+# ---------------------------------------------------------------------------
+
+# The raw opaque token travels in this header, deliberately distinct from
+# `Authorization: Bearer <supabase-jwt>` (which `get_user` parses) so the
+# customer leg can never be mistaken for a Supabase-authenticated principal.
+_CONVERSATION_TOKEN_HEADER = "X-Conversation-Token"
+
+
+def _public_conversation_view(conv: dict) -> dict:
+    """Curate the customer-facing conversation shape.
+
+    The `resume_conversation` RPC returns `workspace_id` for server-side use, but
+    the anonymous customer surface must not leak internal workspace topology, so
+    the public view exposes only id/status/created_at.
+    """
+    return {
+        "id": conv["id"],
+        "status": conv["status"],
+        "created_at": conv["created_at"],
+    }
+
+
+async def _issue_conversation_token(
+    http: httpx.AsyncClient, conversation_id: str
+) -> str:
+    """Issue a fresh opaque token bound to `conversation_id`; store only its hash.
+
+    Returns the RAW token. Its caller (US-078, first-message conversation
+    creation) returns it to the iframe EXACTLY ONCE — it is never stored, logged,
+    or echoed again. The token table is backend-mediated (RLS deny-all), so this
+    writes under the service role.
+    """
+    headers = _require_service_role_headers()
+    raw_token = generate_conversation_token()
+    expires_at = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=CONVERSATION_TOKEN_TTL_SECONDS)
+    ).isoformat()
+    r = await http.post(
+        f"{SUPABASE_URL}/rest/v1/conversation_tokens",
+        headers=headers,
+        json={
+            "token_hash": hash_conversation_token(raw_token),
+            "conversation_id": conversation_id,
+            "expires_at": expires_at,
+        },
+    )
+    r.raise_for_status()
+    return raw_token
+
+
+async def _resume_conversation_by_token(
+    http: httpx.AsyncClient, raw_token: str, *, slide: bool = True
+) -> dict | None:
+    """Revalidate an opaque customer token and return its bound conversation row.
+
+    Hashes the raw token and calls the service-role-only `resume_conversation`
+    RPC, which atomically checks (not expired AND status != 'resolved') and
+    returns the ONE conversation the token is bound to. No caller-supplied
+    conversation id reaches the RPC, so a token for X structurally cannot resolve
+    to any other conversation. Returns None on a miss (missing/expired/resolved) —
+    the iframe's cue to start a fresh conversation. Returns the full RPC row (incl.
+    workspace_id) for server-side use; endpoints curate it via
+    `_public_conversation_view`.
+
+    `slide` controls the activity refresh: the POST /resume path leaves it True so
+    a resume slides the 24h window; the read-only GET transcript path passes False
+    so a nominally-safe/idempotent GET never extends the token's lifetime.
+    """
+    headers = _require_service_role_headers()
+    r = await http.post(
+        f"{SUPABASE_URL}/rest/v1/rpc/resume_conversation",
+        headers=headers,
+        json={"p_token_hash": hash_conversation_token(raw_token), "p_slide": slide},
+    )
+    r.raise_for_status()
+    rows = r.json()
+    return rows[0] if rows else None
+
+
+@app.post("/widget/conversations/resume")
+async def widget_resume_conversation(
+    x_conversation_token: str | None = Header(
+        default=None, alias=_CONVERSATION_TOKEN_HEADER
+    ),
+) -> dict:
+    """US-071: revalidate the opaque customer token and resume its conversation.
+
+    The anonymous customer presents the raw token it stored in the iframe origin
+    (NOT a Supabase JWT). On success returns the conversation so the iframe can
+    reconnect its SSE (US-081) and GET the transcript. A missing/expired/resolved
+    token → 401, the cue to start a fresh conversation on the next first message;
+    this endpoint never creates a row.
+    """
+    if not x_conversation_token:
+        raise HTTPException(status_code=401, detail="missing conversation token")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        conv = await _resume_conversation_by_token(http, x_conversation_token)
+    if conv is None:
+        raise HTTPException(
+            status_code=401, detail="invalid or expired conversation token"
+        )
+    return {"conversation": _public_conversation_view(conv)}
+
+
+@app.get("/widget/conversations/{conversation_id}/transcript")
+async def widget_conversation_transcript(
+    conversation_id: str,
+    x_conversation_token: str | None = Header(
+        default=None, alias=_CONVERSATION_TOKEN_HEADER
+    ),
+) -> dict:
+    """US-071: return a conversation's transcript, authorized by the opaque token.
+
+    Security-critical binding: the token is resolved to its OWN conversation and
+    the path `conversation_id` MUST match it, so a token for X can never read Y's
+    transcript. The same RPC re-checks not-expired AND not-resolved, so an
+    expired/resolved token is rejected here too.
+
+    A GET is nominally safe/idempotent, so the binding check is resolved with
+    `slide=False`: reading a transcript (browser prefetch, link-preview crawler,
+    transparent retry) must never extend the token's 24h window. Only POST /resume
+    counts as activity.
+    """
+    if not x_conversation_token:
+        raise HTTPException(status_code=401, detail="missing conversation token")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        conv = await _resume_conversation_by_token(
+            http, x_conversation_token, slide=False
+        )
+        if conv is None or conv["id"] != conversation_id:
+            # Token invalid/expired/resolved, OR bound to a different conversation
+            # (a token for X requesting Y). Both collapse to "not authorized for
+            # this id" — and to a not-found-shaped 401 so the binding is opaque.
+            raise HTTPException(
+                status_code=401,
+                detail="invalid conversation token for this conversation",
+            )
+        headers = _require_service_role_headers()
+        r = await http.get(
+            f"{SUPABASE_URL}/rest/v1/conversation_messages",
+            params={
+                "conversation_id": f"eq.{conversation_id}",
+                "role": "in.(user,assistant)",
+                "select": "id,role,content,created_at",
+                "order": "created_at.asc",
+            },
+            headers=headers,
+        )
+        r.raise_for_status()
+        messages = r.json()
+    return {
+        "conversation": _public_conversation_view(conv),
+        "messages": messages,
+    }
 
 
 @app.get("/healthz")

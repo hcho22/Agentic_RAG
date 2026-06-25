@@ -161,7 +161,7 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | --- | --- | --- |
 | `SUPABASE_URL` | yes | `https://<project>.supabase.co` (hosted) or `http://127.0.0.1:54321` (local) |
 | `SUPABASE_ANON_KEY` | yes | Used to call GoTrue for JWT validation |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | Reserved for system-level ops (share API owner-lookup, ingestion, support-bot provisioning via the GoTrue admin API — US-069, `backend/support_bot.py`); never used to touch user data on the retrieval path (RLS enforced via user JWT) |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | Reserved for system-level ops (share API owner-lookup, ingestion, support-bot provisioning via the GoTrue admin API — US-069, `backend/support_bot.py`, and the backend-mediated conversation-token surface - issuance + the `resume_conversation` RPC, US-071, `backend/conversation_tokens.py`); never used to touch user data on the retrieval path (RLS enforced via user JWT). The widget endpoints fail closed with a 503 when it is unset |
 | `SUPABASE_JWT_SECRET` | only for support bot | The project JWT secret GoTrue signs with. The support bot self-signs its short-lived bot token with it so `auth.uid()`/RLS resolve it natively (US-068, `backend/supabase_jwt.py`); a knowledge-assistant-only deploy leaves it blank. NEW signing surface - keep server-side only, never embed client-side |
 | `SUPPORT_BOT_EMAIL_DOMAIN` | no | Internal, non-routable email domain for the per-workspace support bot's `auth.users` row (US-069, `backend/support_bot.py`). Default `bots.support.internal`. The bot row is admin-created with `email_confirm=true` and no password, so the address never logs in or receives mail |
 | `OPENAI_API_KEY` | yes | |
@@ -235,6 +235,8 @@ The backend exposes:
 | `POST` | `/api/sql` | Text-to-SQL via the semantic-layer compiler |
 | `POST` | `/api/web-search` | Web fallback |
 | `POST` | `/api/subagent` | Spawn a document sub-agent |
+| `POST` | `/widget/conversations/resume` | Public widget: resume an anonymous support conversation from its opaque per-conversation token (`X-Conversation-Token`, not a JWT) - slides the 24h window (US-071) |
+| `GET` | `/widget/conversations/{id}/transcript` | Public widget: fetch a conversation's transcript, authorized by the same opaque token; read-only, never slides the window (US-071) |
 | `GET` | `/healthz` | Liveness check |
 
 ## Eval suite
