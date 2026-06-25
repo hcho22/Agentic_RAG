@@ -44,6 +44,10 @@ from conversation_tokens import (
     generate_conversation_token,
     hash_conversation_token,
 )
+from widget_keys import (
+    generate_public_key,
+    is_widget_public_key,
+)
 from embeddings import (
     EmbeddingStamp,
     check_embedder_drift,
@@ -2343,6 +2347,275 @@ async def widget_conversation_transcript(
         "conversation": _public_conversation_view(conv),
         "messages": messages,
     }
+
+
+# ---------------------------------------------------------------------------
+# US-072: widget_keys — the non-secret public-key registry + the not-revoked gate
+# every key resolution passes before anything is minted/created (ADR-0008).
+#
+# Two faces, deliberately on different CORS/auth surfaces:
+#   * ADMIN management (`/api/support/widget-keys*`) — authed by the admin's real
+#     Supabase JWT; issuance/list/revoke INSERT/SELECT/UPDATE under that JWT so the
+#     admin RLS (role='admin' of the workspace) is the authorization. The /support
+#     /settings UI (US-090) is the caller. These ride the authenticated /api/* CORS.
+#   * PUBLIC resolution (`/widget/keys/resolve`) — anonymous; the widget loader
+#     (US-083) presents its non-secret public_key on open. Resolution gates on
+#     `revoked_at IS NULL` under the SERVICE ROLE (the anonymous widget holds no
+#     Postgres role) and leaks no workspace topology. Public-widget CORS is US-074,
+#     per-key origin enforcement US-073, rate-limiting US-076 — all layer on top of
+#     this gate without changing it; these routes do not widen the /api/* posture.
+# ---------------------------------------------------------------------------
+
+
+class IssueWidgetKeyRequest(BaseModel):
+    workspace_id: str
+    label: str | None = None
+    allowed_origins: list[str] = Field(default_factory=list)
+
+
+class ResolveWidgetKeyRequest(BaseModel):
+    public_key: str
+
+
+async def _ensure_workspace_bot(
+    http: httpx.AsyncClient, workspace_id: str
+) -> str | None:
+    """US-072 → US-069 hook: idempotently provision the per-workspace support bot
+    on first widget-key issuance, returning its user id (or None).
+
+    US-069 owns the provisioning primitive (`support_bot.provision_workspace_bot`),
+    which creates (or returns the existing) bot `auth.users` row +
+    `workspace_membership(role='member', is_bot=true)` row under the service role,
+    exactly one per workspace (lazy/idempotent, race-safe). US-072 is its single
+    caller — "first key issued enables support" (PRD US-069/US-072). Because it is
+    idempotent, invoking it on every issuance is safe: the first issuance
+    provisions, the rest return the same id.
+
+    Best-effort: key issuance must NEVER fail because of provisioning, so a
+    provisioning error (e.g. SUPABASE_SERVICE_ROLE_KEY unset) is logged and
+    swallowed — the key is still issued and the bot is (re)provisioned
+    idempotently later (US-069 is also triggered lazily at first conversation,
+    US-078). The ImportError guard is belt-and-suspenders for a build that ships
+    the widget without the support-bot module. Never raises.
+    """
+    try:
+        from support_bot import provision_workspace_bot  # US-069
+    except ImportError:
+        log.info(
+            "widget_key.bot_provision_skipped — support_bot module unavailable; "
+            "workspace=%s key issued, bot provisions lazily at first conversation",
+            workspace_id,
+        )
+        return None
+    try:
+        # workspace_id is the only positional arg; http/url/key are keyword-only.
+        return await provision_workspace_bot(workspace_id, http=http)
+    except Exception:  # best-effort: never block key issuance on provisioning
+        log.warning(
+            "widget_key.bot_provision_failed — workspace=%s; key issued, bot will "
+            "provision lazily later",
+            workspace_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _resolve_widget_key(
+    http: httpx.AsyncClient, public_key: str
+) -> dict | None:
+    """Resolve a widget public key to its workspace, gating on NOT-REVOKED FIRST.
+
+    The not-revoked gate IS the query — a service-role read filtered by
+    `public_key=eq AND revoked_at=is.null`. A revoked or unknown key matches zero
+    rows and returns None: the caller's cue to refuse to start anything (no
+    conversation row, no token, no minting). Returns the key's workspace + metadata
+    for server-side use (US-078 creates the conversation from it); the public
+    response NEVER echoes workspace topology (see `widget_resolve_key`).
+
+    Stays cheap and side-effect-free (one indexed SELECT) so widget OPEN — which
+    per US-078 does ONLY key resolution — is cheap. The `(workspace_id,
+    bot_user_id)` pair the PRD describes is completed downstream: the bot is
+    provisioned at issuance (the US-069 hook) and assigned to the conversation by
+    US-078, so resolution does not provision per open.
+
+    Reads under the service role because the anonymous widget holds no Postgres
+    role; the admin RLS on widget_keys gates only the authenticated admin path.
+    """
+    headers = _require_service_role_headers()
+    r = await http.get(
+        f"{SUPABASE_URL}/rest/v1/widget_keys",
+        params={
+            "public_key": f"eq.{public_key}",
+            "revoked_at": "is.null",
+            "select": "id,workspace_id,label,allowed_origins",
+            "limit": "1",
+        },
+        headers=headers,
+    )
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # An upstream failure must surface as 502, never collapse into the
+        # not-found/revoked (None → 404) case the empty result encodes.
+        if e.response.status_code >= 500:
+            raise HTTPException(
+                status_code=502,
+                detail="could not resolve widget key (upstream error)",
+            )
+        raise
+    rows = r.json()
+    return rows[0] if rows else None
+
+
+@app.post("/api/support/widget-keys")
+async def issue_widget_key(
+    req: IssueWidgetKeyRequest, user: AuthedUser = Depends(get_user)
+) -> dict:
+    """US-072: issue a new (active) widget key for a workspace the caller admins.
+
+    The INSERT runs under the admin's OWN JWT, so the widget_keys admin RLS
+    (role='admin' of the row's workspace) IS the authorization — a non-admin's
+    insert is rejected by Postgres, not by app code. On the workspace's first key
+    this also triggers lazy bot provisioning (US-069); rotation is simply this
+    endpoint again followed by a revoke of the old key (no auto-rotation).
+
+    The response includes `public_key` ON PURPOSE: it is non-secret and the admin
+    must copy it into their page's loader snippet. (This is the opposite of the
+    customer token, which is returned once and never logged.)
+    """
+    public_key = generate_public_key()
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        try:
+            r = await http.post(
+                f"{SUPABASE_URL}/rest/v1/widget_keys",
+                headers=_supabase_headers(user),
+                json={
+                    "workspace_id": req.workspace_id,
+                    "public_key": public_key,
+                    "label": req.label,
+                    "allowed_origins": req.allowed_origins,
+                    "created_by": user.id,
+                },
+            )
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in (401, 403):
+                raise HTTPException(
+                    status_code=403,
+                    detail="must be an admin of this workspace to issue a widget key",
+                )
+            if status >= 500:
+                raise HTTPException(
+                    status_code=502,
+                    detail="could not issue widget key (upstream error)",
+                )
+            # FK violation (unknown workspace) or any other 4xx → bad request.
+            raise HTTPException(
+                status_code=400, detail="could not issue widget key"
+            )
+        created = r.json()[0]
+        # First key for the workspace enables support: provision the bot lazily.
+        # Idempotent, best-effort — does not gate the issuance result.
+        await _ensure_workspace_bot(http, req.workspace_id)
+    return {"widget_key": created}
+
+
+@app.get("/api/support/widget-keys")
+async def list_widget_keys(
+    workspace_id: str, user: AuthedUser = Depends(get_user)
+) -> dict:
+    """List a workspace's widget keys (active + revoked) for the admin UI (US-090).
+
+    Read under the admin's JWT, so the widget_keys admin RLS returns rows only for
+    workspaces the caller administers — a non-admin gets an empty list, not a leak.
+    Includes revoked keys so the UI can show active-vs-revoked for rotation.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        r = await http.get(
+            f"{SUPABASE_URL}/rest/v1/widget_keys",
+            params={
+                "workspace_id": f"eq.{workspace_id}",
+                "select": "id,workspace_id,public_key,label,allowed_origins,"
+                "revoked_at,created_at",
+                "order": "created_at.desc",
+            },
+            headers=_supabase_headers(user),
+        )
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status >= 500:
+                raise HTTPException(
+                    status_code=502,
+                    detail="could not list widget keys (upstream error)",
+                )
+            # A malformed non-UUID workspace_id → PostgREST 400/22P02.
+            raise HTTPException(status_code=400, detail="invalid workspace id")
+    return {"widget_keys": r.json()}
+
+
+@app.post("/api/support/widget-keys/{key_id}/revoke")
+async def revoke_widget_key(
+    key_id: str, user: AuthedUser = Depends(get_user)
+) -> dict:
+    """US-072: revoke a widget key — a one-way flip of `revoked_at` to now().
+
+    Runs under the admin's JWT (admin RLS authorizes). Revoking blocks NEW
+    conversations (resolution gates on `revoked_at IS NULL`) but NEVER terminates a
+    live one — the opaque per-conversation token (US-071) is independent of the key
+    once minted. Only an active key is flipped (`revoked_at=is.null`), so a
+    double-revoke is a no-op rather than moving the timestamp.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        r = await http.patch(
+            f"{SUPABASE_URL}/rest/v1/widget_keys",
+            params={"id": f"eq.{key_id}", "revoked_at": "is.null"},
+            headers=_supabase_headers(user),
+            json={"revoked_at": datetime.now(timezone.utc).isoformat()},
+        )
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status >= 500:
+                raise HTTPException(
+                    status_code=502,
+                    detail="could not revoke widget key (upstream error)",
+                )
+            # A malformed non-UUID key_id → PostgREST 400/22P02.
+            raise HTTPException(status_code=400, detail="invalid widget key id")
+        rows = r.json()
+    if not rows:
+        # Not the caller's to manage (RLS-hidden), nonexistent, or already revoked —
+        # all collapse to "nothing active to revoke here".
+        raise HTTPException(status_code=404, detail="no active widget key to revoke")
+    return {"widget_key": rows[0]}
+
+
+@app.post("/widget/keys/resolve")
+async def widget_resolve_key(req: ResolveWidgetKeyRequest) -> dict:
+    """US-072: public key resolution — validate NOT-REVOKED before anything mints.
+
+    The widget loader (US-083) calls this on open with its non-secret public_key.
+    A valid, active key returns `{"active": true}`; a revoked, unknown, or
+    malformed key returns 404 — the widget's cue to refuse to start (no
+    conversation, no token; US-078 owns conversation creation and re-resolves
+    server-side). The response leaks NO workspace topology (workspace_id /
+    bot_user_id stay server-side).
+
+    Anonymous public surface: Public-widget CORS is US-074's concern, per-key
+    origin enforcement US-073's, rate-limiting US-076's — all layer on top of this
+    gate. These routes do not widen the authenticated /api/* CORS posture.
+    """
+    if not is_widget_public_key(req.public_key):
+        raise HTTPException(status_code=404, detail="unknown or inactive widget key")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        resolved = await _resolve_widget_key(http, req.public_key)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="unknown or inactive widget key")
+    return {"active": True}
 
 
 @app.get("/healthz")
