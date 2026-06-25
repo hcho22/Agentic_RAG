@@ -120,3 +120,28 @@ def is_origin_allowed(
         return True
     # Exact, un-normalized string membership.
     return origin in allowed_origins
+
+
+def has_registered_origin(allowed_origins: list[str] | None) -> bool:
+    """US-073 follow-up (issue #36): does this allowlist register a usable origin?
+
+    The issuance-side mirror of `is_origin_allowed`'s empty-allowlist check. A key
+    whose allowlist is empty/null — or holds only blank/whitespace entries — is
+    INACTIVE under the fail-closed resolution gate: it would resolve to a 404 for
+    every request and so silently never work. Issuance calls this to reject such a
+    key up front (a hard 400) rather than mint a key that is dead on arrival.
+
+    Returns True iff at least one entry is non-blank, i.e. there is something a
+    browser `Origin` *could* match. The dev-only `"*"` wildcard counts — it is a
+    non-blank entry (and a deliberately permissive one). This guard asserts the
+    key is potentially-functional, NOT that any specific origin is well-formed:
+    consistent with `is_origin_allowed`, comparison stays exact/un-normalized, so
+    a mis-typed origin still fails CLOSED at resolution. It only stops the
+    *empty* case the admin can't otherwise tell is broken.
+
+    Pure (no DB, no I/O) so it is always unit-testable; `main.py`'s
+    `issue_widget_key` calls it before generating a key or touching the DB.
+    """
+    if not allowed_origins:
+        return False
+    return any(o and o.strip() for o in allowed_origins)

@@ -235,7 +235,7 @@ The backend exposes:
 | `POST` | `/api/sql` | Text-to-SQL via the semantic-layer compiler |
 | `POST` | `/api/web-search` | Web fallback |
 | `POST` | `/api/subagent` | Spawn a document sub-agent |
-| `POST` | `/api/support/widget-keys` | Admin: issue a new (non-secret) widget public key for a workspace you administer; the first key issued lazily provisions the workspace support bot (US-072) |
+| `POST` | `/api/support/widget-keys` | Admin: issue a new (non-secret) widget public key for a workspace you administer; the first key issued lazily provisions the workspace support bot. Rejects an empty/blank `allowed_origins` with a 400 - a key with no registered origin is inactive under the US-073 fail-closed gate, so it is refused at creation rather than minted dead (US-072/US-073) |
 | `GET` | `/api/support/widget-keys?workspace_id=…` | Admin: list a workspace's widget keys (active + revoked) for the `/support/settings` UI (US-072) |
 | `POST` | `/api/support/widget-keys/{key_id}/revoke` | Admin: revoke a widget key - a one-way `revoked_at` latch that blocks new conversations but never terminates a live one (US-072) |
 | `POST` | `/widget/keys/resolve` | Public widget: resolve a non-secret `public_key` on open, gating on not-revoked then the per-key registered-origin allowlist (fail-closed - an empty allowlist or a missing/unlisted request `Origin` is refused with the same opaque 404) under the service role; returns `{"active": true}` or 404 and leaks no workspace topology (US-072/US-073) |

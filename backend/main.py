@@ -46,6 +46,7 @@ from conversation_tokens import (
 )
 from widget_keys import (
     generate_public_key,
+    has_registered_origin,
     is_origin_allowed,
     is_widget_public_key,
 )
@@ -2483,7 +2484,24 @@ async def issue_widget_key(
     The response includes `public_key` ON PURPOSE: it is non-secret and the admin
     must copy it into their page's loader snippet. (This is the opposite of the
     customer token, which is returned once and never logged.)
+
+    Issuance-time guard (issue #36, US-073 follow-up): an empty/blank
+    `allowed_origins` is rejected with a 400 BEFORE any key is generated or the bot
+    is provisioned. Under US-073's fail-closed resolution gate such a key is
+    INACTIVE and would silently never resolve, so we refuse to mint a dead key
+    rather than surprise the admin later. This is defense-in-depth UX, not a
+    security boundary — the resolution gate already prevents an originless key from
+    working; here we just make the failure loud at creation. The dev-only `"*"`
+    wildcard is a non-empty allowlist and passes.
     """
+    if not has_registered_origin(req.allowed_origins):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "allowed_origins must list at least one origin; a key with no "
+                "origins never resolves (US-073 fail-closed)"
+            ),
+        )
     public_key = generate_public_key()
     async with httpx.AsyncClient(timeout=10.0) as http:
         try:

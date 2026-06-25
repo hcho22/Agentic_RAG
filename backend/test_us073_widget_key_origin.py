@@ -29,6 +29,16 @@ Two layers, in the style of `test_us072_widget_keys.py`:
     Failure indicator (a fail-OPEN bug a test MUST catch): an originless key
     resolves as active, or an unlisted origin resolves successfully.
 
+  * an ISSUANCE-GUARD layer (issue #36, US-073 follow-up; skips cleanly when the
+    app cannot be imported): the mirror of the resolution check, on the WRITE
+    side. `POST /api/support/widget-keys` rejects an empty/blank `allowed_origins`
+    with a hard 400 BEFORE generating a key or touching the DB, so an admin can
+    never mint a key that US-073 would render silently inactive. Driven through
+    the real endpoint via TestClient with the admin auth dependency overridden;
+    the positive control stubs the outbound INSERT to prove a valid allowlist
+    still issues. This is defense-in-depth UX, NOT a security boundary — the
+    resolution gate already stops an originless key from working.
+
 This is defense-in-depth, NOT a hard control — the public_key is non-secret and
 `Origin` is forgeable off-browser; the hard abuse controls are the rate limit +
 circuit breaker (US-076/077) and the leaked-key blast radius is the already-public
@@ -37,8 +47,9 @@ KB.
 Run:
     python -m backend.test_us073_widget_key_origin
 
-The unit layer needs nothing. The integration layer needs only an importable
-backend (it mocks the DB resolve gate; no Supabase round-trip). No OpenAI.
+The unit layer needs nothing. The integration + issuance-guard layers need only an
+importable backend (they mock the DB resolve/insert; no Supabase round-trip). No
+OpenAI.
 """
 
 from __future__ import annotations
@@ -54,6 +65,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 from widget_keys import (  # noqa: E402
     WILDCARD_ORIGIN,
     generate_public_key,
+    has_registered_origin,
     is_origin_allowed,
 )
 
@@ -118,6 +130,23 @@ def _run_unit() -> int:
     assert is_origin_allowed(LISTED, ["https://client.example:443"]) is False
     checks += 1
     print("  unit: exact comparison — trailing-slash / case / port mismatch all fail-closed")
+
+    # Issue #36 follow-up: the issuance-side guard `has_registered_origin` — the
+    # mirror of the empty-allowlist resolution check. It answers "would this key
+    # ever resolve?" so issuance can reject a dead-on-arrival key with a 400.
+    # Empty/null/blank-only => no usable origin (would be silently inactive).
+    assert has_registered_origin([]) is False, "empty allowlist has no usable origin"
+    assert has_registered_origin(None) is False, "null allowlist has no usable origin"
+    assert has_registered_origin([""]) is False, "blank-only allowlist has no usable origin"
+    assert has_registered_origin(["   "]) is False, "whitespace-only allowlist has no usable origin"
+    assert has_registered_origin(["", "   "]) is False, "all-blank allowlist has no usable origin"
+    # One non-blank entry is enough; the dev-only "*" wildcard counts (it is a
+    # non-empty, deliberately permissive allowlist — distinct from empty).
+    assert has_registered_origin([LISTED]) is True
+    assert has_registered_origin([WILDCARD_ORIGIN]) is True, "'*' wildcard is a usable (non-empty) allowlist"
+    assert has_registered_origin(["", LISTED]) is True, "one usable origin among blanks is enough"
+    checks += 1
+    print("  unit: has_registered_origin — empty/null/blank-only rejected; one usable origin (incl '*') accepted")
 
     return checks
 
@@ -234,10 +263,130 @@ def _run_integration() -> int:
         main._resolve_widget_key = original  # type: ignore[assignment]
 
 
+# --------------------------------------------------------------------------- #
+# Issuance guard layer (issue #36, US-073 follow-up) — drives the real
+# POST /api/support/widget-keys via TestClient with the admin auth dependency
+# overridden. The 400-reject for an empty/blank allowlist fires BEFORE any key is
+# generated or the DB is touched, so this needs no Supabase round-trip; the
+# positive control stubs the outbound INSERT + bot provisioning to prove a valid
+# allowlist still issues (the guard lets it through). Skips cleanly if the
+# FastAPI app cannot be imported.
+# --------------------------------------------------------------------------- #
+def _run_issuance_guard() -> int:
+    os.environ.setdefault("SUPABASE_URL", "http://127.0.0.1:54321")
+    os.environ.setdefault("SUPABASE_ANON_KEY", "anon-test-key")
+    os.environ.setdefault("OPENAI_API_KEY", "sk-test-dummy")
+
+    try:
+        import main  # noqa: E402
+        from fastapi.testclient import TestClient  # noqa: E402
+    except Exception as e:  # pragma: no cover - environment-dependent
+        print(f"SKIP issuance guard: cannot import backend app ({e})")
+        return 0
+
+    # Stand in for the admin's authenticated session (the real get_user does a
+    # Supabase round-trip we don't want here) — the guard authorizes nothing, it
+    # only validates the request body, so a fake principal is sufficient.
+    main.app.dependency_overrides[main.get_user] = lambda: main.AuthedUser(
+        id="admin-1", access_token="tok"
+    )
+
+    # A fake httpx client so the POSITIVE control never hits the network: it
+    # returns a representation row exactly as PostgREST would on a successful
+    # INSERT (Prefer: return=representation).
+    class _FakeResp:
+        status_code = 201
+
+        def json(self) -> list[dict]:
+            return [
+                {
+                    "id": "new-key",
+                    "workspace_id": "w",
+                    "public_key": generate_public_key(),
+                    "allowed_origins": [LISTED],
+                }
+            ]
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeClient:
+        def __init__(self, *a: object, **k: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "_FakeClient":
+            return self
+
+        async def __aexit__(self, *a: object) -> bool:
+            return False
+
+        async def post(self, *a: object, **k: object) -> _FakeResp:
+            return _FakeResp()
+
+    async def _noop_bot(http: object, workspace_id: str) -> None:
+        return None
+
+    orig_client = main.httpx.AsyncClient
+    orig_bot = main._ensure_workspace_bot
+    total = 0
+    try:
+        client = TestClient(main.app)
+
+        def issue(allowed_origins: list[str]) -> tuple[int, dict]:
+            r = client.post(
+                "/api/support/widget-keys",
+                json={"workspace_id": "w", "allowed_origins": allowed_origins},
+            )
+            return r.status_code, r.json()
+
+        # Empty allowlist -> hard 400, and the body names the cause. This is the
+        # whole point of issue #36: a key that US-073 would render silently
+        # inactive is refused at creation instead of minted dead.
+        code, body = issue([])
+        assert code == 400, f"empty allowed_origins must be a 400, got {code} {body}"
+        assert "origin" in body.get("detail", "").lower(), (
+            f"400 body must explain the empty-origins cause, got {body}"
+        )
+        total += 1
+        print("  issuance: empty allowed_origins -> 400 (rejected before any key/DB write)")
+
+        # A blank/whitespace-only allowlist is just as dead — same 400. (The guard
+        # checks for a USABLE origin, not merely a non-empty list.)
+        code, body = issue(["   "])
+        assert code == 400, f"blank-only allowed_origins must be a 400, got {code} {body}"
+        total += 1
+        print("  issuance: whitespace-only allowed_origins -> 400 (no usable origin)")
+
+        # Positive control: a real origin is NOT rejected by the guard — issuance
+        # proceeds and returns the created key. Stub the outbound INSERT + bot
+        # provision so this stays offline.
+        main.httpx.AsyncClient = _FakeClient  # type: ignore[assignment,misc]
+        main._ensure_workspace_bot = _noop_bot  # type: ignore[assignment]
+        code, body = issue([LISTED])
+        assert code == 200, f"a valid allowlist must issue (not be guard-rejected), got {code} {body}"
+        assert body.get("widget_key", {}).get("public_key", "").startswith("wk_pk_"), (
+            f"issued key must carry a public_key, got {body}"
+        )
+        total += 1
+        print("  issuance: a registered origin issues normally (guard lets it through)")
+
+        print(
+            f"OK: issue #36 issuance guard passed — {total} endpoint assertions; an "
+            "empty/blank allowed_origins is rejected with a 400 at issuance (no "
+            "dead-on-arrival key), a valid allowlist still issues"
+        )
+        return total
+    finally:
+        main.httpx.AsyncClient = orig_client  # type: ignore[assignment,misc]
+        main._ensure_workspace_bot = orig_bot  # type: ignore[assignment]
+        main.app.dependency_overrides.pop(main.get_user, None)
+
+
 async def _run() -> None:
     unit = _run_unit()
     print(f"  ({unit} unit checks passed)")
     _run_integration()
+    _run_issuance_guard()
 
 
 def main_entry() -> None:
