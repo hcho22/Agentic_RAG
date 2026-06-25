@@ -238,7 +238,7 @@ The backend exposes:
 | `POST` | `/api/support/widget-keys` | Admin: issue a new (non-secret) widget public key for a workspace you administer; the first key issued lazily provisions the workspace support bot (US-072) |
 | `GET` | `/api/support/widget-keys?workspace_id=…` | Admin: list a workspace's widget keys (active + revoked) for the `/support/settings` UI (US-072) |
 | `POST` | `/api/support/widget-keys/{key_id}/revoke` | Admin: revoke a widget key - a one-way `revoked_at` latch that blocks new conversations but never terminates a live one (US-072) |
-| `POST` | `/widget/keys/resolve` | Public widget: resolve a non-secret `public_key` on open, gating on not-revoked under the service role; returns `{"active": true}` or 404 and leaks no workspace topology (US-072) |
+| `POST` | `/widget/keys/resolve` | Public widget: resolve a non-secret `public_key` on open, gating on not-revoked then the per-key registered-origin allowlist (fail-closed - an empty allowlist or a missing/unlisted request `Origin` is refused with the same opaque 404) under the service role; returns `{"active": true}` or 404 and leaks no workspace topology (US-072/US-073) |
 | `POST` | `/widget/conversations/resume` | Public widget: resume an anonymous support conversation from its opaque per-conversation token (`X-Conversation-Token`, not a JWT) - slides the 24h window (US-071) |
 | `GET` | `/widget/conversations/{id}/transcript` | Public widget: fetch a conversation's transcript, authorized by the same opaque token; read-only, never slides the window (US-071) |
 | `GET` | `/healthz` | Liveness check |

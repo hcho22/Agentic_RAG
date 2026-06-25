@@ -46,6 +46,7 @@ from conversation_tokens import (
 )
 from widget_keys import (
     generate_public_key,
+    is_origin_allowed,
     is_widget_public_key,
 )
 from embeddings import (
@@ -2595,25 +2596,46 @@ async def revoke_widget_key(
 
 
 @app.post("/widget/keys/resolve")
-async def widget_resolve_key(req: ResolveWidgetKeyRequest) -> dict:
-    """US-072: public key resolution — validate NOT-REVOKED before anything mints.
+async def widget_resolve_key(
+    req: ResolveWidgetKeyRequest, request: Request
+) -> dict:
+    """US-072/US-073: public key resolution — NOT-REVOKED then per-key ORIGIN gate.
 
     The widget loader (US-083) calls this on open with its non-secret public_key.
-    A valid, active key returns `{"active": true}`; a revoked, unknown, or
-    malformed key returns 404 — the widget's cue to refuse to start (no
-    conversation, no token; US-078 owns conversation creation and re-resolves
-    server-side). The response leaks NO workspace topology (workspace_id /
-    bot_user_id stay server-side).
+    A valid, active key whose allowlist admits the request `Origin` returns
+    `{"active": true}`; a revoked, unknown, malformed, originless, or
+    unlisted-origin request returns the SAME opaque 404 — the widget's cue to
+    refuse to start (no conversation, no token; US-078 owns conversation creation
+    and re-resolves server-side using this same origin helper). The response
+    leaks NO workspace topology (workspace_id / bot_user_id stay server-side) and
+    nothing about whether the key exists or which origins it allows.
 
-    Anonymous public surface: Public-widget CORS is US-074's concern, per-key
-    origin enforcement US-073's, rate-limiting US-076's — all layer on top of this
-    gate. These routes do not widen the authenticated /api/* CORS posture.
+    US-073 origin gate (defense-in-depth, NOT a hard control): the public_key is
+    non-secret and `Origin` is forgeable off-browser, so this only blunts casual
+    key-lifting and in-browser cross-site abuse; the hard abuse controls are the
+    rate limit + circuit breaker (US-076/077) and the leaked-key blast radius is
+    the already-public KB. The check is fail-closed (`is_origin_allowed`): a key
+    with an empty/null allowlist is INACTIVE, and a missing/unlisted `Origin` is
+    refused — never fail-open. The not-revoked gate stays FIRST; origin is an
+    additional gate layered on top of it, ordered after so a revoked key and an
+    unlisted origin are indistinguishable in the response.
+
+    Anonymous public surface: Public-widget CORS is US-074's concern,
+    rate-limiting US-076's — both layer on top of this gate. These routes do not
+    widen the authenticated /api/* CORS posture.
     """
     if not is_widget_public_key(req.public_key):
         raise HTTPException(status_code=404, detail="unknown or inactive widget key")
     async with httpx.AsyncClient(timeout=10.0) as http:
         resolved = await _resolve_widget_key(http, req.public_key)
     if resolved is None:
+        raise HTTPException(status_code=404, detail="unknown or inactive widget key")
+    # US-073: per-key registered-origin allowlist, fail-closed. Same opaque 404 as
+    # revoked/unknown so the response never reveals that the key exists or which
+    # origins it permits.
+    if not is_origin_allowed(
+        request.headers.get("origin"), resolved.get("allowed_origins")
+    ):
         raise HTTPException(status_code=404, detail="unknown or inactive widget key")
     return {"active": True}
 

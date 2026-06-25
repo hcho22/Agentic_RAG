@@ -57,6 +57,66 @@ def is_widget_public_key(value: str | None) -> bool:
     FORMAT check only — it asserts nothing about existence or not-revoked status;
     that authoritative gate is the service-role lookup in `main.py`.
     """
-    return bool(value) and value.startswith(PUBLIC_KEY_PREFIX) and len(value) > len(
-        PUBLIC_KEY_PREFIX
+    # `value is not None` (not `bool(value)`) so mypy narrows away the Optional;
+    # behaviour is identical because an empty "" still fails the prefix check.
+    return (
+        value is not None
+        and value.startswith(PUBLIC_KEY_PREFIX)
+        and len(value) > len(PUBLIC_KEY_PREFIX)
     )
+
+
+# A "*" entry opts a key into matching ANY origin. This is a DEV-ONLY escape
+# hatch (PRD US-073 F3 row): it disables the allowlist entirely, so it must
+# NEVER be set on a production key. It is deliberately distinct from an empty
+# allowlist — `["*"]` is a non-empty allowlist (active, wildcard) whereas `[]`
+# or null is empty (inactive, fail-closed). Keep those two cases separate.
+WILDCARD_ORIGIN = "*"
+
+
+def is_origin_allowed(
+    origin: str | None, allowed_origins: list[str] | None
+) -> bool:
+    """US-073: is `origin` permitted by a widget key's `allowed_origins`?
+
+    This is a per-key registered-origin allowlist check, applied on top of the
+    US-072 not-revoked resolution gate. It is **defense-in-depth, NOT a hard
+    control**: the `public_key` is non-secret and the `Origin` header is trivially
+    forgeable off-browser, so this only blunts casual key-lifting and in-browser
+    cross-site abuse. The hard abuse controls are the rate limit + circuit breaker
+    (US-076/077), and the leaked-key blast radius is the already-public KB.
+
+    **Fail-closed by construction** — every ambiguous case returns False:
+
+      * empty OR null allowlist  -> False. A key with no registered origin is
+        INACTIVE; we never fail-open to "allow everything when unset".
+      * missing OR blank origin   -> False. The cross-origin widget always emits
+        an `Origin`; its absence means refuse, not allow (even under wildcard).
+      * `"*"` present in allowlist -> True. The documented dev-only opt-in above.
+      * otherwise                  -> exact string membership in the allowlist.
+
+    Comparison semantics: an origin is scheme+host[+port] with NO path and NO
+    trailing slash, which is exactly the form a browser puts in the `Origin`
+    header (and which it already lower-cases the scheme and host of). We compare
+    as **exact strings with no normalization** on purpose: it keeps this helper
+    pure and trivially correct, and any mismatch (casing, stray slash, port)
+    fails CLOSED — the safe direction for a defense-in-depth gate. Admins must
+    therefore register each origin in the canonical form the browser sends.
+
+    Pure (no DB, no I/O) so it is always unit-testable; `main.py`'s
+    `widget_resolve_key` reads the request `Origin` and calls this against the
+    resolved key's `allowed_origins`. US-078 (server-side re-resolution at
+    conversation creation) reuses this same helper rather than re-deriving it.
+    """
+    # Empty/unset allowlist => inactive key. Catches both None and [].
+    if not allowed_origins:
+        return False
+    # Missing or blank Origin => refuse (fail-closed), even with a wildcard: an
+    # absent origin is not "any origin", it is no origin to match.
+    if not origin or not origin.strip():
+        return False
+    # Dev-only opt-in: "*" disables the allowlist. NON-PRODUCTION (see above).
+    if WILDCARD_ORIGIN in allowed_origins:
+        return True
+    # Exact, un-normalized string membership.
+    return origin in allowed_origins
