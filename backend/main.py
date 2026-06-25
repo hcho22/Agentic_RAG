@@ -157,6 +157,11 @@ SUPABASE_ANON_KEY = os.environ["SUPABASE_ANON_KEY"]
 # caller has any RLS-visible row. If unset, the share endpoints fall back
 # to the user-JWT lookup, which collapses 403 → 404 for callers who can't
 # see the doc at all (still secure, just less precise).
+# US-069 (ADR-0008): also the key `backend.support_bot.provision_workspace_bot`
+# uses to create the per-workspace support bot's auth.users row via the GoTrue
+# admin API (required only when support is enabled — that helper resolves it
+# fail-closed at call time). It bypasses RLS — keep it server-side, never
+# client-side; this module never logs or returns it.
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or None
 # US-068 (ADR-0008): the project JWT secret GoTrue signs with. NEW signing
 # surface — before this the backend held only the anon key (public, non-signing)
