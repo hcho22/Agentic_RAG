@@ -1,41 +1,41 @@
-"""US-069: lazy, idempotent per-workspace support-bot provisioning (ADR-0008).
+"""Per-workspace support bot: provisioning (US-069) and per-turn retrieval (US-070).
 
-`provision_workspace_bot(workspace_id)` is the **single** place the backend
-creates the per-workspace support bot. The bot is NOT a new content role — it is
-an ordinary `auth.users` row plus an ordinary
-`workspace_membership(role='member', is_bot=true)` row. `is_bot` is a FLAG, not a
-role: like `workspace_membership.role` it is administrative metadata that never
-enters any visibility/retrieval predicate (ADR-0002). The bot therefore sees only
-documents shared to it via `chunk_acl` (share-to-bot), resolved from `auth.uid()`
-exactly like any other principal; there is no dedicated `bot` content-role.
+This module owns the support bot's whole server-side lifecycle. Both halves lean
+on ADR-0008's principle that the bot is an ordinary authenticated *member*, not a
+new content role:
 
-Two invariants this primitive guarantees:
+  * PROVISIONING (US-069) — `provision_workspace_bot(workspace_id)` lazily and
+    idempotently creates the bot: an ordinary `auth.users` row plus a
+    `workspace_membership(role='member', is_bot=true)` row, exactly one per
+    workspace. `is_bot` is a FLAG, not a role — like `workspace_membership.role`
+    it is administrative metadata that never enters any visibility/retrieval
+    predicate (ADR-0002). Creating the `auth.users` row requires the service-role
+    key (GoTrue admin API); that key bypasses RLS and is strictly server-side.
 
-  * **Lazy** — it runs only when a caller invokes it (US-072 calls it on the first
-    widget-key issuance, i.e. when support is first enabled). A knowledge-
-    assistant-only deployment never calls it and so never spawns a bot. Nothing
-    provisions a bot at workspace-creation time.
-  * **Idempotent / exactly one bot per workspace, not per key** — a second call
-    for the same workspace returns the existing bot and creates no second row. The
-    hard guarantee is the partial unique index
-    `workspace_membership_one_bot_per_workspace` (where is_bot) from
-    20260624120000_workspace_membership_is_bot.sql: even two *concurrent* first-
-    time provisions cannot create two bots — the loser of the race gets a unique
-    violation, drops the orphan `auth.users` row it just made, and returns the
-    winner's bot. The app-level fast-path is an optimization on top of that DB
-    guard, never the sole defense (the constraint must NOT be "check-then-insert").
+  * RETRIEVAL (US-070) — `run_bot_deflection_turn(...)` runs one customer turn's
+    deflection pipeline AS that bot: mint a ~60s Supabase-compatible JWT
+    (`sub = bot_user_id`, US-068), call `match_chunks`/`keyword_search` with it so
+    `auth.uid()` resolves to the bot and the existing membership + owner-OR-ACL
+    boundary applies WHOLESALE, then discard the token. The bot therefore answers
+    ONLY from documents shared to it via `chunk_acl` (share-to-bot) — there is NO
+    new retrieval predicate and NO `principal_ids` passed from the backend.
 
-The returned id is what populates `conversations.bot_user_id`.
+The two halves meet at `conversations.bot_user_id`: provisioning returns that id;
+retrieval mints a token for it each turn. The minter (US-068 `mint_supabase_jwt`)
+is dependency-INJECTED into the retrieval path rather than imported, to avoid a
+`main.py` ⇄ `support_bot.py` import cycle and to keep the retrieval seam pure and
+unit-testable with no JWT secret; the real call site (US-080) passes it in.
 
-Creating an `auth.users` row REQUIRES the service-role key (GoTrue admin API,
-`POST {SUPABASE_URL}/auth/v1/admin/users`), so this primitive uses
-`SUPABASE_SERVICE_ROLE_KEY`. That key bypasses RLS and can forge any identity:
-it is strictly server-side and MUST NEVER be logged, returned, or embedded
-client-side. This module never logs the key and builds no error message from the
-request headers. The key is resolved fail-closed at call time (not import) so a
-deployment that never enables support need not set it.
+SECURITY (shared): two distinct server-side-only secrets pass through this module
+and MUST NEVER be logged, returned, or sent client-side — the service-role key
+(provisioning; bypasses RLS, can forge any identity) and the minted bot JWT
+(retrieval; a bearer credential equivalent to a logged-in session). Neither is
+ever built into an error message from request headers; the only field a caller
+may surface to the customer is `DeflectionResult.customer_message`.
 
-Test: `python -m backend.test_us069_bot_provisioning`.
+Tests: `python -m backend.test_us069_bot_provisioning`,
+`python -m backend.test_us070_bot_retrieval`,
+`python -m backend.test_us070_bot_retrieval_integration`.
 """
 
 from __future__ import annotations
@@ -43,10 +43,31 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from typing import Callable
 
 import httpx
+from openai import AsyncOpenAI
+
+from escalation import DeflectionResult, EscalationConfig, run_deflection_pipeline
+from retrieval import DEFAULT_TOP_K
 
 log = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# US-069: lazy, idempotent per-workspace support-bot provisioning (ADR-0008).
+#
+# `provision_workspace_bot` is the SINGLE place the backend creates the bot.
+# Lazy — runs only when a caller invokes it (US-072 calls it on first widget-key
+# issuance); nothing provisions a bot at workspace-creation time, so a
+# knowledge-assistant-only deployment never spawns one. Idempotent / exactly one
+# bot per workspace (not per key): the hard guarantee is the partial unique index
+# `workspace_membership_one_bot_per_workspace` (where is_bot) from
+# 20260624120000_workspace_membership_is_bot.sql — even two *concurrent* first-
+# time provisions cannot create two bots; the loser gets a unique violation,
+# drops the orphan `auth.users` row it just made, and returns the winner's bot.
+# The app-level fast-path is an optimization on top of that DB guard, never the
+# sole defense (the constraint must NOT be "check-then-insert").
+# -----------------------------------------------------------------------------
 
 # Default lifetime for the per-provision HTTP client when the caller passes none.
 _DEFAULT_TIMEOUT = 10.0
@@ -312,3 +333,108 @@ async def provision_workspace_bot(
     finally:
         if own_client:
             await client.aclose()
+
+
+# -----------------------------------------------------------------------------
+# US-070: support-bot retrieval — per-turn bot token calls match_chunks as the bot.
+#
+# Runs the ADR-0003 deflection pipeline AS the bot provisioned above: mint a ~60s
+# Supabase-compatible JWT (US-068), retrieve with it so the existing membership +
+# owner-OR-ACL boundary resolves the bot from `auth.uid()` wholesale, discard.
+# The bot token is a new *issuer* beside GoTrue, not a new enforcement path — on
+# the wire it is an ordinary `role=authenticated` JWT, so a backend that forgets
+# the active-workspace filter can only under-return within the bot's own
+# membership, never leak across the tenant boundary.
+# -----------------------------------------------------------------------------
+
+# ~60s: long enough for one turn's retrieval round trip, short enough that a
+# leaked token (which, per the threat model, this module is built to prevent
+# leaking at all) is near-useless. Minted fresh PER TURN and discarded — never
+# cached across turns (US-070).
+BOT_TOKEN_TTL_SECONDS = 60
+
+# (sub, ttl_seconds) -> compact JWT string. This is exactly the shape of US-068's
+# `mint_supabase_jwt`; injected so this module needs neither the signing secret
+# nor an import of `main.py` (see the module docstring).
+MintToken = Callable[[str, int], str]
+
+
+def build_bot_supabase_headers(bot_token: str, anon_key: str) -> dict[str, str]:
+    """Supabase/PostgREST headers carrying the bot's minted JWT as the Bearer.
+
+    Identical in shape to `main._supabase_headers` for a human user: `apikey` is
+    the public anon key (the PostgREST gateway key, NOT an identity), and the
+    `Authorization: Bearer <jwt>` is what actually carries identity — here the
+    bot's short-lived self-signed token. PostgREST verifies the JWT with the
+    project secret and resolves `auth.uid()` to the bot's `sub`, so RLS treats
+    the bot exactly like any `authenticated` member.
+    """
+    return {
+        "apikey": anon_key,
+        "Authorization": f"Bearer {bot_token}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+
+async def run_bot_deflection_turn(
+    *,
+    mint_token: MintToken,
+    anon_key: str,
+    bot_user_id: str,
+    workspace_id: str,
+    embedder_client: AsyncOpenAI,
+    answerer_client: AsyncOpenAI,
+    judge_client: AsyncOpenAI,
+    http: httpx.AsyncClient,
+    supabase_url: str,
+    message: str,
+    config: EscalationConfig,
+    match_threshold: float,
+    top_k: int = DEFAULT_TOP_K,
+    answerer_model: str | None = None,
+    judge_model: str | None = None,
+) -> DeflectionResult:
+    """Run one customer turn's deflection pipeline AS the support bot (US-070).
+
+    Mints a fresh ~60s bot JWT for `bot_user_id` (via the injected `mint_token`),
+    runs the ADR-0003 deflection pipeline with that JWT in the Supabase headers so
+    `match_chunks`/`keyword_search` execute as the bot, and passes the
+    conversation's `workspace_id` as the ordinary NON-security narrowing filter
+    (distinct from the JWT, which is the trust boundary). The token is minted per
+    call and never cached — call this once per turn.
+
+    `config` supplies the validated escalation knobs (US-050) the endpoint built
+    once at startup; `match_threshold` is the existing retrieval similarity
+    threshold the gate reuses (`retrieval.get_similarity_threshold()`).
+
+    Returns the pipeline's `DeflectionResult`. Only `customer_message` is ever
+    safe to surface to the customer; the bot token appears in NONE of the returned
+    fields and is not logged here.
+    """
+    # Mint a fresh token for THIS turn. The "no caching across turns" guarantee
+    # is structural: the token is held only in this local and the headers dict
+    # below — there is NO module- or instance-level cache anywhere — so the next
+    # turn necessarily calls mint_token again. Both locals fall out of scope when
+    # the pipeline call returns; we deliberately do NOT pretend to "scrub" the
+    # secret from memory (rebinding the local would not touch the copy already
+    # inside the headers, so it would be theatre, not hygiene).
+    bot_token = mint_token(bot_user_id, BOT_TOKEN_TTL_SECONDS)
+    supabase_headers = build_bot_supabase_headers(bot_token, anon_key)
+    return await run_deflection_pipeline(
+        embedder_client=embedder_client,
+        answerer_client=answerer_client,
+        judge_client=judge_client,
+        http=http,
+        supabase_url=supabase_url,
+        supabase_headers=supabase_headers,
+        message=message,
+        tau_sim=config.tau_sim,
+        n_min=config.n_min,
+        match_threshold=match_threshold,
+        faithfulness_cutoff=config.faithfulness_cutoff,
+        top_k=top_k,
+        answerer_model=answerer_model,
+        judge_model=judge_model,
+        workspace_id=workspace_id,
+    )

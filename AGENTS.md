@@ -74,3 +74,27 @@ The per-workspace support bot is **not a new content role**. It is an ordinary `
 - **Optional env `SUPPORT_BOT_EMAIL_DOMAIN`** (default `bots.support.internal`) scopes the bot's internal, non-routable email; the row is admin-created with `email_confirm=true` and no password, so the address never logs in or receives mail.
 
 Test: `python -m backend.test_us069_bot_provisioning` - a unit layer (always runs: workspace_id validation, fail-closed on missing `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` before any I/O) plus an integration layer (skips cleanly without local Supabase / the `is_bot` column / a reachable API): provisions twice and asserts exactly ONE `is_bot` row with `role='member'` and a stable returned id (one bot per workspace), no bot before provisioning, member-listing exclusion (`not is_bot`) with the human member as positive control, no `bot` role in the role CHECK, and the partial-unique-index race guard rejecting a second bot insert.
+
+## Support-bot retrieval: minted-JWT principal, and a NON-security workspace filter (US-070, ADR-0008)
+
+The support bot is **not** a privileged retriever. Each customer turn,
+`backend/support_bot.py:run_bot_deflection_turn` mints a ~60s `role=authenticated`
+JWT with `sub = bot_user_id` (US-068 `mint_supabase_jwt`, dependency-injected to avoid a
+`main.py` import cycle), runs the ADR-0003 deflection pipeline with that JWT in the Supabase
+headers, then discards the token (no cross-turn cache). So `match_chunks`/`keyword_search` resolve
+`auth.uid()` to the bot and the **existing** membership + owner-OR-ACL boundary applies wholesale —
+the bot sees only documents shared to it via `chunk_acl` (share-to-bot). There is **no new content
+role and no new retrieval predicate** (ADR-0008: a new issuer beside GoTrue, not a new enforcement
+path). The minted token is a bearer credential: it must never reach an SSE event, response body, or
+log line — only `DeflectionResult.customer_message` is client-safe.
+
+Sharp edge — **`filter_workspace_id` is NOT the trust boundary.** Migrations
+`20260624150000` / `20260624150100` add `filter_workspace_id uuid default null` to
+`match_chunks` / `keyword_search` as an *ordinary non-security narrowing filter*, AND-ed beside
+`filter_topics` (CONTEXT "Active workspace"; reserved by the US-007 note). It can only **subtract**
+within what the `auth.uid()`-resolved membership clause already allows; `null` is a no-op, so
+`/api/chat` (which passes no `workspace_id`) and E4/E6 are byte-identical. The boundary is the
+membership EXISTS clause, never this param. Both hybrid legs carry it so the narrowing is coherent.
+Pinned live by `backend/test_us070_bot_retrieval_integration.py` (bot sees only the shared doc; the
+filter narrows without leaking) and in isolation by `backend/test_us070_bot_retrieval.py` (mint
+per-turn, bot bearer + filter on both legs, token never in the result).

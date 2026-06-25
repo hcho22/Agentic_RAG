@@ -434,6 +434,7 @@ async def run_deflection_pipeline(
     top_k: int = DEFAULT_TOP_K,
     answerer_model: str | None = None,
     judge_model: str | None = None,
+    workspace_id: str | None = None,
 ) -> DeflectionResult:
     """Answer or escalate one support message via the ADR-0003 deflection pipeline.
 
@@ -447,9 +448,15 @@ async def run_deflection_pipeline(
                 → unfaithful ⇒ escalate
 
     `supabase_headers` MUST carry the customer's/bot's JWT so retrieval runs
-    under RLS + the workspace membership clause — the pipeline passes no
-    principal or workspace id (ADR-0002). On every escalate the customer sees
-    only `GENERIC_DEFERRAL`; the gate `reason` stays on the internal result.
+    under RLS + the workspace membership clause — that membership, resolved from
+    `auth.uid()`, IS the trust boundary (ADR-0002), never a passed id. `workspace_id`
+    is the separate, optional, NON-security active-workspace narrowing filter
+    (US-070): when the support-bot turn passes the conversation's `workspace_id`
+    it narrows retrieval to that one workspace's documents; `None` (the
+    knowledge-assistant path) leaves retrieval exactly as before. It is forwarded
+    to `hybrid_search` as the ordinary `filter_workspace_id` param, distinct from
+    the JWT that carries identity. On every escalate the customer sees only
+    `GENERIC_DEFERRAL`; the gate `reason` stays on the internal result.
 
     User-initiated "talk to a human" is NOT handled here — that is a separate
     widget button owned by the support-surface section (US-066+); this pipeline
@@ -457,7 +464,8 @@ async def run_deflection_pipeline(
     """
     # The OR's left operand: cheap, retrieval-grounded. Retrieve ONCE (hybrid),
     # then gate on raw cosine. hybrid_search embeds under the embedder role and
-    # forwards only the JWT headers — no workspace id crosses the boundary.
+    # forwards the JWT headers (identity/boundary) plus the optional non-security
+    # `workspace_id` narrowing filter — the boundary stays auth.uid()-resolved.
     chunks = await hybrid_search(
         openai_client=embedder_client,
         http=http,
@@ -465,6 +473,7 @@ async def run_deflection_pipeline(
         supabase_headers=supabase_headers,
         query=message,
         top_k=top_k,
+        workspace_id=workspace_id,
     )
     retrieval = retrieval_gate(chunks, tau_sim, n_min, match_threshold)
     if not retrieval.strong:

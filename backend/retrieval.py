@@ -272,12 +272,21 @@ async def search_documents(
     query: str,
     top_k: int = DEFAULT_TOP_K,
     filters: MetadataFilters | None = None,
+    workspace_id: str | None = None,
 ) -> list[SearchDocumentsResult]:
     """Embed `query`, call match_chunks RPC under the user's JWT, return rows.
 
     `supabase_headers` MUST carry the user's access token so PostgREST runs
     the RPC as the `authenticated` role with RLS active. Calling this with
     service-role headers would bypass RLS and leak cross-user chunks.
+
+    `workspace_id` (US-070) is an OPTIONAL ordinary non-security narrowing filter
+    forwarded to match_chunks' `filter_workspace_id` param — NOT the trust
+    boundary (that is the auth.uid()-resolved membership + owner-OR-ACL predicate
+    inside the RPC). When `None` (the authenticated /api/chat path) it is omitted
+    entirely, so the call is byte-identical to before; when set (the support-bot
+    turn) it narrows to one workspace's documents. Because it is AND-ed inside the
+    RPC it can only subtract, never widen.
     """
     embeddings = await embed_texts(openai_client, [query])
     if not embeddings:
@@ -288,6 +297,8 @@ async def search_documents(
         "match_count": min(max(top_k, 1), MAX_TOP_K),
     }
     payload.update(_filters_to_rpc_payload(filters))
+    if workspace_id is not None:
+        payload["filter_workspace_id"] = workspace_id
     r = await http.post(
         f"{supabase_url}/rest/v1/rpc/match_chunks",
         headers=supabase_headers,
@@ -312,6 +323,7 @@ async def keyword_search(
     query: str,
     top_k: int = DEFAULT_TOP_K,
     filters: MetadataFilters | None = None,
+    workspace_id: str | None = None,
 ) -> list[SearchDocumentsResult]:
     """Call keyword_search RPC under the user's JWT, return ranked rows.
 
@@ -321,12 +333,20 @@ async def keyword_search(
     so the magnitude doesn't need to match. `filters` parity with match_chunks
     (US-017) was added in 20260505121000_keyword_search_filters.sql so hybrid
     queries apply the same metadata filter on both halves.
+
+    `workspace_id` (US-070) mirrors `search_documents`: an optional non-security
+    narrowing filter forwarded to keyword_search's `filter_workspace_id`, omitted
+    when `None`. Applying it on this leg too keeps hybrid's active-workspace
+    narrowing coherent across the fused result (the keyword leg must not re-admit
+    a different workspace's row that the vector leg filtered out).
     """
     payload: dict[str, Any] = {
         "query": query,
         "match_count": min(max(top_k, 1), MAX_TOP_K),
     }
     payload.update(_filters_to_rpc_payload(filters))
+    if workspace_id is not None:
+        payload["filter_workspace_id"] = workspace_id
     r = await http.post(
         f"{supabase_url}/rest/v1/rpc/keyword_search",
         headers=supabase_headers,
@@ -348,6 +368,7 @@ async def keyword_only_search(
     query: str,
     top_k: int = DEFAULT_TOP_K,
     filters: MetadataFilters | None = None,
+    workspace_id: str | None = None,
 ) -> list[SearchDocumentsResult]:
     """Keyword-only retrieval (US-033). Thin wrapper over `keyword_search`.
 
@@ -364,6 +385,7 @@ async def keyword_only_search(
         query=query,
         top_k=top_k,
         filters=filters,
+        workspace_id=workspace_id,
     )
 
 
@@ -421,6 +443,7 @@ async def hybrid_search(
     query: str,
     top_k: int = DEFAULT_TOP_K,
     filters: MetadataFilters | None = None,
+    workspace_id: str | None = None,
 ) -> list[SearchDocumentsResult]:
     """Vector + keyword retrieval fused via RRF (US-021).
 
@@ -433,6 +456,10 @@ async def hybrid_search(
     Returned `similarity` is the fused RRF score (small absolute numbers,
     bounded by `len(rankings) / (k + 1)` ≈ 0.033 at k=60). Magnitudes are not
     comparable to vector-only or keyword-only results — only ordering is.
+
+    `workspace_id` (US-070) is forwarded to BOTH legs so the optional
+    non-security active-workspace narrowing applies to the whole fused result.
+    `None` (the default, /api/chat) is a no-op on both legs.
     """
     pool_size = min(max(top_k * HYBRID_POOL_MULTIPLIER, top_k), MAX_TOP_K)
 
@@ -444,6 +471,7 @@ async def hybrid_search(
         query=query,
         top_k=pool_size,
         filters=filters,
+        workspace_id=workspace_id,
     )
     keyword_task = keyword_search(
         http=http,
@@ -452,6 +480,7 @@ async def hybrid_search(
         query=query,
         top_k=pool_size,
         filters=filters,
+        workspace_id=workspace_id,
     )
     vector_results, keyword_results = await asyncio.gather(vector_task, keyword_task)
 
