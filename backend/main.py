@@ -80,6 +80,11 @@ from permissions import (
     revoke_doc_from_principal,
     snapshot_doc_acls,
 )
+from rate_limiting import (
+    RateLimiter,
+    build_rate_limiter,
+    get_rate_limiter_name,
+)
 from reranking import (
     build_reranker,
     get_rerank_input_k,
@@ -222,6 +227,36 @@ if WIDGET_CORS_ORIGIN_CACHE_TTL <= 0:
     # the per-request-DB-hit DoS lever the cache exists to prevent. Require > 0.
     raise ValueError("WIDGET_CORS_ORIGIN_CACHE_TTL must be > 0")
 
+# US-076 (ADR-0008): the public widget surface drives PAID retrieval + LLM
+# draft/judge calls, so it is a cost-amplification DoS target. Every customer
+# message / key-resolution request is drawn down against TWO sliding windows via
+# the US-075 `RateLimiter` seam: a PER-KEY window (caps aggregate abuse of one
+# `public_key` across every session/IP) and a PER-SESSION/IP window (caps one
+# caller hammering across keys). A breach refuses with a 429 having done NO costly
+# work (no DB resolve, no retrieval, no LLM) — distinct from the US-077 circuit
+# breaker, which returns a 200 generic deferral. v1 cost accounting is COARSE
+# (requests-per-window, `cost`-weighted; not precise token/$ metering — F3 future
+# refinement). App-level limiting is the portable default; an edge/WAF limiter is
+# the recommended production complement (P5) since it stops abuse before the app.
+# Limits are env-tunable so a low test window can exercise the breach path.
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError as e:
+        raise ValueError(f"{name} must be an integer") from e
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0")
+    return value
+
+
+WIDGET_RATE_LIMIT_WINDOW_SECONDS = _positive_int_env(
+    "WIDGET_RATE_LIMIT_WINDOW_SECONDS", 60
+)
+WIDGET_RATE_LIMIT_PER_KEY = _positive_int_env("WIDGET_RATE_LIMIT_PER_KEY", 300)
+WIDGET_RATE_LIMIT_PER_SESSION = _positive_int_env(
+    "WIDGET_RATE_LIMIT_PER_SESSION", 30
+)
+
 # US-025: `ChatMode` and the resolved `DEFAULT_CHAT_MODE` moved below — the
 # default now depends on the answerer provider (responses is OpenAI-only), so it
 # is resolved against `_ANSWERER_CONFIG` after that config is built. See
@@ -345,6 +380,16 @@ _SQL_SCHEMA_SNAPSHOT: str | None = None
 # US-030's planner and compiler will read from this; until then it just
 # guarantees the YAML matches the live crm schema.
 _SEMANTIC_LAYER: SemanticLayer | None = None
+
+# US-076 (ADR-0008): the swappable `RateLimiter` (US-075) backing the public
+# widget surface's per-key + per-session/IP windows, built once at startup when
+# support is configured (None = support unconfigured, so the widget endpoints 503
+# before reaching anything costly — there is nothing to rate-limit). The Postgres
+# backend borrows `_RATE_LIMITER_HTTP`, a long-lived client this module owns and
+# closes at shutdown; the Redis backend owns its own client (its `aclose` closes
+# it). Both are torn down in `_on_shutdown`.
+_RATE_LIMITER: RateLimiter | None = None
+_RATE_LIMITER_HTTP: httpx.AsyncClient | None = None
 
 # LangSmith: when LANGSMITH_API_KEY is set the SDK auto-ships traces for every
 # wrapped OpenAI call and every @traceable function. When it's missing,
@@ -744,6 +789,59 @@ async def _on_startup() -> None:
                 get_embedding_model(),
                 measured_dim,
             )
+
+    # US-076: build the public-widget rate limiter once, when support is
+    # configured. The widget endpoints all require the service role (they 503
+    # without it), so absent SUPABASE_SERVICE_ROLE_KEY there is no widget surface
+    # to protect and the limiter stays None (enforcement is a no-op). When support
+    # IS configured we build it through the US-075 factory, which FAILS CLOSED at
+    # build time on a misconfigured backend (e.g. RATE_LIMITER=redis with no
+    # REDIS_URL) — a loud boot failure beats a silently-unprotected request path,
+    # the same stance as the semantic-layer load above. The Postgres backend
+    # borrows a long-lived client we own; the Redis backend builds its own.
+    global _RATE_LIMITER, _RATE_LIMITER_HTTP
+    if SUPABASE_SERVICE_ROLE_KEY:
+        _RATE_LIMITER_HTTP = httpx.AsyncClient(timeout=10.0)
+        _RATE_LIMITER = build_rate_limiter(
+            get_rate_limiter_name(),
+            http=_RATE_LIMITER_HTTP,
+            supabase_url=SUPABASE_URL,
+            service_role_key=SUPABASE_SERVICE_ROLE_KEY,
+        )
+        log.info(
+            "widget_rate_limit.enabled backend=%s per_key=%d per_session=%d window=%ds",
+            _RATE_LIMITER.name,
+            WIDGET_RATE_LIMIT_PER_KEY,
+            WIDGET_RATE_LIMIT_PER_SESSION,
+            WIDGET_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    else:
+        log.info(
+            "widget_rate_limit.disabled — SUPABASE_SERVICE_ROLE_KEY unset; the "
+            "public widget surface is unconfigured (its endpoints 503), so there "
+            "is nothing to rate-limit"
+        )
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    # US-076: release the rate limiter and the http client it borrows. The
+    # Postgres backend's aclose() is a no-op (it borrows _RATE_LIMITER_HTTP, which
+    # we close ourselves); the Redis backend closes its own client there. Failures
+    # are swallowed — shutdown must not raise.
+    global _RATE_LIMITER, _RATE_LIMITER_HTTP
+    if _RATE_LIMITER is not None:
+        try:
+            await _RATE_LIMITER.aclose()
+        except Exception:  # noqa: BLE001
+            log.warning("widget_rate_limit.aclose_failed", exc_info=True)
+        _RATE_LIMITER = None
+    if _RATE_LIMITER_HTTP is not None:
+        try:
+            await _RATE_LIMITER_HTTP.aclose()
+        except Exception:  # noqa: BLE001
+            log.warning("widget_rate_limit.http_close_failed", exc_info=True)
+        _RATE_LIMITER_HTTP = None
 
 
 class ChatRequest(BaseModel):
@@ -2724,6 +2822,144 @@ async def _resolve_widget_key(
     return rows[0] if rows else None
 
 
+def _widget_client_ip(request: Request) -> str:
+    """Best-effort caller identity for the US-076 per-session/IP window.
+
+    Prefers the LEFT-most `X-Forwarded-For` hop (the original client) since in
+    production the app sits behind a proxy/load balancer and `request.client.host`
+    is the proxy, not the customer. `X-Forwarded-For` is client-SPOOFABLE, so this
+    window is defense-in-depth: an attacker rotating the header sidesteps it, but
+    the PER-KEY window still aggregates their abuse of a real key, and the edge/WAF
+    limiter (P5) is the harder bound that stops spoofed traffic before the app.
+    Falls back to the socket peer, then a constant, so it never raises.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        first = forwarded.split(",", 1)[0].strip()
+        if first:
+            return first
+    client = request.client
+    return client.host if client else "unknown"
+
+
+async def _charge_widget_window(
+    bucket_key: str, *, limit: int, scope: str, cost: int
+) -> None:
+    """Charge ONE sliding window via the US-075 seam; raise 429 on breach.
+
+    The shared core of the two public-widget windows (`_enforce_widget_session_limit`
+    / `_enforce_widget_key_limit`). The split into single-window helpers (vs one
+    `asyncio.gather` over both) lets the endpoint short-circuit between them: a
+    session-throttled request 429s WITHOUT charging the per-key window, and the
+    per-key window is charged only for a key that has already resolved (exists) —
+    so a rotating-fake-key attacker can never mint a permanent per-key counter row.
+
+    Both are charged on every call (a blocked hit STILL counts — it keeps a
+    hammering caller saturated while a backed-off caller recovers as the window
+    slides). On breach we raise a 429 having done NO costly work. This refusal is
+    DISTINCT from the US-077 circuit breaker, which returns a 200 generic deferral
+    — a throttle says "slow down" (retry the same request), a tripped breaker says
+    "a human will follow up" (no retry needed).
+
+    Coarse v1 accounting (PRD F3): requests-per-window, `cost`-weighted — NOT
+    precise token/$ metering. `cost` lets a heavier endpoint (e.g. US-078's
+    message turn, which drives a full deflection pipeline) charge more than a
+    cheap key-resolution open.
+
+    No-op when `_RATE_LIMITER is None`: that only happens when support is
+    unconfigured, and every widget endpoint 503s before reaching anything costly
+    in that case (a built limiter IS the enforcement; its absence == inert
+    surface). App-level limiting is the portable default; an edge/WAF limiter is
+    the recommended production complement (P5).
+
+    FAILS OPEN on any limiter-backend error: `rate_limit_counters` live in the
+    SAME Postgres as the resolve/retrieval path, so an isolated counter-RPC glitch
+    must NOT 500 the entire public widget surface — availability wins and the
+    edge/WAF limiter (P5) is the hard bound. Only backend/limiter errors fail open;
+    a genuine over-limit decision still raises the 429 (the HTTPException below is
+    raised outside the try, so it is never swallowed).
+    """
+    limiter = _RATE_LIMITER
+    if limiter is None:
+        return
+    try:
+        decision = await limiter.hit(
+            bucket_key,
+            limit=limit,
+            window_seconds=WIDGET_RATE_LIMIT_WINDOW_SECONDS,
+            cost=cost,
+        )
+    except Exception as e:  # noqa: BLE001 - fail OPEN on any backend error
+        # Concise warning, no per-request traceback flood: the counter store is
+        # not a hard dependency / SPOF in front of the widget surface.
+        log.warning(
+            "widget_rate_limit.limiter_error scope=%s — failing open (%s)",
+            scope,
+            e.__class__.__name__,
+        )
+        return
+    if decision.allowed:
+        return
+    log.info(
+        "widget_rate_limit.throttled scope=%s window=%ds count=%d/%d",
+        scope,
+        WIDGET_RATE_LIMIT_WINDOW_SECONDS,
+        decision.count,
+        decision.limit,
+    )
+    # 429 with Retry-After so a well-behaved client backs off. The body is generic
+    # (does not echo which window tripped) — the scope is logged for ops, not
+    # returned, so the response leaks no per-key/per-IP topology.
+    raise HTTPException(
+        status_code=429,
+        detail="rate limit exceeded — too many requests, please retry shortly",
+        headers={"Retry-After": str(WIDGET_RATE_LIMIT_WINDOW_SECONDS)},
+    )
+
+
+async def _enforce_widget_session_limit(request: Request, *, cost: int = 1) -> None:
+    """US-076: charge the PER-SESSION/IP window (`ip:<session>`); 429 on breach.
+
+    Caps one caller hammering across keys. This is invoked FIRST in
+    `widget_resolve_key` — BEFORE the DB resolve and BEFORE any per-key write — so
+    a session-throttled request 429s having done no resolve and created no per-key
+    counter row. Session identity is best-effort and SPOOFABLE (see
+    `_widget_client_ip`): defense-in-depth, with the per-key window + the edge/WAF
+    limiter (P5) as the harder bounds. The residual unbounded axis is
+    `ip:<spoofed-XFF>` session rows — exactly the off-browser traffic P5 handles;
+    a global TTL/sweeper on `rate_limit_counters` is intentionally left to the
+    US-075 seam (out of US-076 scope).
+    """
+    session = _widget_client_ip(request)
+    await _charge_widget_window(
+        f"ip:{session}",
+        limit=WIDGET_RATE_LIMIT_PER_SESSION,
+        scope="session",
+        cost=cost,
+    )
+
+
+async def _enforce_widget_key_limit(public_key: str, *, cost: int = 1) -> None:
+    """US-076: charge the PER-KEY window (`key:<public_key>`); 429 on breach.
+
+    Caps aggregate abuse of one key across EVERY session/IP (so a fresh session
+    under a hammered key is still refused). Charged ONLY for a key that has already
+    RESOLVED (a real, active key), so a non-existent/unknown key never mints a
+    per-key counter row — only the small, controlled set of keys that actually
+    exist ever get a bucket.
+
+    The cheap resolve open and US-078's expensive message turn share this one
+    per-key budget; whether to split them into separate counters is a US-078
+    decision (the message turn does not exist yet).
+    """
+    await _charge_widget_window(
+        f"key:{public_key}",
+        limit=WIDGET_RATE_LIMIT_PER_KEY,
+        scope="key",
+        cost=cost,
+    )
+
+
 @app.post("/api/support/widget-keys")
 async def issue_widget_key(
     req: IssueWidgetKeyRequest, user: AuthedUser = Depends(get_user)
@@ -2904,13 +3140,30 @@ async def widget_resolve_key(
     Anonymous public surface: Public-widget CORS is US-074's concern,
     rate-limiting US-076's — both layer on top of this gate. These routes do not
     widen the authenticated /api/* CORS posture.
+
+    US-076 rate limit (two single-window helpers, charged with a short-circuit
+    between them so a non-existent key never mints a per-key counter row): the
+    PER-SESSION window is charged FIRST, after the cheap shape guard (a malformed
+    key is a free 404, not worth a counter write) but BEFORE the DB resolve — a
+    session-throttled request 429s having touched no DB / retrieval / LLM and
+    written no per-key row. The PER-KEY window is charged only AFTER the resolve
+    proves the key exists, so a rotating-fake-key attacker can never amplify the
+    counter table through this path. US-078's first-message flow re-runs the same
+    helpers (with a higher `cost`) on the conversation-create path.
     """
     if not is_widget_public_key(req.public_key):
         raise HTTPException(status_code=404, detail="unknown or inactive widget key")
+    # Per-SESSION window FIRST: a session-throttle 429s here, before the DB resolve
+    # and before any per-key counter write (storage-amplification guard).
+    await _enforce_widget_session_limit(request)
     async with httpx.AsyncClient(timeout=10.0) as http:
         resolved = await _resolve_widget_key(http, req.public_key)
     if resolved is None:
+        # A fake/unknown key stops here and never reaches the per-key charge below,
+        # so it can never create a permanent `rate_limit_counters` row.
         raise HTTPException(status_code=404, detail="unknown or inactive widget key")
+    # Per-KEY window charged ONLY now that the key has resolved (it is real/active).
+    await _enforce_widget_key_limit(req.public_key)
     # US-073: per-key registered-origin allowlist, fail-closed. Same opaque 404 as
     # revoked/unknown so the response never reveals that the key exists or which
     # origins it permits.
