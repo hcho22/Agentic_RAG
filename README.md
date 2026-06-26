@@ -169,7 +169,8 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | `OPENAI_VECTOR_STORE_ID` | no | Enables `file_search` retrieval when set |
 | `PARSER` | no | Ingestion parser: `docling` (default) / `llamaparse` / `unstructured`. Invalid value fails fast at startup. To add your own, see [docs/ingestion-parser-adapters.md](docs/ingestion-parser-adapters.md) |
 | `LLAMA_CLOUD_API_KEY` | only if `PARSER=llamaparse` | LlamaParse cloud key; checked at startup, not first ingest |
-| `FRONTEND_ORIGIN` | yes (prod) | Comma-separated list of allowed CORS origins. Defaults to `http://localhost:5173` for dev |
+| `FRONTEND_ORIGIN` | yes (prod) | Comma-separated list of allowed CORS origins for the **authenticated** app surface (`/api/*`, `/healthz`). Defaults to `http://localhost:5173` for dev. The public widget surface (`/widget/*`) does NOT use this - it has its own posture keyed off each active widget key's registered origins (US-074) |
+| `WIDGET_CORS_ORIGIN_CACHE_TTL` | no | Seconds the public-widget CORS layer caches the union of active-key registered origins before re-reading under the service role. Default 30; must be `> 0`. Issuing/revoking a key invalidates the cache immediately on that instance; the TTL is the cross-instance backstop (US-074) |
 | `CHAT_MODE_DEFAULT` | no | `responses` or `completions`. Defaults to `responses` on an `openai` answerer, `completions` on any other provider. `responses` is OpenAI-only and fails closed at startup on a non-`openai` answerer — see [docs/model-surface.md](docs/model-surface.md) |
 | `CHAT_HISTORY_MAX_TURNS` | no | Default 10 |
 | `RETRIEVAL_MODE` | no | `hybrid` (default) / `vector` / `keyword`. Safety escape hatch — production uses hybrid |

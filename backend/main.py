@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
@@ -37,6 +38,7 @@ from langsmith.run_helpers import get_current_run_tree
 from langsmith.wrappers import wrap_openai
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from chunking import chunk_text, get_chunk_config
 from conversation_tokens import (
@@ -45,6 +47,7 @@ from conversation_tokens import (
     hash_conversation_token,
 )
 from widget_keys import (
+    WILDCARD_ORIGIN,
     generate_public_key,
     has_registered_origin,
     is_origin_allowed,
@@ -198,6 +201,26 @@ FRONTEND_ORIGINS = [
     for o in os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173").split(",")
     if o.strip()
 ]
+
+# US-074: the public widget surface (`/widget/*`) runs its OWN CORS posture keyed
+# off the per-key `widget_keys.allowed_origins` — never FRONTEND_ORIGINS (which is
+# the authenticated `/api/*` app's trust). The registered-origin set is unioned
+# from the DB and cached in-process for this many seconds so a preflight / simple
+# request does not pay a service-role round-trip per call (CORS runs AHEAD of the
+# US-076 rate limit, so a per-request DB hit would be a cheap DoS lever). Issuing
+# / revoking a key invalidates the cache immediately on THIS instance; the TTL is
+# the cross-instance backstop (another backend issued a key). Default 30s.
+try:
+    WIDGET_CORS_ORIGIN_CACHE_TTL = float(
+        os.environ.get("WIDGET_CORS_ORIGIN_CACHE_TTL", "30")
+    )
+except ValueError as e:
+    raise ValueError("WIDGET_CORS_ORIGIN_CACHE_TTL must be a number") from e
+if WIDGET_CORS_ORIGIN_CACHE_TTL <= 0:
+    # 0 makes `_fresh()` always False (elapsed < 0 is never true), so every
+    # /widget/* request would trigger a serialized service-role DB read — exactly
+    # the per-request-DB-hit DoS lever the cache exists to prevent. Require > 0.
+    raise ValueError("WIDGET_CORS_ORIGIN_CACHE_TTL must be > 0")
 
 # US-025: `ChatMode` and the resolved `DEFAULT_CHAT_MODE` moved below — the
 # default now depends on the answerer provider (responses is OpenAI-only), so it
@@ -388,12 +411,250 @@ def _build_role_client(cfg: ProviderConfig) -> AsyncOpenAI:
 embedder_client = _build_role_client(_EMBEDDER_CONFIG)
 judge_client = _build_role_client(_JUDGE_CONFIG)
 
+
+# ---------------------------------------------------------------------------
+# US-074: TWO CORS postures on one app, partitioned by path (ADR-0008).
+#
+# The authenticated app (`/api/*`, `/healthz`, everything that is NOT a public
+# widget route) keeps its existing posture: a static allowlist = FRONTEND_ORIGINS.
+# The PUBLIC widget surface (`/widget/*`) gets its OWN posture: it trusts ONLY the
+# origins registered on an ACTIVE (not-revoked) widget key — the union of every
+# `widget_keys.allowed_origins` — NEVER FRONTEND_ORIGINS. So the public surface
+# never inherits the authenticated app's origin trust, and `/api/*` never trusts a
+# widget origin: the two origin sets are independent (an app origin is rejected at
+# `/widget/*`; a widget origin is rejected at `/api/*`).
+#
+# CORS is a BROWSER-side control and DEFENSE-IN-DEPTH here, NOT the hard boundary.
+# A preflight (OPTIONS) carries no body, so the specific `public_key` is unknown at
+# preflight time — this layer can only answer "is this Origin registered for SOME
+# active key". The authoritative PER-KEY origin gate (US-073) + not-revoked gate
+# (US-072) + rate limit (US-076) all run inside the endpoints under the real
+# `public_key`. Letting the browser read a `/widget/*` response from a registered
+# origin grants no data access by itself.
+# ---------------------------------------------------------------------------
+
+# The raw opaque customer token (US-071) travels in this header, deliberately
+# distinct from `Authorization: Bearer <supabase-jwt>` so the customer leg can
+# never be mistaken for a Supabase-authenticated principal. Defined here (ahead of
+# the US-071 endpoints) because the widget CORS allow-list below must name it as an
+# allowed request header for the cross-origin preflight to pass.
+_CONVERSATION_TOKEN_HEADER = "X-Conversation-Token"
+
+_WIDGET_PATH_PREFIX = "/widget/"
+
+# A few routes live under `/widget/*` but are AUTHENTICATED, not part of the
+# anonymous-customer surface: a workspace agent calls them under their real Supabase
+# JWT from the operator dashboard (an APP origin in FRONTEND_ORIGINS), not from a
+# buyer's iframe. They therefore belong to the authenticated CORS posture, NOT the
+# per-key-origin widget posture — routing them to the widget allowlist would block
+# the dashboard's own app origin. US-074's public surface is exactly the routes its
+# AC enumerates (key resolution, conversation create/message, transcript, customer
+# SSE); the agent-reply endpoint (US-082) is the known authenticated exception, named
+# here so it lands on the right posture the moment it ships rather than being silently
+# CORS-blocked. Matched by suffix because the conversation id is in the path.
+_WIDGET_AUTHENTICATED_SUFFIXES = ("/agent-reply",)
+
+
+def _is_widget_public_path(path: str) -> bool:
+    """Single source of truth for the PUBLIC-widget path partition, so the two CORS
+    layers (anonymous-customer vs authenticated) are guaranteed COMPLEMENTARY — every
+    request is owned by exactly one posture, never both (no double
+    `Access-Control-Allow-Origin`) and never neither. A `/widget/*` path that is an
+    authenticated exception (above) is NOT public and falls to the authenticated
+    posture."""
+    if not path.startswith(_WIDGET_PATH_PREFIX):
+        return False
+    return not any(path.endswith(suffix) for suffix in _WIDGET_AUTHENTICATED_SUFFIXES)
+
+
+async def _load_active_widget_origins() -> tuple[frozenset[str], bool]:
+    """Service-role read of every ACTIVE (not-revoked) widget key's `allowed_origins`,
+    unioned for the widget CORS layer. Returns `(origins, has_wildcard)` where
+    `has_wildcard` is True iff some active key carries the dev-only `"*"` entry.
+
+    Fail-closed by construction: when support is unconfigured (no service-role key)
+    or the read errors, it returns `(empty, False)` so the public CORS surface
+    DENIES every origin rather than ever fail-opening to an unregistered one. Blank
+    entries are dropped (they can match no real browser `Origin`); `"*"` is hoisted
+    into the wildcard flag (it is NEVER stored as a matchable origin)."""
+    headers = _service_role_headers()
+    if headers is None:
+        # SUPABASE_SERVICE_ROLE_KEY unset → support widget not configured → there is
+        # no widget surface to admit any origin for. Deny all (fail closed).
+        return frozenset(), False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            r = await http.get(
+                f"{SUPABASE_URL}/rest/v1/widget_keys",
+                params={"revoked_at": "is.null", "select": "allowed_origins"},
+                headers=headers,
+            )
+            r.raise_for_status()
+            rows = r.json()
+    except Exception as e:
+        # A transient upstream failure must FAIL CLOSED (deny), never fail open. Log
+        # concisely (no full traceback): this runs on the refresh path at most once
+        # per cache TTL, so a multi-frame stack per outage tick would just be spam.
+        log.warning(
+            "widget_cors.origin_load_failed: %s — denying all widget origins until "
+            "the next refresh (fail-closed)",
+            e,
+        )
+        return frozenset(), False
+    origins: set[str] = set()
+    wildcard = False
+    for row in rows:
+        for o in row.get("allowed_origins") or []:
+            if o == WILDCARD_ORIGIN:
+                # Dev-only opt-in (NON-PRODUCTION): a single active key with "*"
+                # loosens the widget CORS layer to admit any present origin. The
+                # authoritative per-key US-073 gate still rejects a wrong origin for
+                # any OTHER key at the endpoint, so this only widens the browser-side
+                # CORS check, never data access. Production keys never set "*".
+                wildcard = True
+            elif o and o.strip():
+                origins.add(o)
+    return frozenset(origins), wildcard
+
+
+class _WidgetOriginSnapshot:
+    """In-memory, TTL-cached snapshot of the union of `allowed_origins` across all
+    active widget keys (+ whether any carries the dev-only `"*"` wildcard).
+
+    Backs the widget CORS origin check so a preflight / simple request never pays a
+    service-role round-trip per call. `allows()` is SYNC (Starlette's
+    `is_allowed_origin` is sync); `ensure_fresh()` is the ASYNC refresh the
+    middleware awaits BEFORE the sync read, TTL-gated so it hits the DB at most once
+    per `WIDGET_CORS_ORIGIN_CACHE_TTL`. Issuance / revocation call `invalidate()` so
+    a newly registered origin works (and a revoked one stops) immediately on this
+    instance, with the TTL as the cross-instance backstop."""
+
+    def __init__(self, ttl_seconds: float) -> None:
+        self._ttl = ttl_seconds
+        self._origins: frozenset[str] = frozenset()
+        self._wildcard = False
+        self._loaded_at: float | None = None
+        # Bumped by every invalidate(); a refresh stamps its result fresh only if the
+        # generation is unchanged across its `await`, so an invalidate that fires
+        # during an in-flight load forces a reload instead of caching stale data.
+        self._generation = 0
+        # Created lazily inside a running loop — constructing an asyncio.Lock at
+        # import time (no loop yet, py3.9) risks binding to the wrong loop.
+        self._lock: asyncio.Lock | None = None
+
+    def _fresh(self) -> bool:
+        return (
+            self._loaded_at is not None
+            and (time.monotonic() - self._loaded_at) < self._ttl
+        )
+
+    def allows(self, origin: str | None) -> bool:
+        """Mirror `widget_keys.is_origin_allowed`'s fail-closed rules at the CORS
+        layer: a missing/blank Origin is refused even under the wildcard; otherwise
+        the dev-only `"*"` admits any present origin, else exact (un-normalized)
+        membership — a trailing slash / case / port mismatch fails CLOSED."""
+        if not origin or not origin.strip():
+            return False
+        if self._wildcard:
+            return True
+        return origin in self._origins
+
+    def invalidate(self) -> None:
+        """Force the next `ensure_fresh()` to reload (after a key issue/revoke).
+
+        Race-safe against an in-flight refresh: bumping `_generation` makes a load
+        already suspended in `_load_active_widget_origins()` (which may have read the
+        pre-mutation DB state) discard its result instead of stamping a stale
+        snapshot fresh, so the next `ensure_fresh()` reloads the post-invalidation
+        state rather than serving stale data for the full TTL."""
+        self._generation += 1
+        self._loaded_at = None
+
+    async def ensure_fresh(self) -> None:
+        if self._fresh():
+            return
+        if self._lock is None:
+            # Benign cold-start race: two concurrent first calls may each create a
+            # lock and both load. The load is idempotent, so the only cost is one
+            # redundant read; thereafter the lock is stable and serializes refreshes.
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            if self._fresh():
+                return
+            # Capture the generation BEFORE the await; if invalidate() fires during
+            # the load (capturing pre-mutation DB state), commit nothing and leave
+            # `_loaded_at` None so the next call reloads the post-invalidation state.
+            gen = self._generation
+            origins, wildcard = await _load_active_widget_origins()
+            if self._generation == gen:
+                self._origins, self._wildcard = origins, wildcard
+                self._loaded_at = time.monotonic()
+
+
+_WIDGET_ORIGIN_SNAPSHOT = _WidgetOriginSnapshot(WIDGET_CORS_ORIGIN_CACHE_TTL)
+
+
+class _ScopedCORSMiddleware(CORSMiddleware):
+    """A `CORSMiddleware` that acts ONLY on the requests it owns (by path) and passes
+    everything else straight through to the next app. Two instances with
+    complementary predicates run two independent CORS postures on one app (US-074)
+    without ever both touching the same request — so exactly one posture owns each
+    path and there is no double `Access-Control-Allow-Origin`."""
+
+    def __init__(self, app: ASGIApp, *, owns_widget: bool, **kwargs: object) -> None:
+        super().__init__(app, **kwargs)  # type: ignore[arg-type]
+        # True  → this instance owns `/widget/*`; False → it owns everything else.
+        self._owns_widget = owns_widget
+
+    def _owns(self, scope: Scope) -> bool:
+        return _is_widget_public_path(scope.get("path", "")) == self._owns_widget
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not self._owns(scope):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
+class _WidgetCORSMiddleware(_ScopedCORSMiddleware):
+    """The public-widget CORS posture (owns `/widget/*`). Its allowlist is DYNAMIC —
+    the union of active widget keys' registered origins — so it overrides
+    `is_allowed_origin` to consult the TTL-cached `_WIDGET_ORIGIN_SNAPSHOT` instead
+    of a static list, refreshing it (async) before Starlette's sync preflight /
+    simple-response logic reads it. `allow_origins=()` (not `["*"]`) means the
+    reflected `Access-Control-Allow-Origin` is ALWAYS the specific request Origin,
+    never the literal `*` — even the dev-only `"*"` key opt-in only widens WHICH
+    origins are admitted, never the reflected value."""
+
+    def __init__(self, app: ASGIApp, **kwargs: object) -> None:
+        super().__init__(app, owns_widget=True, allow_origins=(), **kwargs)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and self._owns(scope):
+            await _WIDGET_ORIGIN_SNAPSHOT.ensure_fresh()
+        await super().__call__(scope, receive, send)
+
+    def is_allowed_origin(self, origin: str) -> bool:
+        return _WIDGET_ORIGIN_SNAPSHOT.allows(origin)
+
+
 app = FastAPI(title="Agentic RAG backend")
+# Two complementary, path-scoped CORS postures (US-074). Order is immaterial — the
+# predicates partition every request to exactly one — but the authenticated posture
+# is listed first to mirror the historical single-middleware config it replaces.
+# `/api/*` keeps EXACTLY its prior posture (FRONTEND_ORIGINS, the same methods +
+# `allow_headers=["*"]`); the widget posture is keyed off per-key origins instead.
 app.add_middleware(
-    CORSMiddleware,
+    _ScopedCORSMiddleware,
+    owns_widget=False,
     allow_origins=FRONTEND_ORIGINS,
     allow_methods=["POST", "GET", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+)
+app.add_middleware(
+    _WidgetCORSMiddleware,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["content-type", _CONVERSATION_TOKEN_HEADER],
 )
 
 
@@ -2196,12 +2457,6 @@ async def subagent_endpoint(
 # do not widen the authenticated `/api/*` CORS posture.
 # ---------------------------------------------------------------------------
 
-# The raw opaque token travels in this header, deliberately distinct from
-# `Authorization: Bearer <supabase-jwt>` (which `get_user` parses) so the
-# customer leg can never be mistaken for a Supabase-authenticated principal.
-_CONVERSATION_TOKEN_HEADER = "X-Conversation-Token"
-
-
 def _public_conversation_view(conv: dict) -> dict:
     """Curate the customer-facing conversation shape.
 
@@ -2537,6 +2792,10 @@ async def issue_widget_key(
         # First key for the workspace enables support: provision the bot lazily.
         # Idempotent, best-effort — does not gate the issuance result.
         await _ensure_workspace_bot(http, req.workspace_id)
+    # US-074: a freshly issued key adds registered origins; drop the widget CORS
+    # snapshot so the new origin is admitted on the very next preflight (this
+    # instance), not after the TTL. The cross-instance lag is bounded by the TTL.
+    _WIDGET_ORIGIN_SNAPSHOT.invalidate()
     return {"widget_key": created}
 
 
@@ -2610,6 +2869,10 @@ async def revoke_widget_key(
         # Not the caller's to manage (RLS-hidden), nonexistent, or already revoked —
         # all collapse to "nothing active to revoke here".
         raise HTTPException(status_code=404, detail="no active widget key to revoke")
+    # US-074: a revoked key's origins must stop being CORS-trusted; drop the
+    # snapshot so the next preflight reloads without them (this instance now; the
+    # TTL bounds the cross-instance lag).
+    _WIDGET_ORIGIN_SNAPSHOT.invalidate()
     return {"widget_key": rows[0]}
 
 
