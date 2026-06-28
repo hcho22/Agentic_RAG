@@ -41,6 +41,10 @@ from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from chunking import chunk_text, get_chunk_config
+from circuit_breaker import (
+    BreakerDecision,
+    check_workspace_breaker,
+)
 from conversation_tokens import (
     CONVERSATION_TOKEN_TTL_SECONDS,
     generate_conversation_token,
@@ -255,6 +259,24 @@ WIDGET_RATE_LIMIT_WINDOW_SECONDS = _positive_int_env(
 WIDGET_RATE_LIMIT_PER_KEY = _positive_int_env("WIDGET_RATE_LIMIT_PER_KEY", 300)
 WIDGET_RATE_LIMIT_PER_SESSION = _positive_int_env(
     "WIDGET_RATE_LIMIT_PER_SESSION", 30
+)
+
+# US-077 (ADR-0008): the per-WORKSPACE circuit breaker — a coarse aggregate
+# qps/cost ceiling for one workspace's whole bot, orthogonal to US-076's per-key /
+# per-session windows. It draws down the SAME US-075 `RateLimiter` (a `ws:<id>`
+# bucket; no new store) and, when tripped, short-circuits the message turn to a
+# zero-cost generic deferral (NO retrieval, NO LLM) and escalates to a human (the
+# in-app Realtime operator badge, zero outbound). The default ceiling sits ABOVE a
+# realistic single workspace's organic traffic — it is a cost-runaway backstop,
+# not the everyday throttle (that is US-076) — and is env-tunable so a low test
+# ceiling can exercise the trip path. Window defaults to the US-076 window unless
+# overridden. The live call site is the message-turn runtime (US-078–080); this
+# story ships the breaker + `_check_workspace_breaker` ready for it.
+WIDGET_BREAKER_WINDOW_SECONDS = _positive_int_env(
+    "WIDGET_BREAKER_WINDOW_SECONDS", WIDGET_RATE_LIMIT_WINDOW_SECONDS
+)
+WIDGET_BREAKER_PER_WORKSPACE = _positive_int_env(
+    "WIDGET_BREAKER_PER_WORKSPACE", 600
 )
 
 # US-025: `ChatMode` and the resolved `DEFAULT_CHAT_MODE` moved below — the
@@ -814,6 +836,13 @@ async def _on_startup() -> None:
             WIDGET_RATE_LIMIT_PER_KEY,
             WIDGET_RATE_LIMIT_PER_SESSION,
             WIDGET_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        # US-077: the per-workspace circuit breaker shares this same limiter on a
+        # `ws:` bucket. Logged alongside so ops can confirm the breaker ceiling.
+        log.info(
+            "widget_circuit_breaker.enabled per_workspace=%d window=%ds",
+            WIDGET_BREAKER_PER_WORKSPACE,
+            WIDGET_BREAKER_WINDOW_SECONDS,
         )
     else:
         log.info(
@@ -2956,6 +2985,35 @@ async def _enforce_widget_key_limit(public_key: str, *, cost: int = 1) -> None:
         f"key:{public_key}",
         limit=WIDGET_RATE_LIMIT_PER_KEY,
         scope="key",
+        cost=cost,
+    )
+
+
+async def _check_workspace_breaker(
+    workspace_id: str, *, cost: int = 1
+) -> BreakerDecision:
+    """US-077: charge the per-workspace breaker (`ws:<id>`); return its decision.
+
+    Unlike the US-076 `_enforce_widget_*` helpers (which RAISE a 429 throttle),
+    this RETURNS a `BreakerDecision` — a tripped breaker is NOT a "retry the same
+    request" refusal but a 200 generic deferral + human handoff, so the caller
+    (the message-turn runtime, US-078–080) must short-circuit the pipeline and
+    escalate rather than reject. It delegates to `circuit_breaker.check_workspace_breaker`
+    against the SAME `_RATE_LIMITER` US-076 uses (a distinct `ws:` bucket), and
+    inherits its safety stances: a clean NO-OP (never trips) when the limiter is
+    unconfigured, and FAIL-OPEN (never trips) on any limiter-backend error — a
+    breaker failing closed would defer a workspace's entire traffic, so fail-open
+    is the only safe direction.
+
+    No live caller yet by design (like the US-075 seam): US-079 runs the deflection
+    turn behind `circuit_breaker.run_breaker_guarded_turn`, passing this decision's
+    inputs and the US-080 escalation write as the `on_trip` hook.
+    """
+    return await check_workspace_breaker(
+        _RATE_LIMITER,
+        workspace_id,
+        limit=WIDGET_BREAKER_PER_WORKSPACE,
+        window_seconds=WIDGET_BREAKER_WINDOW_SECONDS,
         cost=cost,
     )
 
