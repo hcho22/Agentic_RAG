@@ -24,7 +24,7 @@ The two halves meet at `conversations.bot_user_id`: provisioning returns that id
 retrieval mints a token for it each turn. The minter (US-068 `mint_supabase_jwt`)
 is dependency-INJECTED into the retrieval path rather than imported, to avoid a
 `main.py` ⇄ `support_bot.py` import cycle and to keep the retrieval seam pure and
-unit-testable with no JWT secret; the real call site (US-080) passes it in.
+unit-testable with no JWT secret; the real call site (US-079 `_run_widget_bot_turn`) passes it in.
 
 SECURITY (shared): two distinct server-side-only secrets pass through this module
 and MUST NEVER be logged, returned, or sent client-side — the service-role key

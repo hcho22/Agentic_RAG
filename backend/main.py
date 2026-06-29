@@ -43,6 +43,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from chunking import chunk_text, get_chunk_config
 from circuit_breaker import (
+    GENERIC_BREAKER_DEFERRAL,
     BreakerDecision,
     check_workspace_breaker,
     run_breaker_guarded_turn,
@@ -3413,6 +3414,127 @@ async def _load_conversation_bot_user_id(
     return rows[0].get("bot_user_id")
 
 
+async def _load_conversation_status(
+    http: httpx.AsyncClient, conversation_id: str
+) -> str | None:
+    """Service-role read of a conversation's CURRENT `status` (US-080 in-flight race).
+
+    `widget_conversation_message` snapshots `status` at request entry to short-circuit
+    a conversation that was ALREADY escalated (the sequential later-message case). But a
+    concurrent escalation — the explicit "talk to a human" button
+    (`POST /widget/conversations/escalate`) or another message — can latch
+    `status='escalated'` while THIS turn is mid-pipeline (retrieval + draft +
+    faithfulness judge is seconds of LLM work). This re-reads the live status so the
+    generator can suppress an in-flight CONFIDENT answer rather than send it behind a
+    now-engaged human's back (PRD Risk #3 / the US-080 headline guarantee).
+
+    Keyed by the conversation id the caller already resolved — never a caller-supplied
+    id — and read under the service role (the anonymous customer holds no Postgres
+    role). FAIL-OPEN, like `_load_conversation_bot_user_id`: returns None on a missing
+    row, a transient read error, OR an unconfigured service role, and the caller treats
+    None as "proceed and stream" so a recoverable read glitch never silences a valid
+    faithful answer (the next turn is latched anyway). Never raises.
+    """
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return None
+    headers = _require_service_role_headers()
+    try:
+        r = await http.get(
+            f"{SUPABASE_URL}/rest/v1/conversations",
+            params={
+                "id": f"eq.{conversation_id}",
+                "select": "status",
+                "limit": "1",
+            },
+            headers=headers,
+        )
+        r.raise_for_status()
+    except httpx.HTTPError:
+        log.warning(
+            "widget_turn.status_load_failed conversation=%s — proceeding "
+            "(fail-open on a transient read error)",
+            conversation_id,
+            exc_info=True,
+        )
+        return None
+    rows = r.json()
+    if not rows:
+        return None
+    return rows[0].get("status")
+
+
+async def _escalate_conversation(
+    http: httpx.AsyncClient, conversation_id: str
+) -> dict | None:
+    """US-080: latch a conversation to `status='escalated'` (service-role PATCH).
+
+    The SINGLE latch path for BOTH the model-mediated escalate decision (the
+    ADR-0003 deflection pipeline returning `action='escalated'`, or a tripped US-077
+    breaker) and the explicit "talk to a human" button (US-091) — escalate-vs-answer
+    is deterministic control flow, NEVER a model `escalate()` tool (ADR-0003).
+
+    The US-067 DB trigger OWNS `escalated_at`: the caller sets ONLY `status`, and the
+    trigger stamps `now()` on the FIRST transition into `escalated` and preserves it
+    verbatim on every later write. That is what keeps deflection derivable (a
+    deflection is `resolved AND escalated_at IS NULL`); planting `escalated_at` here
+    would corrupt that metric. Idempotent: `escalated -> escalated` is a DB no-op the
+    US-067 guard allows (it preserves `escalated_at`), so re-escalating an already-
+    escalated conversation neither errors nor moves the latch.
+
+    Backend-mediated under the service role (the anonymous customer holds no Postgres
+    role; the workspace-membership RLS on `conversations` is bypassed exactly as for
+    conversation creation, US-078). The conversation id is one the caller already
+    resolved (a created row, or a token-resolved resume) — never caller-supplied.
+
+    Returns the updated row (for the explicit endpoint's response view), or None if
+    no row matched (a vanished conversation — caller decides how to fall back).
+    RAISES on a write failure: the explicit-escalate endpoint surfaces it to the UI,
+    while the in-turn callers wrap it with `_escalate_conversation_safe`.
+    """
+    headers = _require_service_role_headers()
+    r = await http.patch(
+        f"{SUPABASE_URL}/rest/v1/conversations",
+        params={"id": f"eq.{conversation_id}"},
+        headers=headers,
+        # ONLY status — escalated_at is the US-067 trigger's to set/preserve.
+        json={"status": "escalated"},
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if isinstance(rows, list):
+        return rows[0] if rows else None
+    return rows if isinstance(rows, dict) else None
+
+
+async def _escalate_conversation_safe(
+    http: httpx.AsyncClient, conversation_id: str
+) -> None:
+    """Best-effort `_escalate_conversation` for the IN-TURN latch (US-080).
+
+    Used where the customer already has a coherent reply (the escalation or breaker
+    deferral) and a latch-write blip must NOT turn that 200 into a 500: a failure is
+    logged and swallowed, leaving the conversation `active` so the NEXT turn
+    re-evaluates rather than the customer getting an error. This is also why only a
+    DELIBERATE escalate (the pipeline's `action='escalated'` or a breaker trip)
+    latches — a transient pipeline error or a momentarily-botless workspace defers
+    THIS turn but does not permanently silence the bot. The explicit-escalate
+    endpoint uses the strict `_escalate_conversation` instead (a user-pressed button
+    can surface "try again").
+    """
+    try:
+        await _escalate_conversation(http, conversation_id)
+    except Exception as e:  # noqa: BLE001 — best-effort latch; never break the turn
+        # Concise warning, no per-request traceback flood (same convention as the
+        # rate-limiter / breaker fail-open paths): the latch will be re-attempted on
+        # the next turn while the conversation stays active.
+        log.warning(
+            "widget_turn.escalate_latch_failed conversation=%s — staying active, "
+            "re-evaluated next turn (%s)",
+            conversation_id,
+            e.__class__.__name__,
+        )
+
+
 def _split_for_streaming(text: str, *, approx_chunk: int = 24) -> list[str]:
     """Split a finished message into `delta` chunks that re-concatenate to `text`.
 
@@ -3465,11 +3587,22 @@ async def _run_widget_bot_turn(
     returned. The breaker is wired here so the cost ceiling is live the moment the
     paid pipeline goes live.
 
-    SCOPE BOUNDARY: the escalation LATCH (`status='escalated'` / `escalated_at`) and
-    the breaker's `on_trip` escalation write are US-080's concern — this story runs
-    the turn and streams its message, leaving the conversation `active`. The minted
-    bot JWT is a bearer credential that never leaves `support_bot` (US-070): the
-    only value returned here is the client-safe customer message.
+    US-080 — the escalation LATCH. A DELIBERATE escalate latches the conversation to
+    `status='escalated'` (the US-067 trigger then stamps `escalated_at`), so the bot
+    goes silent and every later customer message routes to the human queue
+    (`widget_conversation_message` skips the pipeline once escalated). Two deliberate
+    sources latch, via the SAME `_escalate_conversation` path:
+      * a tripped breaker — wired as the breaker's `on_trip` hook (US-077 designed it
+        for exactly this human handoff), and
+      * the pipeline returning `action='escalated'` (weak retrieval / unfaithful
+        draft) — latched after the un-tripped turn.
+    The fail-closed DEGRADED deferrals (botless workspace, import error, pipeline
+    exception) deliberately do NOT latch: they may be transient, and permanently
+    silencing the bot on a blip would be wrong — they defer THIS turn and leave the
+    conversation `active` to recover next turn. The latch is best-effort
+    (`_escalate_conversation_safe`): a latch-write blip never turns the deferral 200
+    into a 500. The minted bot JWT is a bearer credential that never leaves
+    `support_bot` (US-070): the only value returned here is the client-safe message.
     """
     if not bot_user_id or not workspace_id:
         # Botless workspace (provisioning unavailable, US-078): the bot has no
@@ -3512,6 +3645,13 @@ async def _run_widget_bot_turn(
             match_threshold=get_similarity_threshold(),
         )
 
+    async def _on_trip() -> None:
+        # US-080: a tripped breaker is a DELIBERATE human handoff — latch the
+        # conversation to escalated so the bot goes silent and the trip surfaces in
+        # the operator queue (status='escalated', US-087). Best-effort so a latch
+        # blip never converts the breaker deferral into a 500.
+        await _escalate_conversation_safe(http, conversation_id)
+
     try:
         result = await run_breaker_guarded_turn(
             limiter=_RATE_LIMITER,
@@ -3519,14 +3659,23 @@ async def _run_widget_bot_turn(
             limit=WIDGET_BREAKER_PER_WORKSPACE,
             window_seconds=WIDGET_BREAKER_WINDOW_SECONDS,
             run_turn=_turn,
-            on_trip=None,  # US-080 wires the escalation latch write as on_trip
+            on_trip=_on_trip,  # US-080: latch the conversation on a breaker trip
         )
     except Exception:  # noqa: BLE001 — any turn failure escalates (fail closed)
+        # A transient pipeline error defers THIS turn but does NOT latch: it may be
+        # recoverable, and permanently silencing the bot on a blip would be wrong.
         log.exception(
-            "widget_turn.failed conversation=%s — escalating (fail closed)",
+            "widget_turn.failed conversation=%s — escalating this turn (fail closed)",
             conversation_id,
         )
         return GENERIC_DEFERRAL
+
+    # US-080: a DELIBERATE ADR-0003 escalate decision (weak retrieval / unfaithful
+    # draft) latches the conversation so the bot goes silent. A breaker trip already
+    # latched via `_on_trip` (and left `turn=None`); a confident answer never
+    # latches.
+    if not result.tripped and result.turn is not None and result.turn.escalated:
+        await _escalate_conversation_safe(http, conversation_id)
     return result.customer_message
 
 
@@ -3575,8 +3724,16 @@ async def widget_conversation_message(
     per-workspace breaker), persists the bot reply (role='assistant', `tool_calls`
     null), and streams it as `delta` events before `done`. On the escalate branch
     (weak retrieval, unfaithful draft, a tripped breaker, or any failure) it streams
-    the fixed generic deferral — never a confident answer. The escalation LATCH
-    (`status='escalated'`) is US-080; the long-lived async-reply SSE is US-081.
+    the fixed generic deferral — never a confident answer.
+
+    US-080 — the escalation LATCH. A deliberate escalate (the pipeline deciding
+    `escalated`, or a tripped breaker) latches the conversation to
+    `status='escalated'` inside `_run_widget_bot_turn`, so the bot goes silent: this
+    endpoint short-circuits a RESUMED escalated conversation (`conversation_status ==
+    'escalated'`) to `conversation` + `done` with the customer message persisted but
+    the pipeline NEVER run (no retrieval / draft / LLM). The explicit "talk to a
+    human" button reaches the same latch via `POST /widget/conversations/escalate`.
+    The long-lived async agent-reply SSE (the human leg) is US-081.
 
     Rate limiting (US-076, heavier `cost` than a resolve open): the PER-SESSION/IP
     window is charged FIRST (before any DB work) on both branches; the PER-KEY
@@ -3613,11 +3770,18 @@ async def widget_conversation_message(
                     detail="invalid or expired conversation token",
                 )
             conversation_id = conv["id"]
+            workspace_id = conv["workspace_id"]
             # The resume RPC's customer-facing view omits bot_user_id (US-071); read
             # it under the service role so a RESUMED conversation still gets bot
-            # answers (US-079). None ⇒ botless ⇒ the turn escalates.
-            workspace_id = conv["workspace_id"]
-            bot_user_id = await _load_conversation_bot_user_id(http, conversation_id)
+            # answers (US-079). None ⇒ botless ⇒ the turn escalates. Skip the read
+            # entirely once the conversation is escalated (US-080): the pipeline will
+            # not run, so the bot principal is never needed.
+            if conv["status"] == "escalated":
+                bot_user_id = None
+            else:
+                bot_user_id = await _load_conversation_bot_user_id(
+                    http, conversation_id
+                )
         else:
             # FIRST MESSAGE. The key shape guard is FREE (no counter write for a
             # malformed key, mirroring /widget/keys/resolve) — checked before the
@@ -3669,6 +3833,11 @@ async def widget_conversation_message(
         )
 
     public_conv = _public_conversation_view(conv)
+    # US-080 routing: an already-escalated conversation (a resume after the latch)
+    # never runs the deflection pipeline again — the bot is silent and the human
+    # owns the thread. Captured here (a created row is always `active`; a resumed row
+    # carries its real status) so the generator can short-circuit below.
+    conversation_status = conv["status"]
 
     async def gen() -> AsyncIterator[bytes]:
         # US-078 opens the request-scoped SSE and announces the conversation
@@ -3679,6 +3848,16 @@ async def widget_conversation_message(
         if await request.is_disconnected():
             return
         yield _sse("conversation", public_conv)
+
+        # US-080: once a conversation is `escalated`, every later customer message is
+        # routed to the human queue WITHOUT running the deflection pipeline (no
+        # retrieval, no draft, no LLM). The customer message was already persisted
+        # above (the queue input); the bot stays silent and the human reply arrives
+        # asynchronously over the US-081 SSE. Close the request SSE with `done` and
+        # produce no bot answer.
+        if conversation_status == "escalated":
+            yield _sse("done", {})
+            return
 
         # Re-check disconnect before the PAID retrieval+LLM turn: a client that
         # dropped right after the conversation event should not incur the turn at
@@ -3700,6 +3879,31 @@ async def widget_conversation_message(
                 bot_user_id=bot_user_id,
                 message=message,
             )
+            # US-080 in-flight latch guard (closes the concurrency window the
+            # entry-snapshot short-circuit cannot). The pipeline above took seconds of
+            # LLM work; a concurrent escalation — the explicit "talk to a human" button
+            # or another message — may have latched `status='escalated'` meanwhile. A
+            # CONFIDENT answer must NOT be sent into a thread a human now owns (Risk
+            # #3), so re-read the live status and suppress it (no assistant row, no
+            # deltas — just `done`; the user message already queued for the human).
+            # Deferrals are EXEMPT: they themselves promise a human and may BE this
+            # turn's own latch (the model-mediated escalate / breaker trip), which AC1
+            # requires us to stream — so only a confident answer is guarded. Fail-open:
+            # a None status (read glitch / unconfigured) streams normally, since the
+            # next turn is latched anyway and silencing a faithful answer on a blip
+            # would be worse.
+            if reply not in (GENERIC_DEFERRAL, GENERIC_BREAKER_DEFERRAL):
+                if (
+                    await _load_conversation_status(turn_http, conversation_id)
+                    == "escalated"
+                ):
+                    log.info(
+                        "widget_turn.escalated_midflight conversation=%s — suppressing "
+                        "in-flight bot answer (a human took over mid-pipeline)",
+                        conversation_id,
+                    )
+                    yield _sse("done", {})
+                    return
             # Persist the bot reply (role='assistant', `tool_calls` null — the
             # deterministic pipeline is control flow, not the agentic tool loop)
             # BEFORE streaming, so the transcript reflects it even if the client
@@ -3732,6 +3936,60 @@ async def widget_conversation_message(
     return StreamingResponse(
         gen(), media_type="text/event-stream", headers=headers
     )
+
+
+@app.post("/widget/conversations/escalate")
+async def widget_conversation_escalate(
+    request: Request,
+    x_conversation_token: str | None = Header(
+        default=None, alias=_CONVERSATION_TOKEN_HEADER
+    ),
+) -> dict:
+    """US-080: explicit user-initiated "talk to a human" escalation.
+
+    The deterministic, UI-initiated counterpart to the model-mediated escalate
+    decision — NEVER a model `escalate()` tool (ADR-0003), just a customer pressing
+    "talk to a human" (US-091's widget button calls this). It latches the
+    conversation to `status='escalated'` via the SAME `_escalate_conversation` path
+    the model-mediated decision uses, so the bot goes silent thereafter: every later
+    customer message routes to the human queue without running the deflection
+    pipeline (the US-080 routing in `widget_conversation_message`).
+
+    Authed by the opaque per-conversation token (US-071), NOT a Supabase JWT — the
+    anonymous customer is structurally off the Supabase trust surface; the token
+    resolves to its ONE bound conversation, so no caller-supplied id is trusted. A
+    missing / expired / resolved token → 401 (the iframe's cue to start fresh).
+    Rate-limited per-session (US-076) — there is no public_key on this path, and the
+    write is cheap, so it draws down only the per-session window. The `escalated_at`
+    latch is owned by the US-067 DB trigger; escalating an already-escalated
+    conversation is an idempotent no-op. A latch-write failure surfaces (502) so the
+    button can prompt a retry — unlike the in-turn best-effort latch.
+    """
+    if not x_conversation_token:
+        raise HTTPException(status_code=401, detail="missing conversation token")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        await _enforce_widget_session_limit(request)
+        conv = await _resume_conversation_by_token(http, x_conversation_token)
+        if conv is None:
+            raise HTTPException(
+                status_code=401, detail="invalid or expired conversation token"
+            )
+        try:
+            updated = await _escalate_conversation(http, conv["id"])
+        except httpx.HTTPError as e:
+            # The strict latch failed (the user pressed a button; surface it so the
+            # UI can retry) — distinct from the in-turn best-effort latch.
+            log.warning(
+                "widget_escalate.latch_failed conversation=%s", conv["id"],
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=502, detail="could not escalate the conversation"
+            ) from e
+    # Reflect the now-escalated state. Fall back to the resumed row (status forced to
+    # escalated) only if the PATCH representation came back empty (a vanished row).
+    view_source = updated if updated else {**conv, "status": "escalated"}
+    return {"conversation": _public_conversation_view(view_source)}
 
 
 @app.get("/healthz")
