@@ -260,6 +260,15 @@ WIDGET_RATE_LIMIT_PER_KEY = _positive_int_env("WIDGET_RATE_LIMIT_PER_KEY", 300)
 WIDGET_RATE_LIMIT_PER_SESSION = _positive_int_env(
     "WIDGET_RATE_LIMIT_PER_SESSION", 30
 )
+# US-078: a customer MESSAGE turn is far heavier than a key-resolution OPEN — it
+# creates a row, issues a token, and (US-079) drives a full retrieval + LLM
+# deflection pipeline — so it draws down MORE of both windows per the `cost`-
+# weighted v1 accounting US-076 anticipated. A resolve open stays cost=1; a
+# message turn charges this. Env-tunable so a low test window can exercise the
+# breach path (and so ops can retune as real token/$ metering lands, PRD F3).
+WIDGET_RATE_LIMIT_MESSAGE_COST = _positive_int_env(
+    "WIDGET_RATE_LIMIT_MESSAGE_COST", 5
+)
 
 # US-077 (ADR-0008): the per-WORKSPACE circuit breaker — a coarse aggregate
 # qps/cost ceiling for one workspace's whole bot, orthogonal to US-076's per-key /
@@ -722,6 +731,12 @@ app.add_middleware(
     _WidgetCORSMiddleware,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["content-type", _CONVERSATION_TOKEN_HEADER],
+    # US-078: the first-message flow returns the raw opaque token ONCE in this
+    # RESPONSE header (never an SSE event / body / log — US-071). The cross-origin
+    # iframe can only READ a custom response header if CORS exposes it, so the
+    # widget posture exposes exactly this one header (the symmetric counterpart to
+    # allowing it on the REQUEST side above for resume).
+    expose_headers=[_CONVERSATION_TOKEN_HEADER],
 )
 
 
@@ -3230,6 +3245,258 @@ async def widget_resolve_key(
     ):
         raise HTTPException(status_code=404, detail="unknown or inactive widget key")
     return {"active": True}
+
+
+# ---------------------------------------------------------------------------
+# US-078 (ADR-0008): lazy conversation creation on the FIRST customer message.
+#
+# Widget OPEN does ONLY rate-limited key resolution (POST /widget/keys/resolve) —
+# no `conversations` row, no token, no SSE — so a public page that is merely
+# loaded (or a crawler hammering the embed) creates ZERO rows. A conversation (and
+# its opaque customer token, US-071) is born only when a human actually sends a
+# first message, bounding the public abuse surface to one-row-per-real-
+# conversation (PRD ADR-0008 / CONTEXT lifecycle). Every later turn carries the
+# stored token and RESUMES the same row (US-071) — a reload never duplicates it.
+#
+# The message endpoint is the REQUEST-SCOPED SSE the bot's answer streams over in
+# US-079 (like /api/chat). This story OPENS that SSE and announces the
+# conversation; the deterministic deflection pipeline + answer streaming is
+# US-079, the escalation latch is US-080, and the long-lived async-agent-reply SSE
+# is US-081 — so the body here emits only a `conversation` event then `done`.
+#
+# The raw token is delivered EXACTLY ONCE in the `X-Conversation-Token` RESPONSE
+# HEADER — never an SSE event, response body, or log line (US-071 sharp edge). The
+# widget CORS posture (US-074) exposes that header so the cross-origin iframe can
+# read it once; thereafter the iframe sends it back in the request header.
+# ---------------------------------------------------------------------------
+
+def _widget_conversation_insert_payload(
+    *, workspace_id: str, bot_user_id: str | None
+) -> dict:
+    """The `conversations` INSERT body for a widget-born conversation.
+
+    Pure (no I/O) so the AC-critical column values are unit-pinned without a DB:
+    `status='active'` (the US-067 one-way latch starts here), `channel='widget'`,
+    and `bot_user_id` set from the per-workspace bot (US-069). `escalated_at` is
+    deliberately NOT set — it is owned ENTIRELY by the US-067 status-machine
+    trigger (a row born 'active' gets a null latch), so a caller must never plant
+    it.
+    """
+    return {
+        "workspace_id": workspace_id,
+        "bot_user_id": bot_user_id,
+        "status": "active",
+        "channel": "widget",
+    }
+
+
+def _conversation_message_insert_payload(
+    *, conversation_id: str, role: str, content: str
+) -> dict:
+    """The `conversation_messages` INSERT body for one turn.
+
+    Pure so the deterministic-pipeline contract is unit-pinned: `tool_calls` stays
+    NULL (the widget bot's deflection pipeline is control flow, not the agentic
+    tool loop — US-079 AC), so it is simply absent from the payload.
+    """
+    return {
+        "conversation_id": conversation_id,
+        "role": role,
+        "content": content,
+    }
+
+
+async def _create_widget_conversation(
+    http: httpx.AsyncClient, *, workspace_id: str, bot_user_id: str | None
+) -> dict:
+    """Service-role INSERT of a fresh widget conversation; return the created row.
+
+    The anonymous customer holds no Postgres role, so conversation creation is
+    backend-mediated under the service role (same posture as token issuance,
+    US-071). RLS on `conversations` is workspace-membership (ADR-0004); the
+    service role bypasses it, and the workspace is the one the widget key already
+    resolved to — never a caller-supplied value.
+    """
+    headers = _require_service_role_headers()
+    r = await http.post(
+        f"{SUPABASE_URL}/rest/v1/conversations",
+        headers=headers,
+        json=_widget_conversation_insert_payload(
+            workspace_id=workspace_id, bot_user_id=bot_user_id
+        ),
+    )
+    r.raise_for_status()
+    rows = r.json()
+    return rows[0] if isinstance(rows, list) else rows
+
+
+async def _persist_conversation_message(
+    http: httpx.AsyncClient, *, conversation_id: str, role: str, content: str
+) -> dict:
+    """Service-role INSERT of one `conversation_messages` row; return it.
+
+    The customer message (and, in US-079, the bot answer) are written under the
+    service role for the same reason as conversation creation: the anonymous
+    customer is structurally off the Supabase trust surface (US-071).
+    """
+    headers = _require_service_role_headers()
+    r = await http.post(
+        f"{SUPABASE_URL}/rest/v1/conversation_messages",
+        headers=headers,
+        json=_conversation_message_insert_payload(
+            conversation_id=conversation_id, role=role, content=content
+        ),
+    )
+    r.raise_for_status()
+    rows = r.json()
+    return rows[0] if isinstance(rows, list) else rows
+
+
+class WidgetMessageRequest(BaseModel):
+    message: str
+    # Required on the FIRST message (it selects the workspace whose bot answers);
+    # ignored on a resume, where the X-Conversation-Token header identifies the
+    # conversation and the public_key is not needed.
+    public_key: str | None = None
+
+
+@app.post("/widget/conversations/messages")
+async def widget_conversation_message(
+    req: WidgetMessageRequest,
+    request: Request,
+    x_conversation_token: str | None = Header(
+        default=None, alias=_CONVERSATION_TOKEN_HEADER
+    ),
+) -> StreamingResponse:
+    """US-078: a customer message — lazily CREATE the conversation on the first
+    one, RESUME it (no new row) on every later one.
+
+    Branches on the presence of the opaque per-conversation token (US-071):
+
+      * No `X-Conversation-Token` → FIRST MESSAGE. Re-run the public resolution
+        gates server-side (US-072 not-revoked + US-073 origin, reusing the SAME
+        helpers as `/widget/keys/resolve` — open-time resolution is advisory;
+        creation must re-verify), idempotently ensure the workspace bot (US-069),
+        INSERT the `conversations` row (`status='active'`, `bot_user_id` set,
+        `channel='widget'`), and issue the opaque token (US-071). The token is
+        returned EXACTLY ONCE in the `X-Conversation-Token` RESPONSE HEADER — never
+        in the SSE body / an event / a log line.
+      * `X-Conversation-Token` present → RESUME. The service-role-only RPC resolves
+        it to its ONE bound conversation iff not-expired AND not-resolved; NO row
+        is created, so a reload never duplicates the conversation. A missing /
+        expired / resolved token → 401, the iframe's cue to start fresh.
+
+    The customer message is persisted to `conversation_messages` (role='user',
+    `tool_calls` null) under the service role before the SSE opens, so it survives
+    a client disconnect and the transcript (US-071 GET) always reflects what was
+    received.
+
+    The response is the REQUEST-SCOPED SSE the bot's answer streams over in US-079
+    (like `/api/chat`). This story OPENS it and emits a `conversation` event then
+    `done`; the deterministic deflection pipeline + delta streaming + bot-reply
+    persistence is US-079, the escalation latch US-080, the long-lived async-reply
+    SSE US-081.
+
+    Rate limiting (US-076, heavier `cost` than a resolve open): the PER-SESSION/IP
+    window is charged FIRST (before any DB work) on both branches; the PER-KEY
+    window is charged on the first-message branch only AFTER the key resolves (a
+    resume has no public_key to key on — the per-session window + the per-workspace
+    breaker, US-077/079, bound a resumed conversation). A malformed first-message
+    key is a FREE 404 (no counter write), mirroring `/widget/keys/resolve`. Every
+    refusal is the same opaque 404 so nothing leaks whether the key exists.
+    """
+    message = (req.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message must not be empty")
+
+    raw_token: str | None = None
+    async with httpx.AsyncClient(timeout=30.0) as http:
+        if x_conversation_token:
+            # RESUME: a stored token from a prior first message. Charge the
+            # per-session window, then resolve the token to its ONE bound
+            # conversation — NO row is created (AC: a reload stays at 1 row).
+            await _enforce_widget_session_limit(
+                request, cost=WIDGET_RATE_LIMIT_MESSAGE_COST
+            )
+            conv = await _resume_conversation_by_token(http, x_conversation_token)
+            if conv is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail="invalid or expired conversation token",
+                )
+            conversation_id = conv["id"]
+        else:
+            # FIRST MESSAGE. The key shape guard is FREE (no counter write for a
+            # malformed key, mirroring /widget/keys/resolve) — checked before the
+            # per-session charge; it also narrows public_key to a non-None str.
+            public_key = req.public_key
+            if not public_key or not is_widget_public_key(public_key):
+                raise HTTPException(
+                    status_code=404, detail="unknown or inactive widget key"
+                )
+            # Per-SESSION/IP window FIRST (US-076), at the heavier message cost —
+            # before the DB resolve so a hammering session 429s having touched no DB.
+            await _enforce_widget_session_limit(
+                request, cost=WIDGET_RATE_LIMIT_MESSAGE_COST
+            )
+            resolved = await _resolve_widget_key(http, public_key)
+            if resolved is None:
+                raise HTTPException(
+                    status_code=404, detail="unknown or inactive widget key"
+                )
+            # Per-KEY window charged only now (the key is real/active), so a
+            # rotating-fake-key attacker never mints a per-key counter row.
+            await _enforce_widget_key_limit(
+                public_key, cost=WIDGET_RATE_LIMIT_MESSAGE_COST
+            )
+            if not is_origin_allowed(
+                request.headers.get("origin"), resolved.get("allowed_origins")
+            ):
+                raise HTTPException(
+                    status_code=404, detail="unknown or inactive widget key"
+                )
+            workspace_id = resolved["workspace_id"]
+            # The per-workspace bot is normally already provisioned at first key
+            # issuance (US-072 hook); this is the idempotent lazy fallback (US-069
+            # docstring: "also triggered lazily at first conversation, US-078").
+            # Best-effort — bot_user_id may be None if provisioning is unavailable;
+            # the conversation is still created (the column is nullable) and US-079
+            # owns how a botless workspace deflects.
+            bot_user_id = await _ensure_workspace_bot(http, workspace_id)
+            conv = await _create_widget_conversation(
+                http, workspace_id=workspace_id, bot_user_id=bot_user_id
+            )
+            conversation_id = conv["id"]
+            # Issue the opaque token ONCE; it travels back only in the response
+            # header below — never an SSE event / body / log (US-071).
+            raw_token = await _issue_conversation_token(http, conversation_id)
+
+        await _persist_conversation_message(
+            http, conversation_id=conversation_id, role="user", content=message
+        )
+
+    public_conv = _public_conversation_view(conv)
+
+    async def gen() -> AsyncIterator[bytes]:
+        # US-078 opens the request-scoped SSE and announces the conversation
+        # (id/status/created_at — no token, no workspace topology). US-079 streams
+        # the deterministic deflection answer here (delta… then done) and persists
+        # the bot reply; US-080 latches the escalate branch. Until then the turn is
+        # announce-then-done.
+        if await request.is_disconnected():
+            return
+        yield _sse("conversation", public_conv)
+        yield _sse("done", {})
+
+    headers: dict[str, str] = {}
+    if raw_token is not None:
+        # Returned EXACTLY ONCE, only here, only to the iframe (US-071). The widget
+        # CORS posture (US-074) exposes this header so the cross-origin iframe can
+        # read it.
+        headers[_CONVERSATION_TOKEN_HEADER] = raw_token
+    return StreamingResponse(
+        gen(), media_type="text/event-stream", headers=headers
+    )
 
 
 @app.get("/healthz")
