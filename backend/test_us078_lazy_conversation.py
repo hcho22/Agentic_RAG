@@ -169,6 +169,17 @@ def _run_integration(main) -> int:
             return state["conversation"]
         return None
 
+    async def fake_load_bot(http, conversation_id):
+        # US-079 resume path reads the conversation's bot_user_id under the service
+        # role (the resume RPC view omits it). Mocked here so the row-count test
+        # never touches the dummy DB.
+        return BOT
+
+    async def fake_run_turn(http, *, conversation_id, workspace_id, bot_user_id, message):
+        # US-079 deflection turn. Stubbed so this row-count test runs no real
+        # retrieval/LLM; US-079's own test exercises the streaming/persistence path.
+        return "stubbed bot reply"
+
     async def fake_load_origins():
         # US-074 widget CORS snapshot: the buyer's origin is the one registered
         # origin. Mocked so the CORS layer admits LISTED (and the run stays quiet
@@ -182,6 +193,8 @@ def _run_integration(main) -> int:
         "_issue_conversation_token": main._issue_conversation_token,
         "_persist_conversation_message": main._persist_conversation_message,
         "_resume_conversation_by_token": main._resume_conversation_by_token,
+        "_load_conversation_bot_user_id": main._load_conversation_bot_user_id,
+        "_run_widget_bot_turn": main._run_widget_bot_turn,
         "_load_active_widget_origins": main._load_active_widget_origins,
         "_RATE_LIMITER": main._RATE_LIMITER,
     }
@@ -191,6 +204,8 @@ def _run_integration(main) -> int:
     main._issue_conversation_token = fake_issue_token  # type: ignore[assignment]
     main._persist_conversation_message = fake_persist  # type: ignore[assignment]
     main._resume_conversation_by_token = fake_resume   # type: ignore[assignment]
+    main._load_conversation_bot_user_id = fake_load_bot  # type: ignore[assignment]
+    main._run_widget_bot_turn = fake_run_turn          # type: ignore[assignment]
     main._load_active_widget_origins = fake_load_origins  # type: ignore[assignment]
     main._WIDGET_ORIGIN_SNAPSHOT.invalidate()
     main._RATE_LIMITER = None  # row-count test: rate limiting is no-op here  # type: ignore[assignment]

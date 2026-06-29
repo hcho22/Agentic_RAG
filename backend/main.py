@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
@@ -44,11 +45,17 @@ from chunking import chunk_text, get_chunk_config
 from circuit_breaker import (
     BreakerDecision,
     check_workspace_breaker,
+    run_breaker_guarded_turn,
 )
 from conversation_tokens import (
     CONVERSATION_TOKEN_TTL_SECONDS,
     generate_conversation_token,
     hash_conversation_token,
+)
+from escalation import (
+    GENERIC_DEFERRAL,
+    DeflectionResult,
+    EscalationConfig,
 )
 from widget_keys import (
     WILDCARD_ORIGIN,
@@ -287,6 +294,15 @@ WIDGET_BREAKER_WINDOW_SECONDS = _positive_int_env(
 WIDGET_BREAKER_PER_WORKSPACE = _positive_int_env(
     "WIDGET_BREAKER_PER_WORKSPACE", 600
 )
+
+# US-079 (ADR-0003/0008): the support bot's deflection turn reuses the ONE
+# validated escalation config (US-050) the gates consume — `tau_sim` / `n_min`
+# (retrieval gate) + `faithfulness_cutoff` (faithfulness gate). Built once at
+# startup so a fat-fingered ESCALATION_* knob fails the boot, not the first
+# customer message (the gates themselves read no env — they take these as params).
+# The gate's per-row floor is the existing retrieval similarity threshold
+# (`get_similarity_threshold()`), passed alongside per turn — not a new knob.
+_ESCALATION_CONFIG = EscalationConfig.from_env()
 
 # US-025: `ChatMode` and the resolved `DEFAULT_CHAT_MODE` moved below — the
 # default now depends on the answerer provider (responses is OpenAI-only), so it
@@ -3258,11 +3274,12 @@ async def widget_resolve_key(
 # conversation (PRD ADR-0008 / CONTEXT lifecycle). Every later turn carries the
 # stored token and RESUMES the same row (US-071) — a reload never duplicates it.
 #
-# The message endpoint is the REQUEST-SCOPED SSE the bot's answer streams over in
-# US-079 (like /api/chat). This story OPENS that SSE and announces the
-# conversation; the deterministic deflection pipeline + answer streaming is
-# US-079, the escalation latch is US-080, and the long-lived async-agent-reply SSE
-# is US-081 — so the body here emits only a `conversation` event then `done`.
+# The message endpoint is the REQUEST-SCOPED SSE the bot's answer streams over
+# (like /api/chat). It announces the `conversation` event, then US-079 runs the
+# deterministic ADR-0003 deflection turn AS the bot (behind the US-077 breaker),
+# persists the bot reply, and streams it as `delta` events before `done`. The
+# escalation latch (`status='escalated'`) is US-080 and the long-lived
+# async-agent-reply SSE is US-081.
 #
 # The raw token is delivered EXACTLY ONCE in the `X-Conversation-Token` RESPONSE
 # HEADER — never an SSE event, response body, or log line (US-071 sharp edge). The
@@ -3352,6 +3369,167 @@ async def _persist_conversation_message(
     return rows[0] if isinstance(rows, list) else rows
 
 
+async def _load_conversation_bot_user_id(
+    http: httpx.AsyncClient, conversation_id: str
+) -> str | None:
+    """Service-role read of a conversation's `bot_user_id` (US-079 resume path).
+
+    The US-071 `resume_conversation` RPC returns only id/workspace_id/status/
+    created_at (the customer-facing view), but the deflection turn additionally
+    needs the workspace bot's user id to mint its per-turn JWT (US-068/070). The
+    first-message branch already has it in hand (the INSERT representation), so this
+    read is only for a RESUMED conversation. Keyed by the conversation id the opaque
+    token already resolved to — never a caller-supplied id — and read under the
+    service role because the anonymous customer holds no Postgres role. Returns None
+    for a botless workspace (provisioning unavailable) AND, fail-closed, on a
+    transient service-role read error — both of which `_run_widget_bot_turn` treats
+    as escalate, so a recoverable read glitch degrades to the generic deferral
+    rather than 500-ing the customer surface (mirroring the first-message path's
+    `_ensure_workspace_bot`, which never raises). Never raises on a read failure.
+    """
+    headers = _require_service_role_headers()
+    try:
+        r = await http.get(
+            f"{SUPABASE_URL}/rest/v1/conversations",
+            params={
+                "id": f"eq.{conversation_id}",
+                "select": "bot_user_id",
+                "limit": "1",
+            },
+            headers=headers,
+        )
+        r.raise_for_status()
+    except httpx.HTTPError:
+        log.warning(
+            "widget_turn.bot_load_failed conversation=%s — escalating "
+            "(treating as botless on a transient read error)",
+            conversation_id,
+            exc_info=True,
+        )
+        return None
+    rows = r.json()
+    if not rows:
+        return None
+    return rows[0].get("bot_user_id")
+
+
+def _split_for_streaming(text: str, *, approx_chunk: int = 24) -> list[str]:
+    """Split a finished message into `delta` chunks that re-concatenate to `text`.
+
+    US-079 streams the bot's answer over the request-scoped SSE using the SAME
+    `delta`/`done` shape as `/api/chat`. But the ADR-0003 pipeline gates the WHOLE
+    drafted answer on the faithfulness judge BEFORE it may send (US-048), so the
+    draft cannot be streamed token-by-token live — a half-streamed answer the gate
+    later rejects would already have leaked. The answer is therefore computed in
+    full, then replayed here as a handful of word-boundary `delta` events so the
+    iframe renders it incrementally. `"".join(_split_for_streaming(t)) == t` for any
+    `t` (whitespace separators are preserved), so the streamed text is byte-exact.
+    """
+    if not text:
+        return []
+    chunks: list[str] = []
+    buf = ""
+    # re.split with a capturing group keeps the whitespace runs as list items, so
+    # joining every piece reproduces `text` exactly. Accumulate into ~approx_chunk
+    # windows that end on a word (never mid-token) for readable incremental render.
+    for piece in re.split(r"(\s+)", text):
+        if not piece:
+            continue
+        buf += piece
+        if len(buf) >= approx_chunk and not piece.isspace():
+            chunks.append(buf)
+            buf = ""
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
+async def _run_widget_bot_turn(
+    http: httpx.AsyncClient,
+    *,
+    conversation_id: str,
+    workspace_id: str | None,
+    bot_user_id: str | None,
+    message: str,
+) -> str:
+    """US-079: run ONE customer turn's ADR-0003 deflection pipeline AS the bot,
+    behind the US-077 per-workspace breaker; return the customer-facing message.
+
+    Returns the bot's drafted answer when retrieval is strong AND the draft clears
+    the faithfulness gate, else the fixed generic deferral (escalate). The turn is
+    fail-CLOSED end to end — a botless workspace, an unimportable support module, a
+    missing `SUPABASE_JWT_SECRET`, or any pipeline error all escalate to a human
+    (generic deferral) rather than guess. The per-workspace breaker is checked
+    FIRST: when tripped, `run_bot_deflection_turn` is NEVER awaited (zero retrieval,
+    zero LLM — the US-077 cost-runaway backstop) and the breaker deferral is
+    returned. The breaker is wired here so the cost ceiling is live the moment the
+    paid pipeline goes live.
+
+    SCOPE BOUNDARY: the escalation LATCH (`status='escalated'` / `escalated_at`) and
+    the breaker's `on_trip` escalation write are US-080's concern — this story runs
+    the turn and streams its message, leaving the conversation `active`. The minted
+    bot JWT is a bearer credential that never leaves `support_bot` (US-070): the
+    only value returned here is the client-safe customer message.
+    """
+    if not bot_user_id or not workspace_id:
+        # Botless workspace (provisioning unavailable, US-078): the bot has no
+        # principal to retrieve as, so defer to a human. No breaker, no LLM.
+        log.info(
+            "widget_turn.no_bot conversation=%s — escalating (no provisioned bot)",
+            conversation_id,
+        )
+        return GENERIC_DEFERRAL
+
+    try:
+        from supabase_jwt import mint_supabase_jwt  # US-068 (server-side only)
+        from support_bot import run_bot_deflection_turn  # US-070
+    except ImportError:
+        # Belt-and-suspenders for a build that ships the widget without the
+        # support-bot module (mirrors `_ensure_workspace_bot`): escalate.
+        log.warning(
+            "widget_turn.support_module_unavailable conversation=%s — escalating",
+            conversation_id,
+        )
+        return GENERIC_DEFERRAL
+
+    async def _turn() -> DeflectionResult:
+        # The minter (US-068) and the answerer/embedder/judge role clients are
+        # injected so the retrieval seam stays import-cycle-free (support_bot
+        # docstring). `workspace_id` here is the NON-security narrowing filter
+        # (US-070), not the trust boundary — that is the minted JWT's auth.uid().
+        return await run_bot_deflection_turn(
+            mint_token=mint_supabase_jwt,
+            anon_key=SUPABASE_ANON_KEY,
+            bot_user_id=bot_user_id,
+            workspace_id=workspace_id,
+            embedder_client=embedder_client,
+            answerer_client=openai_client,
+            judge_client=judge_client,
+            http=http,
+            supabase_url=SUPABASE_URL,
+            message=message,
+            config=_ESCALATION_CONFIG,
+            match_threshold=get_similarity_threshold(),
+        )
+
+    try:
+        result = await run_breaker_guarded_turn(
+            limiter=_RATE_LIMITER,
+            workspace_id=workspace_id,
+            limit=WIDGET_BREAKER_PER_WORKSPACE,
+            window_seconds=WIDGET_BREAKER_WINDOW_SECONDS,
+            run_turn=_turn,
+            on_trip=None,  # US-080 wires the escalation latch write as on_trip
+        )
+    except Exception:  # noqa: BLE001 — any turn failure escalates (fail closed)
+        log.exception(
+            "widget_turn.failed conversation=%s — escalating (fail closed)",
+            conversation_id,
+        )
+        return GENERIC_DEFERRAL
+    return result.customer_message
+
+
 class WidgetMessageRequest(BaseModel):
     message: str
     # Required on the FIRST message (it selects the workspace whose bot answers);
@@ -3391,11 +3569,14 @@ async def widget_conversation_message(
     a client disconnect and the transcript (US-071 GET) always reflects what was
     received.
 
-    The response is the REQUEST-SCOPED SSE the bot's answer streams over in US-079
-    (like `/api/chat`). This story OPENS it and emits a `conversation` event then
-    `done`; the deterministic deflection pipeline + delta streaming + bot-reply
-    persistence is US-079, the escalation latch US-080, the long-lived async-reply
-    SSE US-081.
+    The response is the REQUEST-SCOPED SSE the bot's answer streams over (like
+    `/api/chat`): after the `conversation` event, US-079 runs the deterministic
+    ADR-0003 deflection pipeline AS the workspace bot (behind the US-077
+    per-workspace breaker), persists the bot reply (role='assistant', `tool_calls`
+    null), and streams it as `delta` events before `done`. On the escalate branch
+    (weak retrieval, unfaithful draft, a tripped breaker, or any failure) it streams
+    the fixed generic deferral — never a confident answer. The escalation LATCH
+    (`status='escalated'`) is US-080; the long-lived async-reply SSE is US-081.
 
     Rate limiting (US-076, heavier `cost` than a resolve open): the PER-SESSION/IP
     window is charged FIRST (before any DB work) on both branches; the PER-KEY
@@ -3410,6 +3591,13 @@ async def widget_conversation_message(
         raise HTTPException(status_code=400, detail="message must not be empty")
 
     raw_token: str | None = None
+    # The deflection turn (US-079) needs the conversation's workspace (the
+    # non-security retrieval narrowing filter) + bot user id (to mint the per-turn
+    # bot JWT). Resolved in BOTH branches below (the if/else is exhaustive and every
+    # non-raising path assigns them) so the streaming generator can run the turn
+    # after this HTTP client closes. `bot_user_id` may be None (botless workspace).
+    workspace_id: str
+    bot_user_id: str | None
     async with httpx.AsyncClient(timeout=30.0) as http:
         if x_conversation_token:
             # RESUME: a stored token from a prior first message. Charge the
@@ -3425,6 +3613,11 @@ async def widget_conversation_message(
                     detail="invalid or expired conversation token",
                 )
             conversation_id = conv["id"]
+            # The resume RPC's customer-facing view omits bot_user_id (US-071); read
+            # it under the service role so a RESUMED conversation still gets bot
+            # answers (US-079). None ⇒ botless ⇒ the turn escalates.
+            workspace_id = conv["workspace_id"]
+            bot_user_id = await _load_conversation_bot_user_id(http, conversation_id)
         else:
             # FIRST MESSAGE. The key shape guard is FREE (no counter write for a
             # malformed key, mirroring /widget/keys/resolve) — checked before the
@@ -3479,13 +3672,55 @@ async def widget_conversation_message(
 
     async def gen() -> AsyncIterator[bytes]:
         # US-078 opens the request-scoped SSE and announces the conversation
-        # (id/status/created_at — no token, no workspace topology). US-079 streams
-        # the deterministic deflection answer here (delta… then done) and persists
-        # the bot reply; US-080 latches the escalate branch. Until then the turn is
-        # announce-then-done.
+        # (id/status/created_at — no token, no workspace topology). US-079 then runs
+        # the deterministic deflection turn AS the bot (behind the US-077 breaker),
+        # persists the bot reply, and streams it as `delta` events before `done`,
+        # reusing the exact /api/chat SSE shape.
         if await request.is_disconnected():
             return
         yield _sse("conversation", public_conv)
+
+        # Re-check disconnect before the PAID retrieval+LLM turn: a client that
+        # dropped right after the conversation event should not incur the turn at
+        # all. The per-workspace breaker bounds aggregate cost; this trims the
+        # obvious per-request waste, aligning with the feature's cost-control
+        # purpose. No bot reply is produced or persisted on this early return.
+        if await request.is_disconnected():
+            return
+
+        # Run the turn under a fresh client — the outer one closed above. The turn
+        # is fail-closed: it never raises, returning the generic deferral on any
+        # error (botless workspace, missing secret, pipeline failure, tripped
+        # breaker), so the customer always gets a coherent reply.
+        async with httpx.AsyncClient(timeout=60.0) as turn_http:
+            reply = await _run_widget_bot_turn(
+                turn_http,
+                conversation_id=conversation_id,
+                workspace_id=workspace_id,
+                bot_user_id=bot_user_id,
+                message=message,
+            )
+            # Persist the bot reply (role='assistant', `tool_calls` null — the
+            # deterministic pipeline is control flow, not the agentic tool loop)
+            # BEFORE streaming, so the transcript reflects it even if the client
+            # disconnects mid-stream (same durability rationale as the user message)
+            # and what streams is exactly what is recorded.
+            try:
+                await _persist_conversation_message(
+                    turn_http,
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=reply,
+                )
+            except Exception:  # noqa: BLE001 — surface a persistence failure as error
+                log.exception("widget bot reply persistence failed")
+                yield _sse("error", {"message": "could not persist bot reply"})
+                return
+
+        for chunk in _split_for_streaming(reply):
+            if await request.is_disconnected():
+                return
+            yield _sse("delta", {"text": chunk})
         yield _sse("done", {})
 
     headers: dict[str, str] = {}
