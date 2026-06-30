@@ -48,6 +48,7 @@ from circuit_breaker import (
     check_workspace_breaker,
     run_breaker_guarded_turn,
 )
+from conversation_fanout import ConversationFanout, message_event
 from conversation_tokens import (
     CONVERSATION_TOKEN_TTL_SECONDS,
     generate_conversation_token,
@@ -438,6 +439,15 @@ _SEMANTIC_LAYER: SemanticLayer | None = None
 # it). Both are torn down in `_on_shutdown`.
 _RATE_LIMITER: RateLimiter | None = None
 _RATE_LIMITER_HTTP: httpx.AsyncClient | None = None
+
+# US-081/082 (ADR-0008): the in-process customer-SSE fan-out registry. A workspace
+# agent's reply (US-082) is published here after its durable `conversation_messages`
+# write, and the customer's long-lived backend SSE (US-081) subscribes to drain it —
+# the anonymous customer never touches Supabase Realtime. Single-instance core; the
+# multi-instance Postgres LISTEN/NOTIFY bridge (US-081) feeds INTO this same
+# registry. Holds state only for conversations with an OPEN customer SSE, so an idle
+# backend keeps no per-conversation memory.
+_CONVERSATION_FANOUT = ConversationFanout()
 
 # LangSmith: when LANGSMITH_API_KEY is set the SDK auto-ships traces for every
 # wrapped OpenAI call and every @traceable function. When it's missing,
@@ -3990,6 +4000,142 @@ async def widget_conversation_escalate(
     # escalated) only if the PATCH representation came back empty (a vanished row).
     view_source = updated if updated else {**conv, "status": "escalated"}
     return {"conversation": _public_conversation_view(view_source)}
+
+
+# ---------------------------------------------------------------------------
+# US-082 (ADR-0008, amends ADR-0004): the agent-reply endpoint — the human leg.
+#
+# A workspace AGENT (a human teammate working the operator dashboard, US-087) posts
+# a reply into a support conversation. Unlike every other `/widget/*` route (the
+# anonymous-customer surface, authed by the opaque US-071 token), this one is authed
+# by the agent's REAL Supabase JWT and is the known authenticated exception on the
+# widget path partition (`_WIDGET_AUTHENTICATED_SUFFIXES = ("/agent-reply",)`,
+# US-074), so it rides the authenticated `/api/*` CORS posture — reachable from the
+# dashboard's app origin rather than CORS-blocked by the per-key widget allowlist.
+#
+# The boundary is the US-066 workspace-membership RLS, enforced UNDER THE AGENT'S
+# OWN JWT: the write into `conversation_messages` only succeeds for a member of the
+# conversation's workspace, so a cross-workspace agent's reply is rejected by
+# Postgres, not by app code (the cross-workspace zero-leak is pinned at the DB layer
+# by `backend/test_us066_conversations_rls.py`). After the durable write, the reply
+# is fanned to the customer's live SSE through the in-process registry (US-081) —
+# never Supabase Realtime — keeping the anonymous customer off the Supabase trust
+# surface.
+# ---------------------------------------------------------------------------
+
+
+class AgentReplyRequest(BaseModel):
+    content: str
+
+
+def _public_conversation_message_view(message: dict) -> dict:
+    """The agent-facing shape of a written `conversation_messages` row."""
+    return {
+        "id": message.get("id"),
+        "conversation_id": message.get("conversation_id"),
+        "role": message.get("role"),
+        "content": message.get("content"),
+        "created_at": message.get("created_at"),
+    }
+
+
+async def _fetch_conversation_for_agent(
+    http: httpx.AsyncClient, user: AuthedUser, conversation_id: str
+) -> dict:
+    """Read a conversation UNDER THE AGENT'S JWT — the membership gate + existence check.
+
+    The SELECT runs under the agent's own JWT, so the US-066 workspace-membership
+    RLS hides any conversation in a workspace the agent does not belong to. A
+    non-member (or a genuinely absent id) gets 0 rows → 404, indistinguishable on
+    purpose (the same RLS-hidden-is-not-found posture as `_fetch_thread`), so the
+    endpoint never confirms a cross-workspace conversation exists. The INSERT below
+    is independently RLS-gated (defense in depth), but this read gives the clean 404
+    and the conversation's current status without parsing a PostgREST policy error.
+    """
+    r = await http.get(
+        f"{SUPABASE_URL}/rest/v1/conversations",
+        params={"id": f"eq.{conversation_id}", "select": "id,status", "limit": "1"},
+        headers=_supabase_headers(user),
+    )
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        # RLS hides rows in workspaces the agent doesn't belong to, so this is
+        # indistinguishable from "not found" — correct (and non-leaking) either way.
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return rows[0]
+
+
+async def _insert_agent_reply(
+    http: httpx.AsyncClient, user: AuthedUser, *, conversation_id: str, content: str
+) -> dict:
+    """INSERT one agent reply into `conversation_messages` UNDER THE AGENT'S JWT.
+
+    `role='assistant'` — the only support-side role the US-066 CHECK allows
+    (`user|assistant|system|tool`); there is no separate `'agent'` role, so the
+    human reply is stored exactly as the customer sees it in the US-071 transcript
+    (`role=in.(user,assistant)`). `tool_calls` stays null (a human message, not the
+    agentic tool loop). The membership RLS WITH CHECK is the hard write boundary: a
+    non-member's INSERT is rejected by Postgres. This path is only reached after the
+    membership SELECT above passed, so a rejection here means membership changed
+    mid-request (a rare race) and surfaces as the raised HTTP error.
+    """
+    r = await http.post(
+        f"{SUPABASE_URL}/rest/v1/conversation_messages",
+        headers=_supabase_headers(user),
+        json={
+            "conversation_id": conversation_id,
+            "role": "assistant",
+            "content": content,
+        },
+    )
+    r.raise_for_status()
+    rows = r.json()
+    return rows[0] if isinstance(rows, list) else rows
+
+
+@app.post("/widget/conversations/{conversation_id}/agent-reply")
+async def widget_agent_reply(
+    conversation_id: str,
+    req: AgentReplyRequest,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    """US-082: a workspace agent posts a reply into a support conversation.
+
+    Authed by the agent's REAL Supabase JWT (the existing `get_user` path), NOT the
+    anonymous-customer opaque token — this is the operator-dashboard leg. The write
+    runs under the agent's JWT so the US-066 workspace-membership RLS is the
+    authorization: a member of the conversation's workspace may reply; a
+    cross-workspace agent's reply is rejected by Postgres (404, RLS-hidden). Replies
+    are permitted regardless of status — in particular on an `escalated`
+    conversation, where the bot is silent (US-080) and the agent is the ONLY message
+    source.
+
+    After the durable `conversation_messages` write (`role='assistant'`), the reply
+    is fanned to the customer's live backend SSE (US-081) through the in-process
+    registry — never Supabase Realtime — so it reaches the anonymous customer the
+    moment it is written. A closed/absent customer SSE simply receives nothing live;
+    the reply is durable and the customer recovers it via the US-071 transcript on
+    reconnect.
+    """
+    content = (req.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="reply content must not be empty")
+
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        # Membership gate + existence (under the agent's JWT): a non-member or an
+        # absent id → 404 before any write.
+        await _fetch_conversation_for_agent(http, user, conversation_id)
+        message = await _insert_agent_reply(
+            http, user, conversation_id=conversation_id, content=content
+        )
+
+    # Fan the reply to the customer's live SSE (US-081 consumes the registry). The
+    # publish is in-process and non-blocking; it delivers to 0 subscribers when no
+    # customer SSE is open — the reply is still durable in the transcript.
+    _CONVERSATION_FANOUT.publish(conversation_id, message_event(message))
+
+    return {"message": _public_conversation_message_view(message)}
 
 
 @app.get("/healthz")
