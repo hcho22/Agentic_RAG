@@ -1,0 +1,307 @@
+/* US-083/084: the iframe widget's OWN styles.
+ *
+ * Deliberately self-contained - the widget does NOT pull in the admin app's
+ * Tailwind/dark theme. It is a separate, themeable public surface (US-084 drives
+ * brand color / position / greeting / launcher icon from the loader `init` config),
+ * and host CSS cannot reach it because it lives in a cross-origin iframe. The iframe
+ * body is transparent so that, when the loader sizes the iframe down to the bubble,
+ * only the launcher shows over the host page. */
+
+:root,
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
+#widget-root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica,
+    Arial, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+.sw-root {
+  position: fixed;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  inset-block-end: 0;
+}
+
+.sw-root.sw-right {
+  right: 0;
+  align-items: flex-end;
+}
+
+.sw-root.sw-left {
+  left: 0;
+  align-items: flex-start;
+}
+
+/* Inset the surface from the iframe's clipping edges (both states) so the
+   launcher's drop-shadow + unread badge AND the open panel's drop-shadow render
+   fully instead of being clipped at the iframe viewport edge. The loader sizes the
+   iframe box with matching slack (CLOSED 96x96, OPEN 404x672). */
+.sw-root.sw-right {
+  margin-right: 20px;
+  margin-bottom: 24px;
+}
+
+.sw-root.sw-left {
+  margin-left: 20px;
+  margin-bottom: 24px;
+}
+
+/* --- launcher ------------------------------------------------------------- */
+.sw-launcher {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border: none;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  transition: transform 0.12s ease;
+}
+
+.sw-launcher:hover {
+  transform: scale(1.05);
+}
+
+.sw-launcher:focus-visible {
+  outline: 3px solid rgba(255, 255, 255, 0.6);
+  outline-offset: 2px;
+}
+
+.sw-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 20px;
+  text-align: center;
+  box-shadow: 0 0 0 2px #fff;
+}
+
+/* --- panel ---------------------------------------------------------------- */
+.sw-panel {
+  width: 360px;
+  max-width: 100%;
+  height: 540px;
+  max-height: 100%;
+  background: #ffffff;
+  color: #0f172a;
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.sw-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  color: #fff;
+  flex: none;
+}
+
+.sw-panel__title {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.sw-panel__close {
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+/* --- message list --------------------------------------------------------- */
+.sw-messages {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #f8fafc;
+}
+
+.sw-msg {
+  display: flex;
+}
+
+.sw-msg--user {
+  justify-content: flex-end;
+}
+
+.sw-msg--bot {
+  justify-content: flex-start;
+}
+
+.sw-bubble {
+  max-width: 80%;
+  padding: 9px 12px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sw-bubble--bot {
+  background: #ffffff;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  border-bottom-left-radius: 4px;
+}
+
+.sw-bubble--user {
+  color: #ffffff;
+  border-bottom-right-radius: 4px;
+}
+
+.sw-bubble--error {
+  border-color: #fca5a5;
+  color: #b91c1c;
+}
+
+.sw-system {
+  align-self: center;
+  font-size: 12px;
+  color: #64748b;
+  background: #e2e8f0;
+  padding: 4px 10px;
+  border-radius: 10px;
+}
+
+/* --- typing dots ---------------------------------------------------------- */
+.sw-typing {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  height: 14px;
+}
+
+.sw-typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #94a3b8;
+  animation: sw-bounce 1.2s infinite ease-in-out;
+}
+
+.sw-typing span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.sw-typing span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes sw-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+/* --- error + composer ----------------------------------------------------- */
+.sw-error {
+  flex: none;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: #b91c1c;
+  background: #fef2f2;
+  border-top: 1px solid #fee2e2;
+}
+
+.sw-composer {
+  flex: none;
+  border-top: 1px solid #e2e8f0;
+  background: #ffffff;
+  padding: 10px 12px;
+}
+
+.sw-composer__hint {
+  font-size: 12px;
+  color: #64748b;
+  padding: 0 2px 8px;
+}
+
+.sw-composer__row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.sw-composer__input {
+  flex: 1;
+  resize: none;
+  max-height: 96px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  outline: none;
+}
+
+.sw-composer__input:focus {
+  border-color: #94a3b8;
+}
+
+.sw-composer__input:disabled {
+  background: #f1f5f9;
+  color: #94a3b8;
+}
+
+.sw-composer__send {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: 10px;
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.sw-composer__send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

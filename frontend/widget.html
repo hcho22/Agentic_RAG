@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <title>Support</title>
+  </head>
+  <body>
+    <!--
+      US-083: the cross-origin iframe widget shell, served from the kit's OWN
+      origin (never the buyer's host origin). Its localStorage — where the US-071
+      conversation token + session live — is therefore unreadable by host JS.
+      Embedded by frontend/public/widget.js; communicates with the host page via
+      postMessage only (see src/widget/protocol.ts).
+    -->
+    <div id="widget-root"></div>
+    <script type="module" src="/src/widget/main.tsx"></script>
+  </body>
+</html>

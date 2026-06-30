@@ -255,6 +255,36 @@ The backend exposes:
 | `POST` | `/widget/conversations/{id}/agent-reply` | Operator dashboard: a workspace agent (human teammate) posts a reply into a support conversation - the human leg, and the ONE authenticated `/widget/*` route (authed by the agent's REAL Supabase JWT via `get_user`, NOT the anonymous opaque token; the `_WIDGET_AUTHENTICATED_SUFFIXES` exception that rides the authenticated `/api/*` CORS posture, US-074). The read + write run under the agent's own JWT, so the US-066 workspace-membership RLS IS the authorization: a member may reply, a cross-workspace agent gets an opaque 404 (RLS-hidden). Writes `role='assistant'` (the US-066 CHECK has no `'agent'` role, so no migration), `tool_calls` null; permitted regardless of status - in particular on `escalated`, where the bot is silent (US-080) and the agent is the only message source. After the durable write the reply is fanned to the customer's live backend SSE through the in-process registry (`backend/conversation_fanout.py`), never Supabase Realtime; 0 open SSEs just means nothing live - the reply is durable and recovered via the transcript on reconnect. The customer-facing GET SSE channel + the multi-instance `LISTEN/NOTIFY` bridge that feeds this same registry remain US-081 (US-082, ADR-0004/0008) |
 | `GET` | `/healthz` | Liveness check |
 
+## Embedding the support widget
+
+A buyer embeds the support widget with one tiny loader `<script>`:
+
+```html
+<script
+  src="https://YOUR-KIT-ORIGIN/widget.js"
+  data-public-key="wk_pk_xxx"
+  data-brand-color="#2563eb"
+  data-greeting="Hi! Ask us anything."
+  data-title="Acme Support"
+  data-position="bottom-right"
+  async></script>
+```
+
+The loader injects a **cross-origin iframe served from the kit's own origin** and
+talks to the host page via `postMessage` only (`window.SupportWidget.open()` /
+`close()` / `toggle()`; an `onUnread` callback + a `supportwidget:unread`
+CustomEvent). The conversation token + session live in the iframe's own-origin
+`localStorage`, so the host page's JS - or an XSS on it - cannot read them. The
+`data-public-key` is the non-secret US-072 key. The in-iframe chat UI (message
+list, composer, streamed answers, agent replies, unread badge) is themed entirely
+from the loader's `init` config (`data-brand-color` / `data-greeting` /
+`data-title` / `data-launcher-icon` / `data-position`) - no host CSS. A
+web-component / shadow-DOM embed is deliberately rejected (same JS realm). Full
+architecture, the message contract, theming, and local cross-origin verification:
+[docs/widget-embed.md](docs/widget-embed.md). Shell = US-083; chat UI + theming =
+US-084; the live customer-SSE push for agent replies is US-081 (US-084 polls the
+transcript in the interim).
+
 ## Eval suite
 
 The CI workflows wrap the eval runners:

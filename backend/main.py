@@ -761,9 +761,12 @@ app.add_middleware(
     # US-078: the first-message flow returns the raw opaque token ONCE in this
     # RESPONSE header (never an SSE event / body / log — US-071). The cross-origin
     # iframe can only READ a custom response header if CORS exposes it, so the
-    # widget posture exposes exactly this one header (the symmetric counterpart to
-    # allowing it on the REQUEST side above for resume).
-    expose_headers=[_CONVERSATION_TOKEN_HEADER],
+    # widget posture exposes it (the symmetric counterpart to allowing it on the
+    # REQUEST side above for resume). US-084: `Retry-After` is exposed too so the
+    # in-iframe composer can read the precise back-off on a 429 throttle (US-076);
+    # without it the cross-origin client cannot see the value and falls back to a
+    # conservative default.
+    expose_headers=[_CONVERSATION_TOKEN_HEADER, "Retry-After"],
 )
 
 
