@@ -91,6 +91,7 @@ from permissions import (
     ShareSummary,
     grant_doc_to_principal,
     list_doc_shares,
+    principal_has_doc_grant,
     replay_doc_acls,
     revoke_doc_from_principal,
     snapshot_doc_acls,
@@ -2473,6 +2474,13 @@ async def grant_share(
             )
         principal_type, principal_id, display_name = resolved
 
+        # US-086: the support bot has an ordinary profiles.email row so it
+        # resolves like any user, but it must NEVER be grantable through the
+        # normal share box — that would silently make the doc's synthesized
+        # answer customer-reachable via the public widget. Refuse loudly and
+        # point the owner at the distinct, explicitly-confirmed publish action.
+        await _reject_if_bot_principal(http, principal_type, principal_id)
+
         await grant_doc_to_principal(
             http, SUPABASE_URL, headers, document_id,
             principal_type, principal_id, granted_by=user.id,
@@ -2504,10 +2512,32 @@ async def get_shares(
     user: AuthedUser = Depends(get_user),
 ) -> dict:
     async with httpx.AsyncClient(timeout=15.0) as http:
-        await _assert_doc_owner(http, user, document_id)
+        doc = await _assert_doc_owner(http, user, document_id)
         shares = await list_doc_shares(
             http, SUPABASE_URL, _supabase_headers(user), document_id
         )
+        # US-086: never surface the support bot as a quiet grantee row in the
+        # normal share dialog. Its published state is reported ONLY by the
+        # dedicated GET /publish-to-bot surface, so the two actions stay cleanly
+        # separated ("publishing to the public widget" is not "sharing to a user").
+        # This filter is a cosmetic nicety: a transient bot-lookup blip must NOT
+        # break the core share-list read, so it fails soft to no filtering (a
+        # momentarily-visible bot row is acceptable — not a security leak). The
+        # grant path (`_reject_if_bot_principal`) stays fail-CLOSED by contrast.
+        try:
+            bot_id = await _resolve_workspace_bot_id(http, doc["workspace_id"])
+        except Exception:  # noqa: BLE001 — cosmetic filter must not 500 the read
+            log.warning(
+                "share_list.bot_filter_lookup_failed — listing shares unfiltered",
+                exc_info=True,
+            )
+            bot_id = None
+        if bot_id is not None:
+            shares = [
+                s
+                for s in shares
+                if not (s.principal_type == "user" and s.principal_id == bot_id)
+            ]
     return {"shares": [_share_to_dict(s) for s in shares]}
 
 
@@ -2547,6 +2577,163 @@ def _share_to_dict(s: ShareSummary) -> dict:
         "display_name": s.display_name,
         "granted_at": s.granted_at,
     }
+
+
+# -----------------------------------------------------------------------------
+# US-086 (ADR-0008): share-to-bot is a SEPARATE, explicitly-confirmed publish
+# action — never a quiet grantee row in the normal share dialog. The leak vector
+# is a doc's synthesized faithful answer becoming reachable to ANYONE who can
+# reach the public support widget, so the two surfaces are kept apart:
+#
+#   * the normal grant box (POST /share) REFUSES the bot (`_reject_if_bot_principal`)
+#     and never lists it (`get_shares` filters it), and
+#   * a distinct GET/POST/DELETE /publish-to-bot trio is the ONLY way to grant the
+#     bot, gated behind an explicit "publish to the public widget" confirmation in
+#     the UI (US-086 frontend). It grants through the SAME chunk_acl mechanism
+#     (one row per chunk, bot as a `user` principal) so retrieval (US-070) is
+#     unchanged — only the UX path that reaches it is new.
+#
+# Both read the bot's identity from the `is_bot` membership row (US-069's single
+# source of truth) via `support_bot`; neither provisions — enabling support / the
+# bot is the admin path (US-090), so publishing into a bot-less workspace is a
+# clear 409, not a silent infrastructure creation from a doc-owner surface.
+# -----------------------------------------------------------------------------
+
+
+async def _resolve_workspace_bot_id(
+    http: httpx.AsyncClient, workspace_id: str
+) -> str | None:
+    """Read-only lookup of the workspace's support-bot user id (US-086), or None.
+
+    Returns None when support is unconfigured (no service role key), the
+    `support_bot` module is absent, or no bot has been provisioned yet — each of
+    which means there is no bot to grant/filter. Delegates to US-069's
+    `find_workspace_bot` (the `is_bot` source of truth). NEVER provisions: the
+    publish action grants only to an existing bot; enabling support is US-090.
+    """
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return None
+    try:
+        from support_bot import find_workspace_bot  # US-086
+    except ImportError:
+        return None
+    return await find_workspace_bot(
+        workspace_id, http=http, service_role_key=SUPABASE_SERVICE_ROLE_KEY
+    )
+
+
+async def _reject_if_bot_principal(
+    http: httpx.AsyncClient, principal_type: PrincipalType, principal_id: str
+) -> None:
+    """Refuse (403) to grant a document to the support bot via the NORMAL box.
+
+    No-op for group principals and when support is unconfigured (no bot can exist
+    without the service role key). Fail-closed on a verification error: the lookup
+    exception propagates so the grant fails LOUDLY rather than allowing a possibly-
+    silent bot share (the PRD failure indicator is a silent share to the widget).
+    """
+    if principal_type != "user" or not SUPABASE_SERVICE_ROLE_KEY:
+        return
+    try:
+        from support_bot import is_bot_user  # US-086
+    except ImportError:
+        return
+    if await is_bot_user(
+        principal_id, http=http, service_role_key=SUPABASE_SERVICE_ROLE_KEY
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "The support bot cannot be added through the normal share dialog. "
+                "Use 'Publish to public support widget' to make this document "
+                "answerable by the support bot."
+            ),
+        )
+
+
+@app.get("/api/documents/{document_id}/publish-to-bot")
+async def get_publish_to_bot(
+    document_id: str,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    """Report whether the doc is published to the workspace's support widget.
+
+    `bot_provisioned=false` means support is not enabled for the workspace (no
+    bot), so publishing is unavailable until an admin enables it (US-090).
+    """
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        doc = await _assert_doc_owner(http, user, document_id)
+        bot_id = await _resolve_workspace_bot_id(http, doc["workspace_id"])
+        if bot_id is None:
+            return {"published": False, "bot_provisioned": False}
+        # A targeted chunk_acl existence check — far cheaper than list_doc_shares,
+        # which would additionally resolve every grantee's email/group name just
+        # to test whether this one principal appears among them.
+        published = await principal_has_doc_grant(
+            http, SUPABASE_URL, _supabase_headers(user), document_id, "user", bot_id
+        )
+    return {"published": published, "bot_provisioned": True}
+
+
+@app.post("/api/documents/{document_id}/publish-to-bot")
+async def publish_to_bot(
+    document_id: str,
+    user: AuthedUser = Depends(get_user),
+) -> dict:
+    """Publish a doc to the public support widget — the distinct, confirmed action.
+
+    Grants the bot access through the SAME chunk_acl mechanism as a normal user
+    share (one row per chunk, bot as `user` principal, under the owner's JWT so it
+    stays RLS-checked). Requires the workspace's bot to already exist (support
+    enabled): a bot-less workspace is a 409, never a silent provision. The explicit
+    "this becomes answerable to anyone who can reach the widget" confirmation is
+    enforced in the UI (US-086 frontend); this endpoint IS that separate action.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        doc = await _assert_doc_owner(http, user, document_id)
+        if doc.get("status") != "ready":
+            raise HTTPException(
+                status_code=409, detail="Document is still ingesting"
+            )
+        bot_id = await _resolve_workspace_bot_id(http, doc["workspace_id"])
+        if bot_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Support is not enabled for this workspace. Ask an admin to "
+                    "enable support before publishing a document to the widget."
+                ),
+            )
+        await grant_doc_to_principal(
+            http, SUPABASE_URL, _supabase_headers(user), document_id,
+            "user", bot_id, granted_by=user.id,
+        )
+    return {"published": True, "bot_provisioned": True}
+
+
+@app.delete(
+    "/api/documents/{document_id}/publish-to-bot",
+    status_code=204,
+    response_class=Response,
+)
+async def unpublish_from_bot(
+    document_id: str,
+    user: AuthedUser = Depends(get_user),
+) -> Response:
+    """Unpublish a doc from the support widget — revoke the bot's chunk_acl grants.
+
+    Idempotent and fail-safe (revocation only reduces exposure): a workspace with
+    no bot yet, or a doc that was never published, is a clean 204.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        doc = await _assert_doc_owner(http, user, document_id)
+        bot_id = await _resolve_workspace_bot_id(http, doc["workspace_id"])
+        if bot_id is not None:
+            await revoke_doc_from_principal(
+                http, SUPABASE_URL, _supabase_headers(user), document_id,
+                "user", bot_id,
+            )
+    return Response(status_code=204)
 
 
 # -----------------------------------------------------------------------------

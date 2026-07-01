@@ -206,6 +206,40 @@ async def list_doc_shares(
     return summaries
 
 
+async def principal_has_doc_grant(
+    http: httpx.AsyncClient,
+    supabase_url: str,
+    supabase_headers: dict[str, str],
+    doc_id: str,
+    principal_type: PrincipalType,
+    principal_id: str,
+) -> bool:
+    """True iff the principal holds at least one chunk_acl grant on the doc.
+
+    A targeted `limit=1` existence probe (one chunk-id lookup + one filtered
+    read) for answering "is this doc published to principal P?" — far cheaper
+    than `list_doc_shares`, which additionally resolves every grantee's
+    profiles.email / principals.name. Uses the same doc-owner SELECT policy.
+    """
+    chunk_ids = await _fetch_chunk_ids(http, supabase_url, supabase_headers, doc_id)
+    if not chunk_ids:
+        return False
+    in_clause = ",".join(chunk_ids)
+    r = await http.get(
+        f"{supabase_url}/rest/v1/chunk_acl",
+        params={
+            "chunk_id": f"in.({in_clause})",
+            "principal_type": f"eq.{principal_type}",
+            "principal_id": f"eq.{principal_id}",
+            "select": "chunk_id",
+            "limit": "1",
+        },
+        headers=supabase_headers,
+    )
+    r.raise_for_status()
+    return len(r.json()) > 0
+
+
 async def _resolve_user_emails(
     http: httpx.AsyncClient,
     supabase_url: str,

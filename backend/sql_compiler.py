@@ -36,7 +36,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from planner import Filter, FilterOp, PlanSpec, TimeGrain
-from semantic_layer import Dimension, Entity, Join, Metric, SemanticLayer
+from semantic_layer import Dimension, Join, SemanticLayer
 from text_to_sql import (
     DEFAULT_ROW_LIMIT,
     MAX_ROW_LIMIT,

@@ -74,6 +74,48 @@ export async function revokeShare(
   }
 }
 
+// US-086: share-to-bot is a SEPARATE, explicitly-confirmed "publish to the public
+// support widget" action — never the normal grant box (the backend refuses the bot
+// there and filters it from listShares). These three calls drive the distinct
+// /publish-to-bot surface. `bot_provisioned=false` means support is not enabled for
+// the workspace yet, so publishing is unavailable until an admin enables it (US-090).
+
+export type BotPublishStatus = {
+  published: boolean
+  bot_provisioned: boolean
+}
+
+export async function getBotPublishStatus(documentId: string): Promise<BotPublishStatus> {
+  const res = await fetch(`${BACKEND_URL}/api/documents/${documentId}/publish-to-bot`, {
+    headers: await authHeader(),
+  })
+  if (!res.ok) {
+    throw new ShareApiError(res.status, await readError(res))
+  }
+  return (await res.json()) as BotPublishStatus
+}
+
+export async function publishToBot(documentId: string): Promise<BotPublishStatus> {
+  const res = await fetch(`${BACKEND_URL}/api/documents/${documentId}/publish-to-bot`, {
+    method: 'POST',
+    headers: await authHeader(),
+  })
+  if (!res.ok) {
+    throw new ShareApiError(res.status, await readError(res))
+  }
+  return (await res.json()) as BotPublishStatus
+}
+
+export async function unpublishFromBot(documentId: string): Promise<void> {
+  const res = await fetch(`${BACKEND_URL}/api/documents/${documentId}/publish-to-bot`, {
+    method: 'DELETE',
+    headers: await authHeader(),
+  })
+  if (!res.ok && res.status !== 204) {
+    throw new ShareApiError(res.status, await readError(res))
+  }
+}
+
 async function readError(res: Response): Promise<string> {
   try {
     const body = (await res.json()) as { detail?: string; error?: string }

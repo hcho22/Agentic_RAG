@@ -42,7 +42,6 @@ if _missing:
 
 from fastapi import Header, HTTPException  # noqa: E402
 
-import main  # noqa: E402
 from main import AuthedUser, app, get_user  # noqa: E402
 
 LOCAL_JWT_SECRET = "super-secret-jwt-token-with-at-least-32-characters-long"

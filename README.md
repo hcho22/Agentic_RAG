@@ -161,7 +161,7 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | --- | --- | --- |
 | `SUPABASE_URL` | yes | `https://<project>.supabase.co` (hosted) or `http://127.0.0.1:54321` (local) |
 | `SUPABASE_ANON_KEY` | yes | Used to call GoTrue for JWT validation |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | Reserved for system-level ops (share API owner-lookup, ingestion, support-bot provisioning via the GoTrue admin API - US-069, `backend/support_bot.py`, the backend-mediated conversation-token surface - issuance + the `resume_conversation` RPC, US-071, `backend/conversation_tokens.py`, and the anonymous public widget-key resolution gate - US-072, `backend/widget_keys.py`); never used to touch user data on the retrieval path (RLS enforced via user JWT). The public widget endpoints fail closed with a 503 when it is unset |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | Reserved for system-level ops (share API owner-lookup, ingestion, support-bot provisioning via the GoTrue admin API - US-069, `backend/support_bot.py`, the backend-mediated conversation-token surface - issuance + the `resume_conversation` RPC, US-071, `backend/conversation_tokens.py`, the anonymous public widget-key resolution gate - US-072, `backend/widget_keys.py`, and the read-only support-bot identity lookups behind the share-to-bot surface - resolving/blocking the bot on the document share endpoints - US-086, `backend/support_bot.py`); never used to touch user data on the retrieval path (RLS enforced via user JWT). The public widget endpoints fail closed with a 503 when it is unset |
 | `SUPABASE_JWT_SECRET` | only for support bot | The project JWT secret GoTrue signs with. The support bot self-signs its short-lived bot token with it so `auth.uid()`/RLS resolve it natively (US-068, `backend/supabase_jwt.py`); a knowledge-assistant-only deploy leaves it blank. NEW signing surface - keep server-side only, never embed client-side |
 | `SUPPORT_BOT_EMAIL_DOMAIN` | no | Internal, non-routable email domain for the per-workspace support bot's `auth.users` row (US-069, `backend/support_bot.py`). Default `bots.support.internal`. The bot row is admin-created with `email_confirm=true` and no password, so the address never logs in or receives mail |
 | `OPENAI_API_KEY` | yes | |
@@ -242,7 +242,10 @@ The backend exposes:
 | `POST` | `/api/documents/{id}/ingest` | Trigger / re-trigger ingestion for an uploaded document |
 | `POST` | `/api/documents/{id}/share` | Grant a user or group access to a document |
 | `GET` | `/api/documents/{id}/shares` | List existing grants (owner-only) |
-| `DELETE` | `/api/documents/{id}/shares/{principal_id}` | Revoke a grant |
+| `DELETE` | `/api/documents/{id}/shares/{principal_id}` | Revoke a grant. The support bot is refused by `POST /share` and hidden from `GET /shares`; it is published/unpublished only through the `publish-to-bot` trio below (US-086) |
+| `GET` | `/api/documents/{id}/publish-to-bot` | Owner-only: report whether the doc is published to the workspace's public support widget - `{published, bot_provisioned}` (`bot_provisioned=false` ⇒ support not enabled for the workspace) (US-086) |
+| `POST` | `/api/documents/{id}/publish-to-bot` | Owner-only: the distinct, explicitly-confirmed "publish to the public widget" action - grants the support bot via the SAME per-chunk `chunk_acl` mechanism as a user share (retrieval unchanged), so the doc's synthesized answer becomes reachable to anyone who can reach the widget. Requires `status='ready'`; a bot-less workspace is a 409 (never a silent provision). The loud consequence confirmation is enforced in the UI (US-086) |
+| `DELETE` | `/api/documents/{id}/publish-to-bot` | Owner-only: unpublish - revoke the bot's `chunk_acl` grants. Idempotent and fail-safe (204 even with no bot or an unpublished doc) (US-086) |
 | `POST` | `/api/search` `/api/search/keyword` `/api/search/hybrid` `/api/search/rerank` | Direct retrieval probes (debugging / eval) |
 | `POST` | `/api/sql` | Text-to-SQL via the semantic-layer compiler |
 | `POST` | `/api/web-search` | Web fallback |
@@ -290,6 +293,13 @@ US-084; the live customer-SSE push for agent replies is US-081 (`GET
 /widget/conversations/{id}/events`, a fetch-based SSE, with the transcript poll
 retained as a backstop; a multi-instance backend sets `WIDGET_FANOUT_DATABASE_URL`
 to carry replies between instances over Postgres `LISTEN/NOTIFY`).
+
+The bot answers only from documents a workspace owner has explicitly **published
+to the widget** - a separate, confirmed "publish to the public support widget"
+action (`POST /api/documents/{id}/publish-to-bot`, surfaced in the document share
+dialog) kept structurally apart from normal teammate sharing, so a doc's
+synthesized answer can never be made customer-reachable by accidentally granting
+the bot in the ordinary share box (US-086).
 
 ## Eval suite
 

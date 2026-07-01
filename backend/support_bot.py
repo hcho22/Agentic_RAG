@@ -336,6 +336,95 @@ async def provision_workspace_bot(
 
 
 # -----------------------------------------------------------------------------
+# US-086: read-only bot identity lookups for the share-to-bot surface (ADR-0008).
+#
+# Sharing a document to the bot must be a distinct, explicitly-confirmed "publish
+# to the PUBLIC widget" action — NOT a quiet grantee row typed into the normal
+# share box. The share endpoints need two read-only questions answered, both
+# resolved from the single source of truth (the `is_bot` membership row), never
+# from the GoTrue admin API (these are pure PostgREST reads, no user creation):
+#
+#   * `find_workspace_bot(workspace_id)` — which auth.users id is THIS workspace's
+#     bot (or None)? The publish action grants to that principal; it never
+#     provisions (provisioning is the admin/support-enable path, US-069/072/090),
+#     so a doc owner publishing into a workspace with no bot gets a clear refusal.
+#   * `is_bot_user(user_id)` — is this resolved principal a provisioned bot in ANY
+#     workspace? The normal grant box calls it to BLOCK the bot (the leak vector is
+#     a doc's synthesized answer becoming customer-reachable), stricter than
+#     scoping to one workspace: no bot principal is ever grantable via the human box.
+# -----------------------------------------------------------------------------
+
+
+async def find_workspace_bot(
+    workspace_id: str,
+    *,
+    http: httpx.AsyncClient,
+    supabase_url: str | None = None,
+    service_role_key: str | None = None,
+) -> str | None:
+    """Return the workspace's provisioned support-bot user id, or None.
+
+    READ-ONLY: unlike `provision_workspace_bot` this never creates anything — it
+    resolves the existing `is_bot` membership row (the single source of truth) and
+    returns None when no bot has been provisioned yet (support not enabled). The
+    share-to-bot publish action (US-086) uses it to find the grantee; a None result
+    is the doc owner's cue that support must be enabled first, NOT a trigger to
+    provision infrastructure from a doc-owner surface.
+
+    Raises ValueError on a bad `workspace_id` and RuntimeError when the service
+    role key / URL is unset (fail-closed, resolved at call time).
+    """
+    ws = _validate_workspace_id(workspace_id)
+    base_url = _resolve_supabase_url(supabase_url)
+    key = _resolve_service_role_key(service_role_key)
+    headers = _service_role_headers(key)
+    return await _find_existing_bot(http, base_url, headers, ws)
+
+
+async def is_bot_user(
+    user_id: object,
+    *,
+    http: httpx.AsyncClient,
+    supabase_url: str | None = None,
+    service_role_key: str | None = None,
+) -> bool:
+    """True when `user_id` is a provisioned support bot in ANY workspace.
+
+    The normal document share grant box (US-039) calls this to BLOCK the bot: the
+    bot has an ordinary `profiles.email` row so it WOULD resolve like any user, but
+    granting it via the human box would silently make the doc answerable to the
+    public widget. Checking `is_bot=true` on ANY workspace_membership row (not just
+    the doc's workspace) is the strict reading — no bot principal is grantable via
+    the human box regardless of which workspace it belongs to.
+
+    A non-UUID `user_id` cannot be a bot (bot ids are auth.users UUIDs) → False,
+    without touching the network. Raises RuntimeError when the service role key /
+    URL is unset (fail-closed), so the caller refuses the grant rather than risk a
+    silent share on an unverifiable recipient.
+    """
+    try:
+        uid = str(uuid.UUID(str(user_id).strip()))
+    except (ValueError, AttributeError, TypeError):
+        return False
+    base_url = _resolve_supabase_url(supabase_url)
+    key = _resolve_service_role_key(service_role_key)
+    headers = _service_role_headers(key)
+    r = await http.get(
+        f"{base_url}/rest/v1/workspace_membership",
+        params={
+            "user_id": f"eq.{uid}",
+            "is_bot": "eq.true",
+            "select": "user_id",
+            "limit": "1",
+        },
+        headers=headers,
+    )
+    if r.status_code != 200:
+        raise _provisioning_error("is_bot lookup", r)
+    return bool(r.json())
+
+
+# -----------------------------------------------------------------------------
 # US-070: support-bot retrieval — per-turn bot token calls match_chunks as the bot.
 #
 # Runs the ADR-0003 deflection pipeline AS the bot provisioned above: mint a ~60s
