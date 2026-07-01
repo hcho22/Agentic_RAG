@@ -294,6 +294,14 @@ US-084; the live customer-SSE push for agent replies is US-081 (`GET
 retained as a backstop; a multi-instance backend sets `WIDGET_FANOUT_DATABASE_URL`
 to carry replies between instances over Postgres `LISTEN/NOTIFY`).
 
+Workspace members pick up the human handoffs from the authenticated in-app
+operator queue at `/support/queue` (US-087): it lists the active workspace's
+`status='escalated'` conversations, oldest-first, and live-updates them via each
+member's own Supabase Realtime under their real JWT - membership-gated, not
+role-gated (any member of the workspace, `role` in no gate). It is the list only;
+opening a conversation to reply (via `POST /widget/conversations/{id}/agent-reply`
+above) is a later story.
+
 The bot answers only from documents a workspace owner has explicitly **published
 to the widget** - a separate, confirmed "publish to the public support widget"
 action (`POST /api/documents/{id}/publish-to-bot`, surfaced in the document share

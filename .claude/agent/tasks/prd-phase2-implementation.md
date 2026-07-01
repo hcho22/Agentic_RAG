@@ -1121,13 +1121,14 @@ Test: `python -m backend.test_us081_customer_sse` - a BRIDGE unit layer (always 
 - **Failure Indicator:** Typing the bot email in the normal box silently shares to the public widget.
 
 ### US-087: `/support/queue` route — membership-gated escalated list, agent Realtime
+**Status:** ✅ Done — `frontend/src/pages/SupportQueuePage.tsx` + `frontend/src/lib/supportQueue.ts` (client-side `resolveActiveWorkspace` default-when-sole/ambiguous/none, `listEscalatedConversations`, `subscribeToConversations`), wired into `App.tsx` under `ProtectedRoute` + an `AppHeader` nav link; `supabase/migrations/20260625120000_conversations_realtime.sql` adds `conversations` to the `supabase_realtime` publication (RLS-honoured — the security backstop) + `replica identity full`. Verified in browser against the live local Supabase (2026-07-01): U1 (plain member) sees the escalated conversation, a live active→escalated transition appears with no refresh and escalated→resolved removes it live, and U2 (member of a different workspace / ambiguous) sees 0 of W's conversations.
 **Description:** As any workspace member, I want `/support/queue` to list `status='escalated'` conversations for the active workspace, live via my own Supabase Realtime under my real JWT, so that I can pick up handoffs without crossing the tenant boundary (ADR-0004/0008; membership-gated, NOT role-gated).
 **Acceptance Criteria:**
-- [ ] New authenticated in-app route `/support/queue` (added to `App.tsx` Routes under `ProtectedRoute`), membership-gated — readable/actionable by ANY member of the active workspace, `role` in no gate.
-- [ ] Lists `status='escalated'` conversations for the active workspace (default-when-sole / 400-on-ambiguous active-workspace resolution); live-updates via the agent's own Supabase Realtime `postgres_changes` (the existing authenticated pattern in `frontend/src/lib/ingestion.ts:225`).
-- [ ] No cross-workspace inbox in v1 (single active workspace per view).
-- [ ] Typecheck/lint passes.
-- [ ] **Verify in browser using dev-browser skill** (escalated conversation appears live in the queue for a member).
+- [x] New authenticated in-app route `/support/queue` (added to `App.tsx` Routes under `ProtectedRoute`), membership-gated — readable/actionable by ANY member of the active workspace, `role` in no gate. *(Verified: U1 is `role='member'` and reaches the queue; RLS `conversations_select_member` is the sole boundary, `role` in no predicate.)*
+- [x] Lists `status='escalated'` conversations for the active workspace (default-when-sole / 400-on-ambiguous active-workspace resolution); live-updates via the agent's own Supabase Realtime `postgres_changes` (the existing authenticated pattern in `frontend/src/lib/ingestion.ts:225`). *(`resolveActiveWorkspace` reads the caller's own `workspace_membership` under RLS: exactly one → default, ≥2 → an ambiguous UI note (no guess), zero → none. The escalated list orders oldest-escalation-first (FIFO).)*
+- [x] No cross-workspace inbox in v1 (single active workspace per view). *(The ambiguous branch renders a note without querying conversations; there is no workspace selector.)*
+- [x] Typecheck/lint passes. *(`npm run typecheck` + multi-page `npm run build` clean; no ESLint config in this repo — `tsc` is the lint gate.)*
+- [x] **Verify in browser using dev-browser skill** (escalated conversation appears live in the queue for a member). *(Playwright against local Supabase: U1's queue live-added a freshly-escalated conversation and live-removed a resolved one; U2 saw 0 of W's rows.)*
 **Validation Test:**
 - **Setup:** Member U1 ∈ W; conversation C in W escalates while U1 has `/support/queue` open. Member U2 ∉ W.
 - **Steps:** 1. Escalate C. 2. Observe U1's queue. 3. Load `/support/queue` as U2.

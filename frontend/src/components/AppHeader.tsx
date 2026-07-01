@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils'
 const navItems = [
   { to: '/chat', label: 'Chat' },
   { to: '/ingestion', label: 'Ingestion' },
+  { to: '/support/queue', label: 'Support queue' },
 ] as const
 
 export function AppHeader() {

@@ -5,6 +5,7 @@ import { ToastProvider } from '@/components/ui/toast'
 import { LoginPage } from '@/pages/LoginPage'
 import { ChatPage } from '@/pages/ChatPage'
 import { IngestionPage } from '@/pages/IngestionPage'
+import { SupportQueuePage } from '@/pages/SupportQueuePage'
 import { AuthCallback } from '@/pages/AuthCallback'
 
 export default function App() {
@@ -36,6 +37,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <IngestionPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/support/queue"
+            element={
+              <ProtectedRoute>
+                <SupportQueuePage />
               </ProtectedRoute>
             }
           />
