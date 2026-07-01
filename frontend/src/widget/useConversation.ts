@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   fetchTranscript,
   streamWidgetMessage,
+  subscribeConversationEvents,
   type TranscriptMessage,
 } from './api'
 import {
@@ -19,16 +20,19 @@ import {
 // the US-071 token, and the durable transcript (US-071) is the source of truth that
 // reconciles the optimistic rows and recovers agent replies.
 //
-// LIVE agent-reply transport: until US-081 ships the customer-SSE push, agent
-// replies are surfaced by a light transcript POLL (the defined US-071 read
-// contract). `refreshTranscript` is the single delivery seam US-081's live consumer
-// will feed instead of the poll - no UI change when it lands.
+// LIVE agent-reply transport: US-081's customer SSE
+// (`GET /widget/conversations/{id}/events`, authorized by the opaque token) pushes
+// each agent reply as a low-latency nudge that feeds `refreshTranscript` - the same
+// seam the interim poll feeds. The poll is RETAINED as a backstop (a dropped/closed
+// SSE never loses a reply: the durable US-071 transcript recovers it), so the SSE
+// only makes replies feel instant. The customer never holds a Supabase Realtime
+// channel - the stream is a plain backend SSE off the Supabase trust surface.
 
 const DEFAULT_API_BASE = (
   import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'
 ).replace(/\/$/, '')
 
-// Interim poll cadence (ms) for agent-reply recovery; replaced by US-081's push.
+// Poll cadence (ms) for agent-reply recovery; a backstop behind US-081's SSE push.
 const POLL_INTERVAL_MS = 8000
 
 export interface WidgetMessage {
@@ -114,8 +118,8 @@ export function useConversation(publicKey: string): ConversationState {
     }
   }, [publicKey, refreshTranscript])
 
-  // Interim agent-reply poll (US-081 push replaces this). Pauses while the tab is
-  // hidden or a turn is mid-stream (the stream owns the message list then).
+  // Agent-reply poll - now a BACKSTOP behind US-081's SSE (below). Still runs so a
+  // dropped/closed SSE never loses a reply; pauses while hidden or mid-stream.
   useEffect(() => {
     const timer = setInterval(() => {
       if (document.hidden) return
@@ -125,6 +129,62 @@ export function useConversation(publicKey: string): ConversationState {
     }, POLL_INTERVAL_MS)
     return () => clearInterval(timer)
   }, [refreshTranscript])
+
+  // US-081 live push: hold the customer SSE open whenever a conversation + token
+  // exist, reconnecting on drop. A `message` nudge re-reads the durable transcript
+  // (the SSE carries no authoritative content - the transcript is the source of
+  // truth); a `close` (resolved) refreshes once to capture the final state. The poll
+  // above remains the backstop, so this loop is purely a latency win.
+  useEffect(() => {
+    let cancelled = false
+    let controller: AbortController | null = null
+    const wait = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+    async function loop() {
+      while (!cancelled) {
+        const id = conversationIdRef.current
+        const token = getConversationToken(publicKey)
+        if (!id || !token) {
+          // No conversation yet (first send not sent, or token cleared). Re-check
+          // cheaply - no network until there is something to subscribe to.
+          await wait(1000)
+          continue
+        }
+        controller = new AbortController()
+        const { status } = await subscribeConversationEvents({
+          apiBase,
+          conversationId: id,
+          token,
+          signal: controller.signal,
+          onEvent: (evt) => {
+            if (evt.kind === 'message' || evt.kind === 'close') {
+              if (sendingRef.current) return
+              void refreshTranscript()
+            }
+          },
+        })
+        if (cancelled) break
+        // A 401 means the token is dead (expired/resolved). Clear it ourselves so a
+        // backgrounded tab - whose interim poll is paused by `document.hidden` and so
+        // never clears it - stops re-opening the SSE on a dead conversation; the
+        // `!id || !token` guard then idles until the next send starts a fresh one.
+        // Skip while a send is in flight: it owns token expiry and may have just
+        // minted a fresh token, exactly as the poll's refreshTranscript guards. Any
+        // other end is a normal drop/close; back off longer on 401 to avoid hot-looping.
+        if (status === 401 && !sendingRef.current) {
+          clearConversation(publicKey)
+          conversationIdRef.current = null
+        }
+        await wait(status === 401 ? 3000 : 1500)
+      }
+    }
+    void loop()
+    return () => {
+      cancelled = true
+      controller?.abort()
+    }
+  }, [publicKey, apiBase, refreshTranscript])
 
   // Auto-clear the throttle latch once its window elapses, so the composer
   // re-enables and WidgetApp's countdown interval (keyed on throttledUntil) tears

@@ -132,15 +132,22 @@ themed ONLY from the loader's `init` config - host CSS cannot reach it.
   same message as a fresh conversation; a `401` on the transcript clears the dead
   token and stops the poll.
 
-### Live agent replies - interim transport (US-081 is the push)
+### Live agent replies - the customer SSE push (US-081)
 
-US-084 surfaces human agent replies (US-082 writes them to `conversation_messages`)
-by **polling the US-071 transcript** on a light interval - the defined read
-contract that exists today. The **live push** over a customer SSE is **US-081**,
-which is not yet built. `useConversation.refreshTranscript` is the single delivery
-seam US-081's live consumer will feed instead of the poll - no UI change when it
-lands. Until then, agent replies appear within one poll interval rather than
-instantly.
+Human agent replies (US-082 writes them to `conversation_messages`) are pushed to
+the customer over a long-lived backend SSE,
+`GET /widget/conversations/{id}/events`, authorized by the US-071 opaque token (a
+plain fetch-based SSE - the customer never holds a Supabase Realtime channel).
+`useConversation` holds that stream open whenever a conversation + token exist; an
+`event: message` is a low-latency NUDGE that feeds the same
+`useConversation.refreshTranscript` seam, which re-reads the durable US-071
+transcript (the source of truth). The transcript **poll is retained as a backstop**,
+so a dropped/closed SSE never loses a reply - the SSE just makes replies feel
+instant. A single backend process needs nothing more (the in-process
+`ConversationFanout` registry delivers); a horizontally-scaled deployment sets
+`WIDGET_FANOUT_DATABASE_URL` so the `ConversationBridge` carries a reply between
+instances over Postgres `LISTEN/NOTIFY` (no Redis/queue infra), and the SSE emits
+`event: close` when the conversation is resolved (its token purged).
 
 ## Known integration consideration - key resolution + the iframe's `Origin` vs the per-key allowlist
 
@@ -179,6 +186,7 @@ US-084 and is left as a follow-up design decision.
 
 US-083 ships the **shell** (loader, cross-origin iframe, postMessage handshake,
 own-origin storage, launcher). US-084 ships the in-iframe **chat UI + theming**
-(message list, composer, streamed `delta` rendering, agent-reply rendering via the
-interim transcript poll, unread badge). The live customer-SSE **push** and the
-multi-instance `LISTEN/NOTIFY` bridge are **US-081**.
+(message list, composer, streamed `delta` rendering, unread badge). US-081 ships the
+live customer-SSE **push** (`GET /widget/conversations/{id}/events` + the
+`subscribeConversationEvents` consumer feeding `refreshTranscript`) and the optional
+multi-instance `LISTEN/NOTIFY` bridge (`backend/conversation_bridge.py`).

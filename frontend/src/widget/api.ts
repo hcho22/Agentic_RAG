@@ -1,6 +1,6 @@
 // US-084: the widget's backend client, scoped to the anonymous public surface.
 //
-// Two endpoints, both authed by the US-071 opaque per-conversation token (NOT a
+// Three endpoints, all authed by the US-071 opaque per-conversation token (NOT a
 // Supabase JWT - the anonymous customer is off the Supabase trust surface):
 //
 //   * POST /widget/conversations/messages - the customer turn. With no token it is
@@ -10,8 +10,12 @@
 //     `conversation` / `delta` / `done` / `error` events (US-079) - the SAME shape
 //     /api/chat uses.
 //   * GET /widget/conversations/{id}/transcript - the durable message history
-//     (US-071), used to recover prior messages on open AND, until US-081 ships the
-//     live customer-SSE push, to surface agent replies via a light poll.
+//     (US-071), used to recover prior messages on open AND, as a backstop behind
+//     US-081's live push, to surface agent replies via a light poll.
+//   * GET /widget/conversations/{id}/events - the long-lived customer SSE (US-081)
+//     that pushes each async agent reply as a low-latency nudge to re-read the
+//     transcript (`subscribeConversationEvents`); the poll above is retained as a
+//     backstop so a dropped stream never loses a reply.
 //
 // The token lives in the iframe's own-origin localStorage (storage.ts) and is sent
 // in the `X-Conversation-Token` request header - it never appears in a URL/log.
@@ -170,6 +174,83 @@ export async function fetchTranscript(opts: {
   } catch {
     return { status: 0 }
   }
+}
+
+// US-081: a live agent-reply arriving on the customer SSE. `message` is a nudge
+// ("a new row exists, re-read the transcript") rather than the content itself - the
+// durable US-071 transcript stays the single source of truth, so the consumer just
+// refreshes. `close` means the conversation was resolved (its token purged); `ready`
+// confirms the channel is live.
+export type ConversationEvent =
+  | { kind: 'ready' }
+  | { kind: 'message' }
+  | { kind: 'close'; reason: string }
+
+/**
+ * Open the long-lived customer SSE (US-081) for one conversation, authorized by the
+ * US-071 opaque token in the `X-Conversation-Token` header. `EventSource` cannot set
+ * headers, so this uses fetch + a ReadableStream (the same SSE-over-fetch parsing as
+ * `streamWidgetMessage`) to keep the token in a header, never a URL/log.
+ *
+ * Resolves when the stream ends - closed by the server (`close`), dropped, aborted
+ * via `signal`, or a non-OK status (returned as `status`, so a 401 stops the caller's
+ * reconnect loop). Best-effort: a dropped push is recovered by the transcript poll.
+ */
+export async function subscribeConversationEvents(opts: {
+  apiBase: string
+  conversationId: string
+  token: string
+  signal: AbortSignal
+  onEvent: (evt: ConversationEvent) => void
+}): Promise<{ status: number }> {
+  const { apiBase, conversationId, token, signal, onEvent } = opts
+  let res: Response
+  try {
+    res = await fetch(`${apiBase}/widget/conversations/${conversationId}/events`, {
+      headers: { [CONVERSATION_TOKEN_HEADER]: token, Accept: 'text/event-stream' },
+      signal,
+    })
+  } catch {
+    // Network error or an abort (unmount / reconnect) - report as transient.
+    return { status: 0 }
+  }
+  if (!res.ok || !res.body) return { status: res.status }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let sep: number
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const raw = buffer.slice(0, sep)
+        buffer = buffer.slice(sep + 2)
+        const evt = parseSSE(raw)
+        if (!evt) continue // keepalive comments / blank frames
+        if (evt.event === 'ready') {
+          onEvent({ kind: 'ready' })
+        } else if (evt.event === 'message') {
+          onEvent({ kind: 'message' })
+        } else if (evt.event === 'close') {
+          onEvent({ kind: 'close', reason: String(evt.data.reason ?? 'closed') })
+          return { status: 200 }
+        }
+      }
+    }
+  } catch {
+    // The reader throws on abort - a normal reconnect/unmount, not an error.
+    return { status: 0 }
+  } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      /* already closed/errored - nothing to release */
+    }
+  }
+  return { status: 200 }
 }
 
 function parseSSE(raw: string): { event: string; data: Record<string, unknown> } | null {

@@ -20,6 +20,7 @@ messages table, and runs a manual tool-call loop that exposes the
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -27,7 +28,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 from dotenv import load_dotenv
@@ -48,6 +49,7 @@ from circuit_breaker import (
     check_workspace_breaker,
     run_breaker_guarded_turn,
 )
+from conversation_bridge import ConversationBridge
 from conversation_fanout import ConversationFanout, message_event
 from conversation_tokens import (
     CONVERSATION_TOKEN_TTL_SECONDS,
@@ -297,6 +299,30 @@ WIDGET_BREAKER_PER_WORKSPACE = _positive_int_env(
     "WIDGET_BREAKER_PER_WORKSPACE", 600
 )
 
+# US-081 (ADR-0008): the anonymous customer holds a long-lived BACKEND SSE
+# (`GET /widget/conversations/{id}/events`, authorized by the US-071 opaque token)
+# over which async AGENT replies are pushed — keeping the customer structurally OFF
+# the Supabase JWT/Realtime surface. Two tunables for that connection:
+#   * KEEPALIVE — emit an SSE comment this often so an idle channel survives proxy
+#     idle-timeouts (kept under the common 30–60s reverse-proxy default).
+#   * REVALIDATE — re-check the opaque token this often WHILE the SSE is open
+#     (slide=False, a read), so a conversation that is resolved (its token purged,
+#     US-071) closes the customer SSE within this bound rather than hanging open.
+WIDGET_SSE_KEEPALIVE_SECONDS = _positive_int_env("WIDGET_SSE_KEEPALIVE_SECONDS", 25)
+WIDGET_SSE_REVALIDATE_SECONDS = _positive_int_env(
+    "WIDGET_SSE_REVALIDATE_SECONDS", 60
+)
+
+# US-081: OPTIONAL multi-instance fan-out. The in-process registry (US-082) is the
+# whole delivery path for a single-process deployment (the common kit). When the
+# backend runs as MULTIPLE instances, an agent reply written on instance A must also
+# reach a customer SSE held open on instance B — so set this to a DIRECT asyncpg DSN
+# for the shared Postgres and the `ConversationBridge` carries the nudge over
+# Postgres LISTEN/NOTIFY (no Redis/queue infra). Unset → single-instance fan-out
+# only (the bridge is never built). It is independent of the PostgREST path the rest
+# of the widget backend uses; LISTEN needs a real connection PostgREST cannot hold.
+WIDGET_FANOUT_DATABASE_URL = os.environ.get("WIDGET_FANOUT_DATABASE_URL") or None
+
 # US-079 (ADR-0003/0008): the support bot's deflection turn reuses the ONE
 # validated escalation config (US-050) the gates consume — `tau_sim` / `n_min`
 # (retrieval gate) + `faithfulness_cutoff` (faithfulness gate). Built once at
@@ -448,6 +474,48 @@ _RATE_LIMITER_HTTP: httpx.AsyncClient | None = None
 # registry. Holds state only for conversations with an OPEN customer SSE, so an idle
 # backend keeps no per-conversation memory.
 _CONVERSATION_FANOUT = ConversationFanout()
+
+# US-081 (ADR-0008): the OPTIONAL multi-instance bridge. Built + started at startup
+# ONLY when WIDGET_FANOUT_DATABASE_URL is set (a horizontally-scaled deployment);
+# None means single-instance fan-out via _CONVERSATION_FANOUT alone. When present it
+# carries an agent reply between instances over Postgres LISTEN/NOTIFY and publishes
+# what it receives back INTO _CONVERSATION_FANOUT — so the registry stays the single
+# delivery point. Torn down in _on_shutdown.
+_CONVERSATION_BRIDGE: ConversationBridge | None = None
+
+# US-081: the cross-instance nudge is best-effort and non-fatal, so it is fired as a
+# detached background task rather than awaited on the operator's agent-reply response
+# (the reply is already durably written and already delivered to LOCAL subscribers).
+# asyncio holds only a weak reference to a task, so we keep a strong one here until it
+# completes, or a slow/degraded fanout pool's task could be GC'd mid-flight.
+_WIDGET_FANOUT_NOTIFY_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _schedule_fanout_notify(
+    bridge: ConversationBridge, conversation_id: str, event: dict
+) -> None:
+    """Fire the cross-instance NOTIFY off the request path; never raises.
+
+    The agent-reply response must not block on a degraded fanout pool (a lost pool can
+    add its reconnect/command timeout to the response). `notify` already swallows
+    transport errors internally; this wrapper additionally guarantees a scheduling or
+    unexpected error is logged and never propagates into the handler.
+    """
+
+    async def _run() -> None:
+        try:
+            await bridge.notify(conversation_id, event)
+        except Exception:  # noqa: BLE001 — the cross-instance nudge is best-effort
+            log.warning(
+                "widget_agent_reply.notify_failed conversation=%s",
+                conversation_id,
+                exc_info=True,
+            )
+
+    task = asyncio.create_task(_run(), name="widget-fanout-notify")
+    _WIDGET_FANOUT_NOTIFY_TASKS.add(task)
+    task.add_done_callback(_WIDGET_FANOUT_NOTIFY_TASKS.discard)
+
 
 # LangSmith: when LANGSMITH_API_KEY is set the SDK auto-ships traces for every
 # wrapped OpenAI call and every @traceable function. When it's missing,
@@ -896,6 +964,37 @@ async def _on_startup() -> None:
             "is nothing to rate-limit"
         )
 
+    # US-081: start the OPTIONAL multi-instance customer-SSE fan-out bridge when a
+    # shared-Postgres DSN is configured. Single-instance deployments (no DSN) deliver
+    # entirely through the in-process registry and never build the bridge. Starting is
+    # fail-soft (a DB blip degrades to single-instance + the transcript backstop, it
+    # never blocks boot); we only build it when support is configured (otherwise there
+    # is no widget surface to fan out for).
+    global _CONVERSATION_BRIDGE
+    if SUPABASE_SERVICE_ROLE_KEY and WIDGET_FANOUT_DATABASE_URL:
+        bridge = ConversationBridge(
+            dsn=WIDGET_FANOUT_DATABASE_URL, fanout=_CONVERSATION_FANOUT
+        )
+        try:
+            await bridge.start()
+            _CONVERSATION_BRIDGE = bridge
+            log.info(
+                "widget_fanout.multi_instance_enabled instance=%s",
+                bridge.instance_id,
+            )
+        except Exception:  # noqa: BLE001 — never block boot on the optional bridge
+            log.warning(
+                "widget_fanout.bridge_start_failed — falling back to single-instance "
+                "fan-out (the transcript backstop still delivers cross-instance)",
+                exc_info=True,
+            )
+            _CONVERSATION_BRIDGE = None
+    else:
+        log.info(
+            "widget_fanout.single_instance — WIDGET_FANOUT_DATABASE_URL unset; "
+            "agent replies fan out via the in-process registry only"
+        )
+
 
 @app.on_event("shutdown")
 async def _on_shutdown() -> None:
@@ -903,7 +1002,12 @@ async def _on_shutdown() -> None:
     # Postgres backend's aclose() is a no-op (it borrows _RATE_LIMITER_HTTP, which
     # we close ourselves); the Redis backend closes its own client there. Failures
     # are swallowed — shutdown must not raise.
-    global _RATE_LIMITER, _RATE_LIMITER_HTTP
+    global _RATE_LIMITER, _RATE_LIMITER_HTTP, _CONVERSATION_BRIDGE
+    # US-081: tear down the multi-instance bridge first (its supervisor + LISTEN
+    # connection + NOTIFY pool). stop() never raises.
+    if _CONVERSATION_BRIDGE is not None:
+        await _CONVERSATION_BRIDGE.stop()
+        _CONVERSATION_BRIDGE = None
     if _RATE_LIMITER is not None:
         try:
             await _RATE_LIMITER.aclose()
@@ -2779,6 +2883,139 @@ async def widget_conversation_transcript(
 
 
 # ---------------------------------------------------------------------------
+# US-081: the customer SSE channel — the anonymous customer's long-lived BACKEND
+# stream over which async AGENT replies (US-082) are pushed, authorized by the
+# US-071 opaque token (NOT a Supabase JWT). The customer is thus structurally OFF
+# the Supabase Realtime/JWT surface (ADR-0008 max-isolation): there is no supabase-js
+# channel on the customer leg. The stream drains the in-process `_CONVERSATION_FANOUT`
+# registry; a multi-instance deployment feeds that same registry via the Postgres
+# LISTEN/NOTIFY bridge (`_CONVERSATION_BRIDGE`), so this endpoint is identical
+# regardless of how many instances run.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/widget/conversations/{conversation_id}/events")
+async def widget_conversation_events(
+    conversation_id: str,
+    request: Request,
+    x_conversation_token: str | None = Header(
+        default=None, alias=_CONVERSATION_TOKEN_HEADER
+    ),
+) -> StreamingResponse:
+    """US-081: the customer's long-lived SSE for async agent replies.
+
+    Authorized by the opaque per-conversation token (US-071): the token is resolved
+    to its ONE bound conversation and the path `conversation_id` MUST match it, so a
+    token for X can never open Y's stream (the same binding the transcript enforces,
+    and the cross-conversation-isolation property the validation test pins). A
+    missing / expired / resolved / mismatched token → 401.
+
+    The stream subscribes to `_CONVERSATION_FANOUT` for exactly this conversation and
+    yields each agent reply as an `event: message` frame — fed by the local publish
+    (US-082) and, on a multi-instance deployment, by the LISTEN/NOTIFY bridge
+    publishing into the same registry. It NEVER carries another conversation's data
+    (publish delivers only to this conversation's subscribers).
+
+    Liveness + invalidation: a `: keepalive` comment every
+    WIDGET_SSE_KEEPALIVE_SECONDS keeps the channel alive through proxy idle-timeouts,
+    and the token is re-validated every WIDGET_SSE_REVALIDATE_SECONDS (slide=False —
+    holding the pipe open is not activity that should extend the 24h window). When
+    the conversation is resolved (its token purged, US-071) the re-validation fails
+    and the stream emits `event: close` then ends — the connection closes when the
+    token is invalidated. Rate-limited per-session at open (US-076; there is no
+    public_key on this path) as defense-in-depth against SSE-open spam.
+    """
+    if not x_conversation_token:
+        raise HTTPException(status_code=401, detail="missing conversation token")
+    # Per-session window FIRST (cheap, before the resolve) — caps an attacker
+    # spamming SSE opens from one session. No-op when support/the limiter is
+    # unconfigured (the resolve below then 503s before anything costly).
+    await _enforce_widget_session_limit(request)
+    # Bind the token to THIS conversation. slide=False: a passive read channel must
+    # not extend the token's lifetime just by being held open (the transcript-read
+    # precedent). A miss/mismatch is an opaque 401, indistinguishable from not-found.
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        conv = await _resume_conversation_by_token(
+            http, x_conversation_token, slide=False
+        )
+    if conv is None or conv["id"] != conversation_id:
+        raise HTTPException(
+            status_code=401,
+            detail="invalid conversation token for this conversation",
+        )
+
+    token = x_conversation_token  # captured for in-stream re-validation
+
+    async def gen() -> AsyncIterator[bytes]:
+        async with _CONVERSATION_FANOUT.subscribe(conversation_id) as queue:
+            # Announce the channel is live (id only — no token, no workspace topology).
+            yield _sse("ready", {"conversation_id": conversation_id})
+            # Persistent get-task: on a keepalive timeout the pending get is NOT
+            # cancelled (asyncio.wait leaves it pending), so a reply arriving exactly
+            # at a timeout boundary is never dropped between iterations.
+            get_task: "asyncio.Task[dict]" | None = None
+            last_revalidate = time.monotonic()
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as rv_http:
+                    while True:
+                        if await request.is_disconnected():
+                            return
+                        if get_task is None:
+                            get_task = asyncio.ensure_future(queue.get())
+                        done, _pending = await asyncio.wait(
+                            {get_task}, timeout=WIDGET_SSE_KEEPALIVE_SECONDS
+                        )
+                        if get_task in done:
+                            event = get_task.result()
+                            get_task = None
+                            if event.get("type") == "close":
+                                # Forward-looking: a future resolve path can publish a
+                                # close event for instant teardown (US-085+).
+                                yield _sse(
+                                    "close",
+                                    {"reason": event.get("reason", "closed")},
+                                )
+                                return
+                            # Only the customer-safe message body — never the
+                            # cross-instance envelope (origin/conversation_id).
+                            yield _sse("message", event.get("message", event))
+                            continue
+                        # Timed out → heartbeat, then periodic token re-validation.
+                        yield b": keepalive\n\n"
+                        now = time.monotonic()
+                        if now - last_revalidate >= WIDGET_SSE_REVALIDATE_SECONDS:
+                            last_revalidate = now
+                            try:
+                                still = await _resume_conversation_by_token(
+                                    rv_http, token, slide=False
+                                )
+                            except Exception as e:  # noqa: BLE001 - fail SOFT
+                                # A transient Supabase/network blip during the periodic
+                                # re-validation must NOT kill a live SSE: log concisely
+                                # and keep the stream open (skip this cycle). Only a
+                                # clean None / id mismatch — a genuinely resolved or
+                                # expired token — closes the stream below.
+                                log.warning(
+                                    "widget_sse.revalidate_error conv=%s — keeping "
+                                    "stream open (%s)",
+                                    conversation_id,
+                                    e.__class__.__name__,
+                                )
+                            else:
+                                if still is None or still.get("id") != conversation_id:
+                                    # Token invalidated (resolved/expired) — close.
+                                    yield _sse("close", {"reason": "resolved"})
+                                    return
+            finally:
+                if get_task is not None:
+                    get_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await get_task
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
 # US-072: widget_keys — the non-secret public-key registry + the not-revoked gate
 # every key resolution passes before anything is minted/created (ADR-0008).
 #
@@ -4136,7 +4373,18 @@ async def widget_agent_reply(
     # Fan the reply to the customer's live SSE (US-081 consumes the registry). The
     # publish is in-process and non-blocking; it delivers to 0 subscribers when no
     # customer SSE is open — the reply is still durable in the transcript.
-    _CONVERSATION_FANOUT.publish(conversation_id, message_event(message))
+    event = message_event(message)
+    _CONVERSATION_FANOUT.publish(conversation_id, event)
+    # US-081 multi-instance: also nudge OTHER backend instances over Postgres
+    # LISTEN/NOTIFY so a customer SSE held on a different process gets the reply too.
+    # Best-effort and non-fatal — the local publish above already served this
+    # instance's subscribers, and a remote miss is recovered via the transcript. It is
+    # fired as a DETACHED task (not awaited) so a degraded fanout pool can never add
+    # its latency to the operator's response. A single-instance deployment (no bridge)
+    # skips this entirely.
+    bridge = _CONVERSATION_BRIDGE
+    if bridge is not None:
+        _schedule_fanout_notify(bridge, conversation_id, event)
 
     return {"message": _public_conversation_message_view(message)}
 
