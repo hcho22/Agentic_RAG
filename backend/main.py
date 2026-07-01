@@ -2970,7 +2970,7 @@ async def widget_conversation_events(
                             get_task = None
                             if event.get("type") == "close":
                                 # Forward-looking: a future resolve path can publish a
-                                # close event for instant teardown (US-085+).
+                                # close event for instant teardown (US-086+).
                                 yield _sse(
                                     "close",
                                     {"reason": event.get("reason", "closed")},
