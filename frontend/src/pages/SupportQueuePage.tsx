@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AppHeader } from '@/components/AppHeader'
 import { ConversationDetail } from '@/components/support/ConversationDetail'
 import { useToast } from '@/components/ui/toast'
+import { useAuth } from '@/contexts/AuthContext'
 import { cn } from '@/lib/utils'
 import {
   listEscalatedConversations,
   resolveActiveWorkspace,
+  resolveClaimerEmails,
   subscribeToConversations,
   type ActiveWorkspace,
+  type ClaimFields,
   type ConversationRow,
 } from '@/lib/supportQueue'
 
@@ -49,11 +52,20 @@ function relativeTime(iso: string | null): string {
 
 export function SupportQueuePage() {
   const { toast } = useToast()
+  const { user } = useAuth()
+  const currentUserId = user?.id ?? null
 
   const [workspace, setWorkspace] = useState<ActiveWorkspace | null>(null)
   const [conversations, setConversations] = useState<ConversationRow[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // uid -> email for the "Claimed by <email>" label (US-089). Resolved lazily
+  // from `profiles` as claimed rows appear; a self-claim never needs a lookup.
+  const [claimerEmails, setClaimerEmails] = useState<Record<string, string>>({})
+  // Claimer uids already handed to a `profiles` lookup — including ones with no
+  // `profiles` row, so an unresolvable claimer is requested at most once and the
+  // lazy effect can never spin re-fetching it (it stays the generic fallback).
+  const requestedClaimerIds = useRef<Set<string>>(new Set())
 
   const workspaceId =
     workspace?.status === 'resolved' ? workspace.workspaceId : null
@@ -62,6 +74,27 @@ export function SupportQueuePage() {
     () => conversations.find((c) => c.id === selectedId) ?? null,
     [conversations, selectedId],
   )
+
+  // Human-readable claimer label: the current agent is "you"; another agent is
+  // shown by email (resolved from `profiles`), falling back to a generic label
+  // until (or if) the lookup resolves. Null for an unclaimed conversation.
+  const claimerLabel = useCallback(
+    (claimedBy: string | null): string | null => {
+      if (!claimedBy) return null
+      if (claimedBy === currentUserId) return 'you'
+      return claimerEmails[claimedBy] ?? 'another agent'
+    },
+    [currentUserId, claimerEmails],
+  )
+
+  // Patch a single conversation in place (optimistic claim/release update). The
+  // Realtime feed delivers the same change to every other open queue; keying by
+  // id makes the two idempotent.
+  const patchConversation = useCallback((id: string, patch: ClaimFields) => {
+    setConversations((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+    )
+  }, [])
 
   // Resolve the active workspace once (default-when-sole / ambiguous / none).
   useEffect(() => {
@@ -118,6 +151,39 @@ export function SupportQueuePage() {
     })
     return unsubscribe
   }, [workspaceId])
+
+  // Resolve emails for any claimer that isn't the current agent and hasn't
+  // already been requested. Best-effort: a failed or empty lookup leaves the
+  // label as the generic fallback. Each id is marked requested BEFORE the fetch
+  // and never re-requested, and setClaimerEmails runs only when the lookup
+  // actually returns rows — so an unresolvable claimer never creates a new
+  // `claimerEmails` reference that would refire this effect in a loop.
+  useEffect(() => {
+    const missing = Array.from(
+      new Set(
+        conversations
+          .map((c) => c.claimed_by)
+          .filter(
+            (id): id is string =>
+              !!id &&
+              id !== currentUserId &&
+              !(id in claimerEmails) &&
+              !requestedClaimerIds.current.has(id),
+          ),
+      ),
+    )
+    if (missing.length === 0) return
+    for (const id of missing) requestedClaimerIds.current.add(id)
+    resolveClaimerEmails(missing)
+      .then((map) => {
+        if (Object.keys(map).length > 0) {
+          setClaimerEmails((prev) => ({ ...prev, ...map }))
+        }
+      })
+      .catch(() => {
+        // Non-fatal — the row still shows a generic "another agent" claimer.
+      })
+  }, [conversations, currentUserId, claimerEmails])
 
   // Full-width status note for the empty/loading/none/ambiguous cases; null when
   // the two-pane list+detail should render instead.
@@ -179,6 +245,8 @@ export function SupportQueuePage() {
                   key={c.id}
                   conversation={c}
                   selected={c.id === selectedId}
+                  claimedByMe={!!c.claimed_by && c.claimed_by === currentUserId}
+                  claimerLabel={claimerLabel(c.claimed_by)}
                   onSelect={() => setSelectedId(c.id)}
                 />
               ))}
@@ -188,6 +256,9 @@ export function SupportQueuePage() {
                 <ConversationDetail
                   key={selected.id}
                   conversation={selected}
+                  currentUserId={currentUserId}
+                  claimerLabel={claimerLabel(selected.claimed_by)}
+                  onClaimChange={patchConversation}
                   onResolved={(id) =>
                     setSelectedId((cur) => (cur === id ? null : cur))
                   }
@@ -216,13 +287,21 @@ function StatusNote({ children }: { children: ReactNode }) {
 function QueueRow({
   conversation,
   selected,
+  claimedByMe,
+  claimerLabel,
   onSelect,
 }: {
   conversation: ConversationRow
   selected: boolean
+  claimedByMe: boolean
+  claimerLabel: string | null
   onSelect: () => void
 }) {
   const { id, escalated_at, customer_email, channel, claimed_by, created_at } = conversation
+  // Dim a row another agent has claimed (advisory "someone's likely on this") —
+  // but never the one you're reading (selected) or your own claim. It never
+  // gates selection or reply; it is a visual de-emphasis only (US-089).
+  const claimedByOther = !!claimed_by && !claimedByMe
   return (
     <li>
       <button
@@ -234,6 +313,7 @@ function QueueRow({
           selected
             ? 'border-neutral-500 bg-neutral-800/80'
             : 'border-neutral-800 bg-neutral-900/60 hover:bg-neutral-800/50',
+          claimedByOther && !selected && 'opacity-60',
         )}
       >
         <div className="flex items-center justify-between gap-4">
@@ -260,7 +340,16 @@ function QueueRow({
           ) : (
             <span className="text-neutral-500">No email left</span>
           )}
-          {claimed_by ? <span className="text-neutral-500">• Claimed</span> : null}
+          {claimed_by ? (
+            <span
+              className={cn(
+                'shrink-0 truncate',
+                claimedByMe ? 'text-emerald-300/90' : 'text-neutral-500',
+              )}
+            >
+              • Claimed by {claimerLabel}
+            </span>
+          ) : null}
         </div>
       </button>
     </li>

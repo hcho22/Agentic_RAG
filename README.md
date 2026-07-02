@@ -305,7 +305,15 @@ membership RLS, so a non-member reads zero rows; a light 5s poll keeps it curren
 since `conversation_messages` is not on the Realtime publication), posts a reply
 (via `POST /widget/conversations/{id}/agent-reply` above), and clicks **Resolve**
 to latch the conversation to the terminal `status='resolved'` - which purges the
-customer's reconnect token (US-071) and drops the row from the queue.
+customer's reconnect token (US-071) and drops the row from the queue. An agent can
+optionally **claim** a conversation (US-089) so it dims in every other agent's live
+queue - cutting accidental double-replies - and shows "Claimed by {you|email}" (the
+claimer's email resolved from `profiles`). The claim is advisory only: last-write-wins,
+and it NEVER gates the reply or Resolve controls, so any workspace member may still
+reply to a claimed conversation. It is a plain `claimed_by` / `claimed_at` UPDATE that
+rides the same `conversations_update_member` membership RLS as Resolve and propagates
+live over the existing `conversations` Realtime feed - no new endpoint, migration, or
+env.
 
 The bot answers only from documents a workspace owner has explicitly **published
 to the widget** - a separate, confirmed "publish to the public support widget"

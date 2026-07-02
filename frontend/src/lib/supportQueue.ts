@@ -203,6 +203,75 @@ export async function sendAgentReply(
   return body.message
 }
 
+// US-089: optional, UNENFORCED soft-claim. Claiming stamps `claimed_by` /
+// `claimed_at` on the conversation so the queue can dim a row another agent is
+// likely working, reducing accidental double-replies. It is advisory ONLY —
+// last-write-wins, and it does NOT gate the reply/resolve actions (anyone in the
+// workspace may still reply). This is NOT a routing/assignment axis (S5 deferred,
+// ADR-0004/0008). The write rides the SAME `conversations_update_member`
+// membership RLS as Resolve (US-088) — a non-member's write affects zero rows —
+// and the claim propagates to every other agent's queue live via the existing
+// `conversations` Realtime feed (the claim is a plain UPDATE, status unchanged).
+
+export type ClaimFields = {
+  claimed_by: string | null
+  claimed_at: string | null
+}
+
+// Stamp the claim as the current agent. `claimed_by` is set to the caller's own
+// auth uid and `claimed_at` to the client clock — the DB does NOT enforce
+// `claimed_by = auth.uid()` (the claim is deliberately advisory), so this is the
+// honest value, not a trust boundary. Returns the persisted fields for immediate
+// optimistic UI (Realtime delivers the same change to every other open queue).
+export async function claimConversation(conversationId: string): Promise<ClaimFields> {
+  const { data: sess } = await supabase.auth.getSession()
+  const userId = sess.session?.user?.id
+  if (!userId) throw new Error('Not signed in.')
+
+  const { data, error } = await supabase
+    .from('conversations')
+    .update({ claimed_by: userId, claimed_at: new Date().toISOString() })
+    .eq('id', conversationId)
+    .select('claimed_by, claimed_at')
+    .single()
+  if (error) throw error
+  return data as ClaimFields
+}
+
+// Release a claim (clear `claimed_by` / `claimed_at`). Unenforced like the claim
+// itself; the UI only offers this to the current claimer, but the DB imposes no
+// such restriction (membership is the only boundary).
+export async function releaseConversation(conversationId: string): Promise<ClaimFields> {
+  const { data, error } = await supabase
+    .from('conversations')
+    .update({ claimed_by: null, claimed_at: null })
+    .eq('id', conversationId)
+    .select('claimed_by, claimed_at')
+    .single()
+  if (error) throw error
+  return data as ClaimFields
+}
+
+// Batch-resolve claimer uids to emails for the "Claimed by <email>" label. Reads
+// `public.profiles` (the auth.users(id,email) mirror, US-037; RLS select-true) so
+// a claimer's identity can be shown without touching the auth schema. Best-effort
+// at the call site — an unresolved id falls back to a generic "another agent".
+export async function resolveClaimerEmails(
+  ids: string[],
+): Promise<Record<string, string>> {
+  if (ids.length === 0) return {}
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, email')
+    .in('id', ids)
+  if (error) throw error
+  const out: Record<string, string> = {}
+  for (const row of (data ?? []) as { id: string; email: string }[]) {
+    out[row.id] = row.email
+  }
+  return out
+}
+
 // Resolve = the one-way latch into the terminal `resolved` status (US-067). The
 // UPDATE runs under the agent's JWT (`conversations_update_member` RLS) and
 // touches ONLY `status` — the US-067 BEFORE trigger enforces escalated→resolved

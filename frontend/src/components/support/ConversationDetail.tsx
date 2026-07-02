@@ -11,9 +11,12 @@ import { Textarea } from '@/components/ui/textarea'
 import { Dialog } from '@/components/ui/dialog'
 import { useToast } from '@/components/ui/toast'
 import {
+  claimConversation,
   listConversationMessages,
+  releaseConversation,
   resolveConversation,
   sendAgentReply,
+  type ClaimFields,
   type ConversationMessage,
   type ConversationRow,
 } from '@/lib/supportQueue'
@@ -45,14 +48,25 @@ function formatTime(iso: string): string {
 
 export function ConversationDetail({
   conversation,
+  currentUserId,
+  claimerLabel,
+  onClaimChange,
   onResolved,
 }: {
   conversation: ConversationRow
+  currentUserId: string | null
+  // Human-readable claimer identity resolved by the queue: 'you' for a self
+  // claim, an email for another agent, or null when unclaimed.
+  claimerLabel: string | null
+  onClaimChange: (id: string, patch: ClaimFields) => void
   onResolved: (id: string) => void
 }) {
   const { toast } = useToast()
   const conversationId = conversation.id
   const isResolved = conversation.status === 'resolved'
+
+  const claimedBy = conversation.claimed_by
+  const claimedByMe = !!claimedBy && claimedBy === currentUserId
 
   const [messages, setMessages] = useState<ConversationMessage[]>([])
   const [loading, setLoading] = useState(true)
@@ -60,6 +74,7 @@ export function ConversationDetail({
   const [sending, setSending] = useState(false)
   const [confirmResolve, setConfirmResolve] = useState(false)
   const [resolving, setResolving] = useState(false)
+  const [claiming, setClaiming] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -147,11 +162,31 @@ export function ConversationDetail({
     }
   }, [conversationId, onResolved, toast])
 
+  // Claim / release is the UNENFORCED soft-claim (US-089): it only stamps
+  // claimed_by/claimed_at so other agents see the row dimmed. It NEVER gates the
+  // reply or resolve controls below — those stay enabled regardless of who (if
+  // anyone) holds the claim. Claiming an already-claimed conversation just takes
+  // it over (last-write-wins).
+  const toggleClaim = useCallback(async () => {
+    if (claiming) return
+    setClaiming(true)
+    try {
+      const patch = claimedByMe
+        ? await releaseConversation(conversationId)
+        : await claimConversation(conversationId)
+      onClaimChange(conversationId, patch)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Failed to update the claim', 'error')
+    } finally {
+      setClaiming(false)
+    }
+  }, [claiming, claimedByMe, conversationId, onClaimChange, toast])
+
   return (
     <section className="flex h-full min-h-0 flex-col rounded-lg border border-neutral-800 bg-neutral-900/60">
       <header className="flex items-center justify-between gap-4 border-b border-neutral-800 px-4 py-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-sm text-neutral-200">
               {conversationId.slice(0, 8)}
             </span>
@@ -164,6 +199,17 @@ export function ConversationDetail({
                 Escalated
               </span>
             )}
+            {claimedBy ? (
+              <span
+                className={
+                  claimedByMe
+                    ? 'rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-300'
+                    : 'rounded-full bg-neutral-700/50 px-2 py-0.5 text-xs text-neutral-300'
+                }
+              >
+                Claimed by {claimerLabel}
+              </span>
+            ) : null}
           </div>
           <p className="mt-0.5 truncate text-xs text-neutral-500">
             {conversation.customer_email
@@ -172,15 +218,35 @@ export function ConversationDetail({
             {conversation.channel ? ` • via ${conversation.channel}` : ''}
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="shrink-0"
-          onClick={() => setConfirmResolve(true)}
-          disabled={isResolved || resolving}
-        >
-          {isResolved ? 'Resolved' : 'Resolve'}
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {/* Advisory soft-claim toggle — never gates reply/resolve (US-089). */}
+          {!isResolved ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void toggleClaim()}
+              disabled={claiming}
+            >
+              {claiming
+                ? claimedByMe
+                  ? 'Releasing…'
+                  : 'Claiming…'
+                : claimedByMe
+                  ? 'Release'
+                  : claimedBy
+                    ? 'Claim anyway'
+                    : 'Claim'}
+            </Button>
+          ) : null}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setConfirmResolve(true)}
+            disabled={isResolved || resolving}
+          >
+            {isResolved ? 'Resolved' : 'Resolve'}
+          </Button>
+        </div>
       </header>
 
       <div ref={scrollRef} className="flex-1 min-h-0 space-y-3 overflow-y-auto px-4 py-4">
