@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  escalateConversation,
   fetchTranscript,
   streamWidgetMessage,
   subscribeConversationEvents,
@@ -51,7 +52,14 @@ export interface ConversationState {
   throttledUntil: number | null
   /** Conversation status: active | escalated | resolved (US-067). */
   status: string
+  /** True once a conversation exists on the server (a token is held), so the
+   *  US-091 "talk to a human" control has something to escalate. */
+  hasConversation: boolean
+  /** True while an explicit US-091 escalation request is in flight. */
+  escalating: boolean
   send: (text: string) => Promise<void>
+  /** US-091: explicitly escalate to a human ("talk to a human" button). */
+  escalate: () => Promise<void>
 }
 
 function toWidgetMessages(rows: TranscriptMessage[]): WidgetMessage[] {
@@ -68,10 +76,19 @@ export function useConversation(publicKey: string): ConversationState {
   const [error, setError] = useState<string | null>(null)
   const [throttledUntil, setThrottledUntil] = useState<number | null>(null)
   const [status, setStatus] = useState<string>('active')
+  // A reactive mirror of "a conversation (+token) exists on the server". The token
+  // itself lives in iframe storage (not React state), so this flag gates the US-091
+  // escalate affordance without reading storage on every render. Set true once a
+  // conversation is established (first-message `conversation` event or a resume),
+  // cleared alongside the token whenever it dies.
+  const [hasConversation, setHasConversation] = useState(false)
+  const [escalating, setEscalating] = useState(false)
 
   const conversationIdRef = useRef<string | null>(null)
   const sendingRef = useRef(false)
   sendingRef.current = sending
+  const escalatingRef = useRef(false)
+  escalatingRef.current = escalating
 
   // Bumped at the start of every send. A transcript fetch captures the generation
   // before its `await` and discards its result if a send has begun since - so a
@@ -98,6 +115,7 @@ export function useConversation(publicKey: string): ConversationState {
       // fresh conversation rather than dead-ending the customer.
       clearConversation(publicKey)
       conversationIdRef.current = null
+      setHasConversation(false)
       return
     }
     if (res.status === 200 && res.conversation && res.messages) {
@@ -114,6 +132,7 @@ export function useConversation(publicKey: string): ConversationState {
     const id = getConversationId(publicKey)
     if (token && id) {
       conversationIdRef.current = id
+      setHasConversation(true)
       void refreshTranscript()
     }
   }, [publicKey, refreshTranscript])
@@ -175,6 +194,7 @@ export function useConversation(publicKey: string): ConversationState {
         if (status === 401 && !sendingRef.current) {
           clearConversation(publicKey)
           conversationIdRef.current = null
+          setHasConversation(false)
         }
         await wait(status === 401 ? 3000 : 1500)
       }
@@ -217,6 +237,7 @@ export function useConversation(publicKey: string): ConversationState {
             conversationIdRef.current = evt.conversation.id
             setConversationId(publicKey, evt.conversation.id)
             setStatus(evt.conversation.status)
+            setHasConversation(true)
           } else if (evt.kind === 'delta') {
             streamed += evt.text
             setMessages((prev) =>
@@ -232,6 +253,7 @@ export function useConversation(publicKey: string): ConversationState {
               // retries this same message ONCE as a fresh first message.
               clearConversation(publicKey)
               conversationIdRef.current = null
+              setHasConversation(false)
               return 'expired'
             }
             if (evt.status === 429 && evt.retryAfterSeconds) {
@@ -294,5 +316,49 @@ export function useConversation(publicKey: string): ConversationState {
     [publicKey, throttledUntil, runTurn, refreshTranscript],
   )
 
-  return { messages, sending, error, throttledUntil, status, send }
+  // US-091: the explicit "talk to a human" escalation. A deterministic, UI-initiated
+  // latch (never a model tool) - it flips the conversation to `escalated` via the
+  // US-080 endpoint, after which the bot stays silent and later messages route to the
+  // human queue. Requires an existing conversation (a token); it never creates one.
+  const escalate = useCallback(async () => {
+    if (escalatingRef.current) return
+    const token = getConversationToken(publicKey)
+    if (!token) return // no conversation to escalate yet
+    setEscalating(true)
+    setError(null)
+    try {
+      const res = await escalateConversation({ apiBase, token })
+      if (res.status === 200) {
+        // Latched. Reflect `escalated` so the bot goes silent and the composer keeps
+        // routing later messages to the human queue. Fall back to 'escalated' if the
+        // (2xx) body was unreadable - the latch still happened.
+        setStatus(res.conversation?.status ?? 'escalated')
+      } else if (res.status === 401) {
+        // The token died (expired/resolved) before we could escalate. Clear it and
+        // let the next send start fresh - don't dead-end the customer.
+        clearConversation(publicKey)
+        conversationIdRef.current = null
+        setHasConversation(false)
+        setError('This conversation has ended. Send a message to start a new one.')
+      } else if (res.status === 429) {
+        setError('You are sending requests too quickly. Please wait a moment.')
+      } else {
+        setError('Could not connect you to a person. Please try again.')
+      }
+    } finally {
+      setEscalating(false)
+    }
+  }, [apiBase, publicKey])
+
+  return {
+    messages,
+    sending,
+    error,
+    throttledUntil,
+    status,
+    hasConversation,
+    escalating,
+    send,
+    escalate,
+  }
 }

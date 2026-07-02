@@ -149,6 +149,22 @@ instant. A single backend process needs nothing more (the in-process
 instances over Postgres `LISTEN/NOTIFY` (no Redis/queue infra), and the SSE emits
 `event: close` when the conversation is resolved (its token purged).
 
+### Explicit "talk to a human" escalation (US-091)
+
+The widget shows a **"Talk to a human"** button at the top of the composer once a
+conversation exists (i.e. after the first message).
+It is a deterministic, customer-initiated escalation - **never** a model decision
+(ADR-0003): clicking it POSTs to `POST /widget/conversations/escalate` (the US-080
+latch, authed by the opaque conversation token), which flips the conversation to
+`status='escalated'`.
+Thereafter the bot is silent - later customer messages are persisted and routed to
+the operator queue (`/support/queue`, US-087) with no bot answer, and the human's
+reply arrives over the customer SSE above.
+The button disappears on escalation and the panel shows "A team member will reply
+here shortly."; the composer stays usable so the customer can keep messaging while
+they wait.
+Nothing to configure - the control is automatic and needs no embed attribute.
+
 ## Known integration consideration - key resolution + the iframe's `Origin` vs the per-key allowlist
 
 This implementation defers **all** widget-key resolution to the **first message**

@@ -141,6 +141,46 @@ export async function* streamWidgetMessage(opts: {
   }
 }
 
+export interface EscalateResult {
+  /** HTTP status, or 0 on a network error. A 401 means the token is dead. */
+  status: number
+  conversation?: PublicConversation
+}
+
+/**
+ * US-091: the explicit "talk to a human" escalation. Calls the US-080 latch
+ * endpoint (`POST /widget/conversations/escalate`), authed by the opaque token -
+ * the deterministic, UI-INITIATED counterpart to the model-mediated escalate
+ * decision, NEVER a model `escalate()` tool. On success the conversation is latched
+ * `status='escalated'` and the bot goes silent thereafter; every later customer
+ * message routes to the human queue. A missing/expired/resolved token → 401 (the
+ * cue to start fresh); a latch-write failure → 502.
+ */
+export async function escalateConversation(opts: {
+  apiBase: string
+  token: string
+}): Promise<EscalateResult> {
+  const { apiBase, token } = opts
+  let res: Response
+  try {
+    res = await fetch(`${apiBase}/widget/conversations/escalate`, {
+      method: 'POST',
+      headers: { [CONVERSATION_TOKEN_HEADER]: token },
+    })
+  } catch {
+    return { status: 0 }
+  }
+  if (!res.ok) return { status: res.status }
+  try {
+    const body = (await res.json()) as { conversation: PublicConversation }
+    return { status: 200, conversation: body.conversation }
+  } catch {
+    // A 2xx with an unreadable body still means the latch succeeded; the caller
+    // marks the conversation escalated regardless.
+    return { status: 200 }
+  }
+}
+
 export interface TranscriptResult {
   /** HTTP status, or 0 on a network error. A 401 means the token is dead (the
    *  poll should stop and the conversation be cleared). */

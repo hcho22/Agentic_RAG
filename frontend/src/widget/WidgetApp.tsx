@@ -107,9 +107,17 @@ function WidgetSurface({
   const launcherIcon = config.launcherIcon || DEFAULT_LAUNCHER_ICON
   const side = config.position === 'bottom-left' ? 'left' : 'right'
 
-  const { messages, sending, error, throttledUntil, status, send } = useConversation(
-    config.publicKey,
-  )
+  const {
+    messages,
+    sending,
+    error,
+    throttledUntil,
+    status,
+    hasConversation,
+    escalating,
+    send,
+    escalate,
+  } = useConversation(config.publicKey)
 
   // --- unread badge (surfaced to the host + shown on the launcher) ----------
   // `readThrough` is how far the user has seen; while open everything is read, so a
@@ -184,6 +192,13 @@ function WidgetSurface({
             throttleSecondsLeft={throttleSecondsLeft}
             resolved={resolved}
             onSend={send}
+            // US-091: the "talk to a human" control lives at the top of the composer
+            // footer. It is offered only for an ACTIVE conversation that already
+            // exists on the server; once escalated (or resolved) it disappears and the
+            // MessageList shows the "a team member will reply here shortly" note.
+            canEscalate={status === 'active' && hasConversation}
+            escalating={escalating}
+            onEscalate={escalate}
           />
         </section>
       )}
@@ -287,6 +302,9 @@ function Composer({
   throttleSecondsLeft,
   resolved,
   onSend,
+  canEscalate,
+  escalating,
+  onEscalate,
 }: {
   brand: string
   disabled: boolean
@@ -294,6 +312,9 @@ function Composer({
   throttleSecondsLeft: number
   resolved: boolean
   onSend: (text: string) => void
+  canEscalate: boolean
+  escalating: boolean
+  onEscalate: () => void
 }) {
   const [value, setValue] = useState('')
   const blocked = disabled || throttled || resolved
@@ -307,6 +328,16 @@ function Composer({
 
   return (
     <div className="sw-composer">
+      {canEscalate && (
+        <button
+          type="button"
+          className="sw-escalate"
+          onClick={onEscalate}
+          disabled={escalating}
+        >
+          {escalating ? 'Connecting you to a person…' : 'Talk to a human'}
+        </button>
+      )}
       {throttled && (
         <div className="sw-composer__hint">
           Too many messages - try again in {throttleSecondsLeft}s.

@@ -262,6 +262,40 @@ body {
   padding: 0 2px 8px;
 }
 
+/* US-091: the explicit "talk to a human" control, at the top of the composer
+   footer. A subtle secondary button so it reads as a fallback, not the primary
+   action; it disappears once the conversation escalates. */
+.sw-escalate {
+  display: block;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 7px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  color: #475569;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.sw-escalate:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.sw-escalate:focus-visible {
+  outline: 2px solid #94a3b8;
+  outline-offset: 1px;
+}
+
+.sw-escalate:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .sw-composer__row {
   display: flex;
   align-items: flex-end;
