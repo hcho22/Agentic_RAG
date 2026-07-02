@@ -6,6 +6,7 @@ import { LoginPage } from '@/pages/LoginPage'
 import { ChatPage } from '@/pages/ChatPage'
 import { IngestionPage } from '@/pages/IngestionPage'
 import { SupportQueuePage } from '@/pages/SupportQueuePage'
+import { SupportSettingsPage } from '@/pages/SupportSettingsPage'
 import { AuthCallback } from '@/pages/AuthCallback'
 
 export default function App() {
@@ -45,6 +46,14 @@ export default function App() {
             element={
               <ProtectedRoute>
                 <SupportQueuePage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/support/settings"
+            element={
+              <ProtectedRoute>
+                <SupportSettingsPage />
               </ProtectedRoute>
             }
           />

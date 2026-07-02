@@ -294,6 +294,19 @@ US-084; the live customer-SSE push for agent replies is US-081 (`GET
 retained as a backstop; a multi-instance backend sets `WIDGET_FANOUT_DATABASE_URL`
 to carry replies between instances over Postgres `LISTEN/NOTIFY`).
 
+Workspace **admins** manage the widget from the in-app `/support/settings` route
+(US-090) - the one admin-gated support surface (`role='admin'`), deliberately
+distinct from the membership-gated queue below. Issuing a workspace's first widget
+key there is what **enables support** (it lazily provisions the workspace bot), so
+there is no separate enable toggle. Admins issue keys with a label + registered
+origins (an empty allowlist is inactive/fail-closed; `*` is a dev-only wildcard),
+copy the non-secret `public_key` and its embed snippet, rotate a key (issue-new +
+revoke-old, composed client-side), and revoke one. Share-to-bot (below) is also
+managed here for the admin's own documents. The UI gate is cosmetic; the hard
+boundary is the `widget_keys` admin RLS enforced under the caller's own JWT
+(US-072), so a non-admin's issue is a Postgres 403 and their key list reads back
+empty.
+
 Workspace members pick up the human handoffs from the authenticated in-app
 operator queue at `/support/queue` (US-087): it lists the active workspace's
 `status='escalated'` conversations, oldest-first, and live-updates them via each
@@ -318,9 +331,10 @@ env.
 The bot answers only from documents a workspace owner has explicitly **published
 to the widget** - a separate, confirmed "publish to the public support widget"
 action (`POST /api/documents/{id}/publish-to-bot`, surfaced in the document share
-dialog) kept structurally apart from normal teammate sharing, so a doc's
-synthesized answer can never be made customer-reachable by accidentally granting
-the bot in the ordinary share box (US-086).
+dialog and on the admin `/support/settings` page) kept structurally apart from
+normal teammate sharing, so a doc's synthesized answer can never be made
+customer-reachable by accidentally granting the bot in the ordinary share box
+(US-086).
 
 ## Eval suite
 

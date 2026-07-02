@@ -182,6 +182,59 @@ pre-existing cross-cutting concern between the embed model (US-083) and the orig
 gate (US-073/078), surfaced by wiring the real client; it is **not** introduced by
 US-084 and is left as a follow-up design decision.
 
+## Admin settings — issuing keys, enabling support, share-to-bot (US-090)
+
+Widget keys are issued, rotated, and revoked by a **workspace admin** on the
+`/support/settings` route (added to `App.tsx`, reachable from the admin-only
+"Support settings" nav link).
+This is the ADMIN surface — ROLE-gated (`workspace_membership.role='admin'`), the
+one place `role` legitimately enters the trust model (ADR-0002) — and is
+deliberately distinct from the MEMBERSHIP-gated `/support/queue` handoff list: a
+plain member reaches the queue but is shown an "admins only" note on settings.
+The UI gate is cosmetic; the hard boundary is the `widget_keys` admin RLS enforced
+server-side under the caller's own JWT (US-072), so a non-admin's issue is
+rejected by Postgres, their key list reads back empty, and their revoke matches
+zero rows.
+
+- **Enabling support = issuing the first key.**
+  There is no separate "enable support" toggle: issuing a workspace's first widget
+  key lazily provisions its support bot (US-069, `_ensure_workspace_bot`,
+  best-effort), so the settings page frames "no keys yet" as "issue your first key
+  to enable support" and treats "≥1 key ever issued" as "support enabled".
+- **Rotation is issue-new + revoke-old**, composed client-side (there is no atomic
+  rotate endpoint by design — the schema allows multiple keys per workspace so a
+  revoked key lingers beside its replacement for audit).
+  The page issues the replacement FIRST (a failure leaves the old key untouched
+  and the embedded loader still working), then revokes the old one; if the revoke
+  leg fails the new key is kept and the admin is told to revoke the old one
+  manually rather than lose the replacement.
+- **Origins are surfaced with the fail-closed reminder + the `*` dev-only warning.**
+  A key with no registered origin resolves nothing (US-073 fail-closed), so the
+  issue/rotate form disables submit until at least one non-blank origin is entered
+  (mirroring the backend 400), and both the form and each key card flag a `*`
+  wildcard entry as dev-only/never-production.
+- **Share-to-bot is managed here for the documents the admin OWNS.**
+  `listDocuments` reads under owner-only RLS and publish/unpublish are owner-gated
+  (US-086), so the section lists exactly the admin's own ready documents with a
+  loud, explicitly-confirmed publish action ("answerable to anyone who can reach
+  your public widget"); it reuses the same US-086 endpoints as the doc share
+  dialog.
+
+**Per-key theming defaults — deferred, and why.**
+The AC mentions issuing keys with "theming defaults", but the shipped theming
+model is **loader-driven**: the buyer sets brand color / greeting / title /
+position / launcher icon as `data-*` attributes on the embed snippet, applied via
+the iframe `init` config (US-084).
+`widget_keys` has no theming columns and the public resolve path returns none, so
+storing per-key server-side theming defaults would be a separate cross-cutting
+change spanning the schema, the US-078 resolve payload, and the US-083/084 loader
++ iframe — touching already-shipped public surfaces the US-090 validation test
+does not exercise.
+The settings page therefore surfaces theming where it actually lives today — on
+the copyable embed snippet, which documents the optional theming `data-*`
+attributes — rather than persisting per-key defaults; a server-side theming store
+is left as a deliberate follow-up.
+
 ## Scope
 
 US-083 ships the **shell** (loader, cross-origin iframe, postMessage handshake,
