@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { AppHeader } from '@/components/AppHeader'
+import { ConversationDetail } from '@/components/support/ConversationDetail'
 import { useToast } from '@/components/ui/toast'
+import { cn } from '@/lib/utils'
 import {
   listEscalatedConversations,
   resolveActiveWorkspace,
@@ -51,9 +53,15 @@ export function SupportQueuePage() {
   const [workspace, setWorkspace] = useState<ActiveWorkspace | null>(null)
   const [conversations, setConversations] = useState<ConversationRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const workspaceId =
     workspace?.status === 'resolved' ? workspace.workspaceId : null
+
+  const selected = useMemo(
+    () => conversations.find((c) => c.id === selectedId) ?? null,
+    [conversations, selectedId],
+  )
 
   // Resolve the active workspace once (default-when-sole / ambiguous / none).
   useEffect(() => {
@@ -103,15 +111,18 @@ export function SupportQueuePage() {
       },
       onLeft: (id) => {
         setConversations((prev) => prev.filter((c) => c.id !== id))
+        // If the open conversation just left the queue (resolved elsewhere or by
+        // this agent), close the detail pane.
+        setSelectedId((cur) => (cur === id ? null : cur))
       },
     })
     return unsubscribe
   }, [workspaceId])
 
-  const body = useMemo(() => {
-    if (!workspace) {
-      return <StatusNote>Loading…</StatusNote>
-    }
+  // Full-width status note for the empty/loading/none/ambiguous cases; null when
+  // the two-pane list+detail should render instead.
+  const statusNote = useMemo<ReactNode | null>(() => {
+    if (!workspace) return <StatusNote>Loading…</StatusNote>
     if (workspace.status === 'none') {
       return (
         <StatusNote>
@@ -128,9 +139,7 @@ export function SupportQueuePage() {
         </StatusNote>
       )
     }
-    if (loading) {
-      return <StatusNote>Loading queue…</StatusNote>
-    }
+    if (loading) return <StatusNote>Loading queue…</StatusNote>
     if (conversations.length === 0) {
       return (
         <StatusNote>
@@ -139,19 +148,13 @@ export function SupportQueuePage() {
         </StatusNote>
       )
     }
-    return (
-      <ul className="space-y-3">
-        {conversations.map((c) => (
-          <QueueRow key={c.id} conversation={c} />
-        ))}
-      </ul>
-    )
+    return null
   }, [workspace, loading, conversations])
 
   return (
     <div className="flex h-screen flex-col bg-neutral-950 text-neutral-100">
       <AppHeader />
-      <main className="mx-auto w-full max-w-5xl flex-1 overflow-y-auto px-6 py-8">
+      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col overflow-hidden px-6 py-8">
         <div className="mb-6 flex items-baseline justify-between gap-4">
           <div>
             <h2 className="text-xl font-semibold">Support queue</h2>
@@ -166,7 +169,37 @@ export function SupportQueuePage() {
             </span>
           ) : null}
         </div>
-        {body}
+        {statusNote ? (
+          statusNote
+        ) : (
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-6 lg:grid-cols-[minmax(260px,340px)_1fr]">
+            <ul className="min-h-0 space-y-2 overflow-y-auto pr-1">
+              {conversations.map((c) => (
+                <QueueRow
+                  key={c.id}
+                  conversation={c}
+                  selected={c.id === selectedId}
+                  onSelect={() => setSelectedId(c.id)}
+                />
+              ))}
+            </ul>
+            <div className="min-h-0">
+              {selected ? (
+                <ConversationDetail
+                  key={selected.id}
+                  conversation={selected}
+                  onResolved={(id) =>
+                    setSelectedId((cur) => (cur === id ? null : cur))
+                  }
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-neutral-800 bg-neutral-900/30 px-4 py-10 text-center text-sm text-neutral-500">
+                  Select a conversation to read its transcript and reply.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </main>
     </div>
   )
@@ -180,36 +213,56 @@ function StatusNote({ children }: { children: ReactNode }) {
   )
 }
 
-function QueueRow({ conversation }: { conversation: ConversationRow }) {
+function QueueRow({
+  conversation,
+  selected,
+  onSelect,
+}: {
+  conversation: ConversationRow
+  selected: boolean
+  onSelect: () => void
+}) {
   const { id, escalated_at, customer_email, channel, claimed_by, created_at } = conversation
   return (
-    <li className="rounded-lg border border-neutral-800 bg-neutral-900/60 px-4 py-3">
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-2">
-          <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300">
-            Escalated
-          </span>
-          <span className="font-mono text-sm text-neutral-300">{id.slice(0, 8)}</span>
-          {channel ? (
-            <span className="text-xs text-neutral-500">via {channel}</span>
-          ) : null}
-        </div>
-        <span className="shrink-0 text-xs text-neutral-500">
-          {escalated_at ? `escalated ${relativeTime(escalated_at)}` : `opened ${relativeTime(created_at)}`}
-        </span>
-      </div>
-      <div className="mt-2 flex items-center gap-3 text-xs text-neutral-400">
-        {customer_email ? (
-          <span>
-            <span className="text-neutral-500">Customer:</span> {customer_email}
-          </span>
-        ) : (
-          <span className="text-neutral-500">No email left</span>
+    <li>
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-pressed={selected}
+        className={cn(
+          'w-full rounded-lg border px-4 py-3 text-left transition-colors',
+          selected
+            ? 'border-neutral-500 bg-neutral-800/80'
+            : 'border-neutral-800 bg-neutral-900/60 hover:bg-neutral-800/50',
         )}
-        {claimed_by ? (
-          <span className="text-neutral-500">• Claimed</span>
-        ) : null}
-      </div>
+      >
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300">
+              Escalated
+            </span>
+            <span className="font-mono text-sm text-neutral-300">{id.slice(0, 8)}</span>
+            {channel ? (
+              <span className="truncate text-xs text-neutral-500">via {channel}</span>
+            ) : null}
+          </div>
+          <span className="shrink-0 text-xs text-neutral-500">
+            {escalated_at
+              ? `escalated ${relativeTime(escalated_at)}`
+              : `opened ${relativeTime(created_at)}`}
+          </span>
+        </div>
+        <div className="mt-2 flex items-center gap-3 text-xs text-neutral-400">
+          {customer_email ? (
+            <span className="truncate">
+              <span className="text-neutral-500">Customer:</span> {customer_email}
+            </span>
+          ) : (
+            <span className="text-neutral-500">No email left</span>
+          )}
+          {claimed_by ? <span className="text-neutral-500">• Claimed</span> : null}
+        </div>
+      </button>
     </li>
   )
 }

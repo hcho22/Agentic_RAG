@@ -1136,14 +1136,15 @@ Test: `python -m backend.test_us081_customer_sse` - a BRIDGE unit layer (always 
 - **Failure Indicator:** The queue gates on `role`, requires a manual refresh, or shows cross-workspace conversations.
 
 ### US-088: Queue conversation view — read transcript, reply, Resolve
+**Status:** ✅ Done — `frontend/src/components/support/ConversationDetail.tsx` (transcript + composer + Resolve) + `lib/supportQueue.ts` (`listConversationMessages`, `sendAgentReply`, `resolveConversation`); `SupportQueuePage.tsx` becomes a two-pane master/detail. Frontend-only — NO migration, NO new backend (reuses the US-082 agent-reply endpoint), NO new env; the transcript read + Resolve status flip are direct Supabase reads/writes under the agent's own JWT (US-066 RLS already permits them for a member). Security-critical data-layer contract verified end-to-end live against the local Supabase (2026-07-01, 12/12 PostgREST assertions with minted-JWT users): member reads the transcript / non-member 0; member reply INSERT accepted / cross-workspace 403; Resolve → `resolved`, `escalated_at` preserved, customer token purged, resume rejected.
 **Description:** As an agent, I want to open an escalated conversation, read its full transcript, post a reply (via the agent-reply endpoint), and click Resolve so that I can handle the handoff and close it (ADR-0004 queue posture).
 **Acceptance Criteria:**
-- [ ] Opening a conversation renders the full `conversation_messages` transcript (read under the agent's real JWT + membership RLS).
-- [ ] Reply posts to `POST /widget/conversations/{id}/agent-reply` (US-082) → backend writes + SSE-fans to the customer.
-- [ ] **Resolve** sets `status='resolved'` (terminal, US-067), which invalidates the customer token (US-071); the customer SSE for it closes.
-- [ ] `tool_calls` tree is not rendered (null/unused for widget convos).
-- [ ] Typecheck/lint passes.
-- [ ] **Verify in browser using dev-browser skill** (open transcript, send reply that reaches the widget, Resolve moves it out of the queue).
+- [x] Opening a conversation renders the full `conversation_messages` transcript (read under the agent's real JWT + membership RLS). *(`listConversationMessages` — direct Supabase SELECT under the agent JWT; `conversation_messages_select_member` RLS returns 2 rows for a member, 0 for a non-member (verified live). Only `role in (user,assistant)` turns render.)*
+- [x] Reply posts to `POST /widget/conversations/{id}/agent-reply` (US-082) → backend writes + SSE-fans to the customer. *(`sendAgentReply` forwards the agent's Supabase JWT; the endpoint writes under it and fans to the customer SSE (US-081). Member INSERT accepted / cross-workspace 403 verified live.)*
+- [x] **Resolve** sets `status='resolved'` (terminal, US-067), which invalidates the customer token (US-071); the customer SSE for it closes. *(`resolveConversation` UPDATEs only `status`; US-067 trigger allows escalated→resolved (preserving `escalated_at`), US-071 AFTER trigger purges the token — verified live: token 1→0 rows, subsequent `resume_conversation` returns nothing. Behind an explicit confirmation dialog.)*
+- [x] `tool_calls` tree is not rendered (null/unused for widget convos). *(`tool_calls`/`tool_call_id`/`name` are never selected; `system`/`tool` rows dropped client-side.)*
+- [x] Typecheck/lint passes. *(`npm run typecheck` + multi-page `npm run build` clean; `tsc` is the lint gate, no ESLint config.)*
+- [ ] **Verify in browser using dev-browser skill** (open transcript, send reply that reaches the widget, Resolve moves it out of the queue). *(Data-layer contract for every AC verified END-TO-END live via PostgREST with minted-JWT users, 12/12 assertions. The full widget UI click-through — operator reply visibly landing in a live customer widget — is the remaining manual step, deferred because standing up the widget + backend + OpenAI + a provisioned bot for a live customer session is impractical here, same posture as US-083/084/086.)*
 **Validation Test:**
 - **Setup:** Escalated conversation C with a transcript; widget open on the customer side.
 - **Steps:** 1. Open C, read transcript. 2. Send an agent reply. 3. Click Resolve. 4. Customer attempts to resume with the stored token.

@@ -298,9 +298,14 @@ Workspace members pick up the human handoffs from the authenticated in-app
 operator queue at `/support/queue` (US-087): it lists the active workspace's
 `status='escalated'` conversations, oldest-first, and live-updates them via each
 member's own Supabase Realtime under their real JWT - membership-gated, not
-role-gated (any member of the workspace, `role` in no gate). It is the list only;
-opening a conversation to reply (via `POST /widget/conversations/{id}/agent-reply`
-above) is a later story.
+role-gated (any member of the workspace, `role` in no gate). Selecting a
+conversation opens a two-pane transcript view (US-088): the agent reads the full
+`conversation_messages` transcript (a direct Supabase read under their own JWT +
+membership RLS, so a non-member reads zero rows; a light 5s poll keeps it current
+since `conversation_messages` is not on the Realtime publication), posts a reply
+(via `POST /widget/conversations/{id}/agent-reply` above), and clicks **Resolve**
+to latch the conversation to the terminal `status='resolved'` - which purges the
+customer's reconnect token (US-071) and drops the row from the queue.
 
 The bot answers only from documents a workspace owner has explicitly **published
 to the widget** - a separate, confirmed "publish to the public support widget"

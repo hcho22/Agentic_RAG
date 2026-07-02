@@ -1,5 +1,15 @@
 import { supabase } from '@/lib/supabase'
 
+// The agent-reply endpoint (US-082) is the ONE authenticated `/widget/*` route;
+// the reply is posted to the backend under the agent's real Supabase JWT (the
+// membership RLS is enforced there, under that JWT). Everything else the queue
+// touches — the escalated list, the transcript, the Resolve status flip — is a
+// direct Supabase read/write under the same JWT.
+const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000').replace(
+  /\/$/,
+  '',
+)
+
 // US-087: the operator support queue reads and live-subscribes to
 // `public.conversations` DIRECTLY under the agent's own Supabase JWT — the same
 // authenticated Realtime pattern the Ingestion list uses for `documents`
@@ -119,4 +129,91 @@ export function subscribeToConversations(
   return () => {
     void supabase.removeChannel(channel)
   }
+}
+
+// US-088: the conversation-view surface — read the transcript, reply, Resolve.
+
+export type ConversationMessageRole = 'user' | 'assistant' | 'system' | 'tool'
+
+export type ConversationMessage = {
+  id: string
+  role: ConversationMessageRole
+  content: string | null
+  created_at: string
+}
+
+// tool_calls / tool_call_id / name are intentionally NOT selected: they are
+// null/unused for widget conversations (the deflection pipeline is deterministic
+// control flow, not the agentic tool loop, US-066) and the operator transcript
+// never renders the tool-call tree (US-088 AC4).
+const MESSAGE_COLUMNS = 'id, role, content, created_at'
+
+// Reads the FULL transcript under the agent's own JWT. The
+// `conversation_messages_select_member` RLS delegates to the parent
+// conversation's workspace membership (presence only, `role` in no predicate),
+// so a non-member of the workspace reads zero rows — the same tenant boundary
+// the queue list rides. Ordered oldest-first, as the customer sees it (US-071).
+export async function listConversationMessages(
+  conversationId: string,
+): Promise<ConversationMessage[]> {
+  const { data, error } = await supabase
+    .from('conversation_messages')
+    .select(MESSAGE_COLUMNS)
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: true })
+  if (error) throw error
+  return (data ?? []) as ConversationMessage[]
+}
+
+// Posts an agent reply through the US-082 backend endpoint (the ONE
+// authenticated `/widget/*` route). The backend writes the row UNDER THE AGENT'S
+// JWT (so the membership RLS is the authorization) then fans it to the
+// customer's live SSE (US-081). We forward the caller's Supabase access token so
+// that JWT reaches the backend; a cross-workspace agent is rejected there (404).
+export async function sendAgentReply(
+  conversationId: string,
+  content: string,
+): Promise<ConversationMessage> {
+  const { data: sess } = await supabase.auth.getSession()
+  const token = sess.session?.access_token
+  if (!token) throw new Error('Not signed in.')
+
+  const res = await fetch(
+    `${BACKEND_URL}/widget/conversations/${conversationId}/agent-reply`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ content }),
+    },
+  )
+  if (!res.ok) {
+    let detail = `Reply failed (${res.status})`
+    try {
+      const body = (await res.json()) as { detail?: string }
+      if (body?.detail) detail = body.detail
+    } catch {
+      // non-JSON error body — keep the status-code fallback message.
+    }
+    throw new Error(detail)
+  }
+  const body = (await res.json()) as { message: ConversationMessage }
+  return body.message
+}
+
+// Resolve = the one-way latch into the terminal `resolved` status (US-067). The
+// UPDATE runs under the agent's JWT (`conversations_update_member` RLS) and
+// touches ONLY `status` — the US-067 BEFORE trigger enforces escalated→resolved
+// is legal, and the US-071 AFTER trigger purges the customer's opaque reconnect
+// token so the widget's stored token is invalidated (its live SSE closes on the
+// next revalidation and a resume is rejected). We never write `conversation_tokens`
+// from the client (it is deny-all RLS); the purge is a pure DB-side consequence.
+export async function resolveConversation(conversationId: string): Promise<void> {
+  const { error } = await supabase
+    .from('conversations')
+    .update({ status: 'resolved' })
+    .eq('id', conversationId)
+  if (error) throw error
 }
