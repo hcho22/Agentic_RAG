@@ -177,7 +177,7 @@ def _run_unit(main) -> int:
         state["pipeline_calls"] += 1
         return state["next"]
 
-    async def fake_escalate(http, conversation_id):
+    async def fake_escalate(http, conversation_id, *, customer_email=None):
         state["escalated"].append(conversation_id)
         return {"id": conversation_id, "status": "escalated",
                 "created_at": CREATED_AT, "workspace_id": WORKSPACE}
@@ -372,13 +372,15 @@ def _run_integration(main) -> int:
         # status the conversation reached AFTER the captured entry snapshot.
         return state["midflight_status"]
 
-    async def fake_escalate(http, conversation_id):
+    async def fake_escalate(http, conversation_id, *, customer_email=None):
         # Simulate the US-067 trigger: stamp escalated_at ONCE, preserve afterward.
         state["escalate_calls"] += 1
         row = state["conversation"]
         if row.get("escalated_at") is None:
             row["escalated_at"] = ESCALATED_AT
         row["status"] = "escalated"
+        if customer_email:  # US-092: fold in an optional follow-up email if left.
+            row["customer_email"] = customer_email
         return dict(row)
 
     async def fake_run_pipeline(**kwargs):

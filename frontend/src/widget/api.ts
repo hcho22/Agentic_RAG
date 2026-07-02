@@ -142,7 +142,8 @@ export async function* streamWidgetMessage(opts: {
 }
 
 export interface EscalateResult {
-  /** HTTP status, or 0 on a network error. A 401 means the token is dead. */
+  /** HTTP status, or 0 on a network error. A 401 means the token is dead; a 400
+   *  means the OPTIONAL email was malformed (US-092). */
   status: number
   conversation?: PublicConversation
 }
@@ -155,17 +156,29 @@ export interface EscalateResult {
  * `status='escalated'` and the bot goes silent thereafter; every later customer
  * message routes to the human queue. A missing/expired/resolved token → 401 (the
  * cue to start fresh); a latch-write failure → 502.
+ *
+ * US-092: `email` is an OPTIONAL follow-up address ("leave your email and a human
+ * will follow up") sent as `customer_email` metadata for MANUAL follow-up (v1 sends
+ * no automated email). It NEVER gates the handoff — a blank/omitted email still
+ * escalates; a malformed one comes back 400 so the caller can prompt a fix. The
+ * escalate is idempotent, so calling it purely to attach an email to an
+ * already-escalated (e.g. model-mediated) conversation is safe.
  */
 export async function escalateConversation(opts: {
   apiBase: string
   token: string
+  email?: string | null
 }): Promise<EscalateResult> {
-  const { apiBase, token } = opts
+  const { apiBase, token, email } = opts
   let res: Response
   try {
     res = await fetch(`${apiBase}/widget/conversations/escalate`, {
       method: 'POST',
-      headers: { [CONVERSATION_TOKEN_HEADER]: token },
+      headers: {
+        'Content-Type': 'application/json',
+        [CONVERSATION_TOKEN_HEADER]: token,
+      },
+      body: JSON.stringify({ customer_email: email ?? null }),
     })
   } catch {
     return { status: 0 }

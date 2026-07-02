@@ -21,6 +21,11 @@
 const SESSION_PREFIX = 'ar-support:session:'
 const TOKEN_PREFIX = 'ar-support:token:'
 const CONVERSATION_PREFIX = 'ar-support:conversation:'
+// US-092: remembers that the customer already left (or dismissed) the optional
+// follow-up email for a given conversation, so a reload of a still-escalated
+// conversation does not re-nag. Keyed by conversation id — a fresh conversation
+// prompts again.
+const ESCALATION_EMAIL_PREFIX = 'ar-support:escalation-email:'
 
 /** Best-effort localStorage; private-mode / disabled storage degrades to no-op. */
 function safeGet(key: string): string | null {
@@ -93,4 +98,19 @@ export function setConversationId(publicKey: string, conversationId: string): vo
 export function clearConversation(publicKey: string): void {
   safeRemove(TOKEN_PREFIX + publicKey)
   safeRemove(CONVERSATION_PREFIX + publicKey)
+}
+
+/**
+ * US-092: whether the customer has already handled (submitted or dismissed) the
+ * optional follow-up email prompt for this escalated conversation. Best-effort — a
+ * private-mode no-op just means the prompt may reappear on reload, which is harmless
+ * (the email stays optional). Keyed by conversation id, not the public key, so a
+ * brand-new conversation prompts afresh.
+ */
+export function isEscalationEmailHandled(conversationId: string): boolean {
+  return safeGet(ESCALATION_EMAIL_PREFIX + conversationId) !== null
+}
+
+export function markEscalationEmailHandled(conversationId: string): void {
+  safeSet(ESCALATION_EMAIL_PREFIX + conversationId, '1')
 }

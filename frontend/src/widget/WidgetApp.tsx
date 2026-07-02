@@ -5,7 +5,12 @@ import {
   type WidgetInitConfig,
   type WidgetToHostMessage,
 } from './protocol'
-import { getSessionId } from './storage'
+import {
+  getConversationId,
+  getSessionId,
+  isEscalationEmailHandled,
+  markEscalationEmailHandled,
+} from './storage'
 import { useConversation, type WidgetMessage } from './useConversation'
 
 // US-083 + US-084: the cross-origin iframe support widget.
@@ -185,6 +190,19 @@ function WidgetSurface({
 
           {error && <div className="sw-error">{error}</div>}
 
+          {/* US-091 "talk to a human" + US-092 optional follow-up email, in one panel
+              between the transcript and the composer. Offered while ACTIVE (customer-
+              initiated) AND after a model-mediated escalate (to still collect an
+              email); it self-hides once handled/resolved. */}
+          <EscalationControls
+            brand={brand}
+            publicKey={config.publicKey}
+            status={status}
+            canEscalate={status === 'active' && hasConversation}
+            escalating={escalating}
+            onEscalate={escalate}
+          />
+
           <Composer
             brand={brand}
             disabled={sending || resolved}
@@ -192,13 +210,6 @@ function WidgetSurface({
             throttleSecondsLeft={throttleSecondsLeft}
             resolved={resolved}
             onSend={send}
-            // US-091: the "talk to a human" control lives at the top of the composer
-            // footer. It is offered only for an ACTIVE conversation that already
-            // exists on the server; once escalated (or resolved) it disappears and the
-            // MessageList shows the "a team member will reply here shortly" note.
-            canEscalate={status === 'active' && hasConversation}
-            escalating={escalating}
-            onEscalate={escalate}
           />
         </section>
       )}
@@ -295,6 +306,187 @@ function TypingDots() {
   )
 }
 
+// US-091 "talk to a human" + US-092 optional follow-up email, in one panel.
+//
+// The email is surfaced ONLY at the escalation moment, NEVER as a pre-chat wall,
+// and NEVER gates the handoff (a blank email still escalates). Two entry points,
+// one form:
+//   * ACTIVE (customer-initiated, US-091): "Talk to a human" reveals the form; the
+//     email is optional and "Connect me" escalates with or without it.
+//   * ESCALATED (e.g. the bot escalated on its own): the form appears once so the
+//     customer can still leave a follow-up email, then steps aside for the
+//     MessageList's "a team member will reply here shortly" note.
+// v1 sends NO automated email — the address is stored as metadata and shown to the
+// agent in the operator queue (US-087) for manual follow-up.
+function EscalationControls({
+  brand,
+  publicKey,
+  status,
+  canEscalate,
+  escalating,
+  onEscalate,
+}: {
+  brand: string
+  publicKey: string
+  status: string
+  canEscalate: boolean
+  escalating: boolean
+  onEscalate: (email?: string | null) => Promise<'ok' | 'invalid' | 'error'>
+}) {
+  const [mode, setMode] = useState<'idle' | 'form' | 'done'>('idle')
+  const [email, setEmail] = useState('')
+  const [emailError, setEmailError] = useState<string | null>(null)
+  // Seed "already handled" from storage for the CURRENT conversation so a reload of a
+  // still-escalated conversation does not re-nag; best-effort (private-mode safe).
+  const [handled, setHandled] = useState(() => {
+    const id = getConversationId(publicKey)
+    return id ? isEscalationEmailHandled(id) : false
+  })
+
+  // When a (new) conversation is active, re-derive the handled flag + reset the form
+  // so a prior conversation's "handled" state never suppresses a later escalation's
+  // email prompt within one widget mount. Only fires on a transition INTO active, so
+  // it never resets a form the customer is mid-way through (status stays 'active').
+  useEffect(() => {
+    if (status !== 'active') return
+    const id = getConversationId(publicKey)
+    setHandled(id ? isEscalationEmailHandled(id) : false)
+    setMode('idle')
+  }, [status, publicKey])
+
+  const markHandled = () => {
+    const id = getConversationId(publicKey)
+    if (id) markEscalationEmailHandled(id)
+    setHandled(true)
+  }
+
+  const doEscalate = async (emailArg: string | null) => {
+    setEmailError(null)
+    const outcome = await onEscalate(emailArg)
+    if (outcome === 'ok') {
+      markHandled()
+      setMode('done')
+    } else if (outcome === 'invalid') {
+      setEmailError('Please enter a valid email address.')
+    }
+    // 'error' → the hook surfaced a global error; keep the form open for a retry.
+  }
+
+  if (status === 'resolved') return null
+
+  const escalated = status === 'escalated'
+  // Nothing to escalate yet (no conversation) and not escalated → render nothing.
+  if (!escalated && !canEscalate) return null
+  // Escalated + already handled/completed → step aside for the "reply shortly" note.
+  if (escalated && (handled || mode === 'done')) return null
+
+  // ACTIVE + not-yet-opened → the "talk to a human" call to action (US-091).
+  if (!escalated && mode !== 'form') {
+    return (
+      <div className="sw-escalate">
+        <button
+          type="button"
+          className="sw-escalate__cta"
+          onClick={() => {
+            setEmail('')
+            setEmailError(null)
+            setMode('form')
+          }}
+        >
+          Talk to a human
+        </button>
+      </div>
+    )
+  }
+
+  // The optional-email form. ACTIVE → the escalation step itself (email optional,
+  // "Connect me"); ESCALATED → collect a follow-up email after the fact ("Send", or
+  // skip). The primary action never requires an email except the escalated "Send"
+  // (where a blank field is meaningless — use "No thanks" to skip).
+  const busy = escalating
+  const trimmed = email.trim()
+  return (
+    <div className="sw-escalate sw-escalate--form">
+      <div className="sw-escalate__title">
+        {escalated ? 'A team member will follow up' : 'Talk to a human'}
+      </div>
+      <label className="sw-escalate__label" htmlFor="sw-escalate-email">
+        Leave your email and we’ll follow up (optional)
+      </label>
+      <input
+        id="sw-escalate-email"
+        className="sw-escalate__input"
+        type="email"
+        inputMode="email"
+        autoComplete="email"
+        placeholder="you@example.com"
+        value={email}
+        disabled={busy}
+        onChange={(e) => {
+          setEmail(e.target.value)
+          if (emailError) setEmailError(null)
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter') return
+          e.preventDefault()
+          if (escalated) {
+            if (trimmed) void doEscalate(trimmed)
+          } else {
+            void doEscalate(trimmed || null)
+          }
+        }}
+      />
+      {emailError && <div className="sw-escalate__error">{emailError}</div>}
+      <div className="sw-escalate__actions">
+        {escalated ? (
+          <>
+            <button
+              type="button"
+              className="sw-escalate__secondary"
+              onClick={() => {
+                markHandled()
+                setMode('done')
+              }}
+              disabled={busy}
+            >
+              No thanks
+            </button>
+            <button
+              type="button"
+              className="sw-escalate__primary"
+              style={{ background: brand }}
+              onClick={() => void doEscalate(trimmed)}
+              disabled={busy || !trimmed}
+            >
+              {busy ? 'Sending…' : 'Send'}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="sw-escalate__secondary"
+              onClick={() => setMode('idle')}
+              disabled={busy}
+            >
+              Not now
+            </button>
+            <button
+              type="button"
+              className="sw-escalate__primary"
+              style={{ background: brand }}
+              onClick={() => void doEscalate(trimmed || null)}
+              disabled={busy}
+            >
+              {busy ? 'Connecting…' : 'Connect me'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function Composer({
   brand,
   disabled,
@@ -302,9 +494,6 @@ function Composer({
   throttleSecondsLeft,
   resolved,
   onSend,
-  canEscalate,
-  escalating,
-  onEscalate,
 }: {
   brand: string
   disabled: boolean
@@ -312,9 +501,6 @@ function Composer({
   throttleSecondsLeft: number
   resolved: boolean
   onSend: (text: string) => void
-  canEscalate: boolean
-  escalating: boolean
-  onEscalate: () => void
 }) {
   const [value, setValue] = useState('')
   const blocked = disabled || throttled || resolved
@@ -328,16 +514,6 @@ function Composer({
 
   return (
     <div className="sw-composer">
-      {canEscalate && (
-        <button
-          type="button"
-          className="sw-escalate"
-          onClick={onEscalate}
-          disabled={escalating}
-        >
-          {escalating ? 'Connecting you to a person…' : 'Talk to a human'}
-        </button>
-      )}
       {throttled && (
         <div className="sw-composer__hint">
           Too many messages - try again in {throttleSecondsLeft}s.

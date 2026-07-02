@@ -1198,11 +1198,11 @@ Test: `python -m backend.test_us081_customer_sse` - a BRIDGE unit layer (always 
 ### US-092: `customer_email` collected at escalation (optional, never a gate)
 **Description:** As a customer, I want to optionally leave my email at the point of escalation ("leave your email and a human will follow up") so that an agent can follow up manually if I leave — never a pre-chat email wall and never required to escalate (ADR-0004; v1 no ESP).
 **Acceptance Criteria:**
-- [ ] An optional email field is surfaced AT escalation (not before; no pre-chat email wall); escalation proceeds with or without it.
-- [ ] `customer_email` is stored on `conversations` as metadata only — NEVER a retrieval principal; shown to the agent in the queue for manual follow-up.
-- [ ] v1 sends NO automated email (no ESP integration); the field is for manual follow-up.
-- [ ] Typecheck/lint passes.
-- [ ] **Verify in browser using dev-browser skill** (email prompt appears only at escalation; escalation succeeds when left blank).
+- [x] An optional email field is surfaced AT escalation (not before; no pre-chat email wall); escalation proceeds with or without it.
+- [x] `customer_email` is stored on `conversations` as metadata only — NEVER a retrieval principal; shown to the agent in the queue for manual follow-up.
+- [x] v1 sends NO automated email (no ESP integration); the field is for manual follow-up.
+- [x] Typecheck/lint passes.
+- [x] **Verify in browser using dev-browser skill** (email prompt appears only at escalation; escalation succeeds when left blank).
 **Validation Test:**
 - **Setup:** Active conversation C.
 - **Steps:** 1. Escalate C without entering an email. 2. Escalate a second conversation with an email entered. 3. View both in the queue.

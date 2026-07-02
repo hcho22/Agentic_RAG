@@ -58,8 +58,14 @@ export interface ConversationState {
   /** True while an explicit US-091 escalation request is in flight. */
   escalating: boolean
   send: (text: string) => Promise<void>
-  /** US-091: explicitly escalate to a human ("talk to a human" button). */
-  escalate: () => Promise<void>
+  /**
+   * US-091: explicitly escalate to a human ("talk to a human" button). US-092: an
+   * OPTIONAL follow-up email may be passed; it never gates the handoff. Resolves to
+   * the outcome so the caller can keep an email form open on a malformed value:
+   * 'ok' (latched, any email stored), 'invalid' (email malformed — 400, not
+   * latched), or 'error' (token dead / network / transient).
+   */
+  escalate: (email?: string | null) => Promise<'ok' | 'invalid' | 'error'>
 }
 
 function toWidgetMessages(rows: TranscriptMessage[]): WidgetMessage[] {
@@ -320,35 +326,48 @@ export function useConversation(publicKey: string): ConversationState {
   // latch (never a model tool) - it flips the conversation to `escalated` via the
   // US-080 endpoint, after which the bot stays silent and later messages route to the
   // human queue. Requires an existing conversation (a token); it never creates one.
-  const escalate = useCallback(async () => {
-    if (escalatingRef.current) return
-    const token = getConversationToken(publicKey)
-    if (!token) return // no conversation to escalate yet
-    setEscalating(true)
-    setError(null)
-    try {
-      const res = await escalateConversation({ apiBase, token })
-      if (res.status === 200) {
-        // Latched. Reflect `escalated` so the bot goes silent and the composer keeps
-        // routing later messages to the human queue. Fall back to 'escalated' if the
-        // (2xx) body was unreadable - the latch still happened.
-        setStatus(res.conversation?.status ?? 'escalated')
-      } else if (res.status === 401) {
-        // The token died (expired/resolved) before we could escalate. Clear it and
-        // let the next send start fresh - don't dead-end the customer.
-        clearConversation(publicKey)
-        conversationIdRef.current = null
-        setHasConversation(false)
-        setError('This conversation has ended. Send a message to start a new one.')
-      } else if (res.status === 429) {
-        setError('You are sending requests too quickly. Please wait a moment.')
-      } else {
-        setError('Could not connect you to a person. Please try again.')
+  // US-092: an OPTIONAL follow-up email may ride along - metadata only, never a gate.
+  const escalate = useCallback(
+    async (email?: string | null): Promise<'ok' | 'invalid' | 'error'> => {
+      if (escalatingRef.current) return 'error'
+      const token = getConversationToken(publicKey)
+      if (!token) return 'error' // no conversation to escalate yet
+      setEscalating(true)
+      setError(null)
+      try {
+        const res = await escalateConversation({ apiBase, token, email })
+        if (res.status === 200) {
+          // Latched. Reflect `escalated` so the bot goes silent and the composer keeps
+          // routing later messages to the human queue. Fall back to 'escalated' if the
+          // (2xx) body was unreadable - the latch still happened.
+          setStatus(res.conversation?.status ?? 'escalated')
+          return 'ok'
+        }
+        if (res.status === 400) {
+          // US-092: the OPTIONAL email was malformed. The handoff is NOT latched;
+          // surface it inline (via the return) so the form stays open for a fix. A
+          // blank email never reaches here - it is sent as null and always escalates.
+          return 'invalid'
+        }
+        if (res.status === 401) {
+          // The token died (expired/resolved) before we could escalate. Clear it and
+          // let the next send start fresh - don't dead-end the customer.
+          clearConversation(publicKey)
+          conversationIdRef.current = null
+          setHasConversation(false)
+          setError('This conversation has ended. Send a message to start a new one.')
+        } else if (res.status === 429) {
+          setError('You are sending requests too quickly. Please wait a moment.')
+        } else {
+          setError('Could not connect you to a person. Please try again.')
+        }
+        return 'error'
+      } finally {
+        setEscalating(false)
       }
-    } finally {
-      setEscalating(false)
-    }
-  }, [apiBase, publicKey])
+    },
+    [apiBase, publicKey],
+  )
 
   return {
     messages,

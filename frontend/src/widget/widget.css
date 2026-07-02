@@ -262,13 +262,18 @@ body {
   padding: 0 2px 8px;
 }
 
-/* US-091: the explicit "talk to a human" control, at the top of the composer
-   footer. A subtle secondary button so it reads as a fallback, not the primary
-   action; it disappears once the conversation escalates. */
+/* US-091 "talk to a human" + US-092 optional follow-up email — a panel between the
+   transcript and the composer. `.sw-escalate` is the container; `.sw-escalate__cta`
+   is the subtle secondary button so it reads as a fallback, not the primary action;
+   `.sw-escalate--form` is the inline email card shown at escalation. */
 .sw-escalate {
+  flex: none;
+  padding: 8px 12px 0;
+}
+
+.sw-escalate__cta {
   display: block;
   width: 100%;
-  margin-bottom: 8px;
   padding: 7px 12px;
   background: #f8fafc;
   border: 1px solid #e2e8f0;
@@ -281,19 +286,115 @@ body {
   transition: background 0.12s ease, border-color 0.12s ease;
 }
 
-.sw-escalate:hover:not(:disabled) {
+.sw-escalate__cta:hover:not(:disabled) {
   background: #f1f5f9;
   border-color: #cbd5e1;
 }
 
-.sw-escalate:focus-visible {
+.sw-escalate__cta:focus-visible {
   outline: 2px solid #94a3b8;
   outline-offset: 1px;
 }
 
-.sw-escalate:disabled {
+.sw-escalate__cta:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* US-092: the optional follow-up email card, surfaced only at escalation. */
+.sw-escalate--form {
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  margin: 8px 12px 0;
+}
+
+.sw-escalate__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.sw-escalate__label {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.sw-escalate__input {
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 8px 11px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.sw-escalate__input:focus {
+  border-color: #94a3b8;
+}
+
+.sw-escalate__input:disabled {
+  background: #f1f5f9;
+  cursor: default;
+}
+
+.sw-escalate__error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #b91c1c;
+}
+
+.sw-escalate__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.sw-escalate__secondary {
+  padding: 7px 12px;
+  background: transparent;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  color: #64748b;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.sw-escalate__secondary:hover:not(:disabled) {
+  background: #f1f5f9;
+}
+
+.sw-escalate__primary {
+  padding: 7px 14px;
+  border: none;
+  border-radius: 10px;
+  color: #ffffff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sw-escalate__primary:disabled,
+.sw-escalate__secondary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.sw-escalate__primary:focus-visible,
+.sw-escalate__secondary:focus-visible {
+  outline: 2px solid #94a3b8;
+  outline-offset: 1px;
 }
 
 .sw-composer__row {

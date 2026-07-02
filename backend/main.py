@@ -32,7 +32,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from langsmith import traceable
@@ -3900,8 +3900,43 @@ async def _load_conversation_status(
     return rows[0].get("status")
 
 
+# US-092: an OPTIONAL follow-up email the customer may leave AT escalation
+# ("leave your email and a human will follow up"). It is metadata only — stored on
+# `conversations.customer_email` (US-066) and shown to the agent in the queue
+# (US-087), NEVER a retrieval principal and NEVER an auth identity. Validation is
+# deliberately light (the field is for a human to eyeball, not a machine to trust):
+# strip, cap length, and require a minimal `local@domain.tld` shape so an obvious
+# typo is caught. 254 is the RFC 5321 forward-path maximum.
+_CUSTOMER_EMAIL_MAX_LEN = 254
+_CUSTOMER_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _normalize_customer_email(raw: str | None) -> str | None:
+    """Normalize an OPTIONAL customer email left at escalation, or raise 400.
+
+    Returns None for a missing/blank value — escalation proceeds with no email; the
+    field NEVER gates the handoff (US-092 AC: "escalation proceeds with or without
+    it", and the failure indicator is escalation being blocked when the email is
+    blank). A non-blank value is trimmed and shape-checked; a clearly-malformed one
+    raises HTTP 400 so the widget can prompt a fix (a typo'd address is worse than
+    none for manual follow-up). This is contact metadata, not a credential, so the
+    check stays intentionally permissive on the local/domain parts.
+    """
+    if raw is None:
+        return None
+    email = raw.strip()
+    if not email:
+        return None
+    if len(email) > _CUSTOMER_EMAIL_MAX_LEN or not _CUSTOMER_EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="please enter a valid email address")
+    return email
+
+
 async def _escalate_conversation(
-    http: httpx.AsyncClient, conversation_id: str
+    http: httpx.AsyncClient,
+    conversation_id: str,
+    *,
+    customer_email: str | None = None,
 ) -> dict | None:
     """US-080: latch a conversation to `status='escalated'` (service-role PATCH).
 
@@ -3923,18 +3958,31 @@ async def _escalate_conversation(
     conversation creation, US-078). The conversation id is one the caller already
     resolved (a created row, or a token-resolved resume) — never caller-supplied.
 
+    US-092: an OPTIONAL `customer_email` (already normalized/validated by the caller
+    via `_normalize_customer_email`) is folded into the SAME PATCH when present, so
+    the customer's follow-up contact is captured at the escalation moment. It is set
+    ONLY when non-blank — a no-email escalation writes exactly `{"status":
+    "escalated"}` (the US-080 invariant), and a later no-email re-escalate never
+    nulls an email left on an earlier one. The in-turn (model-mediated / breaker)
+    latch never passes an email; only the explicit "talk to a human" surface does.
+
     Returns the updated row (for the explicit endpoint's response view), or None if
     no row matched (a vanished conversation — caller decides how to fall back).
     RAISES on a write failure: the explicit-escalate endpoint surfaces it to the UI,
     while the in-turn callers wrap it with `_escalate_conversation_safe`.
     """
     headers = _require_service_role_headers()
+    # ONLY status — escalated_at is the US-067 trigger's to set/preserve. The
+    # OPTIONAL US-092 customer_email is added only when present, so the no-email
+    # path is byte-identical to before and never clobbers a prior email with null.
+    payload: dict[str, Any] = {"status": "escalated"}
+    if customer_email:
+        payload["customer_email"] = customer_email
     r = await http.patch(
         f"{SUPABASE_URL}/rest/v1/conversations",
         params={"id": f"eq.{conversation_id}"},
         headers=headers,
-        # ONLY status — escalated_at is the US-067 trigger's to set/preserve.
-        json={"status": "escalated"},
+        json=payload,
     )
     r.raise_for_status()
     rows = r.json()
@@ -4375,12 +4423,21 @@ async def widget_conversation_message(
     )
 
 
+class WidgetEscalateRequest(BaseModel):
+    # US-092: an OPTIONAL follow-up email the customer may leave AT escalation. The
+    # whole body is optional (a plain escalate sends none), so this defaults to None
+    # and the endpoint accepts a bodyless POST. Never required — the field must never
+    # gate the handoff.
+    customer_email: str | None = None
+
+
 @app.post("/widget/conversations/escalate")
 async def widget_conversation_escalate(
     request: Request,
     x_conversation_token: str | None = Header(
         default=None, alias=_CONVERSATION_TOKEN_HEADER
     ),
+    req: WidgetEscalateRequest | None = Body(default=None),
 ) -> dict:
     """US-080: explicit user-initiated "talk to a human" escalation.
 
@@ -4401,9 +4458,24 @@ async def widget_conversation_escalate(
     latch is owned by the US-067 DB trigger; escalating an already-escalated
     conversation is an idempotent no-op. A latch-write failure surfaces (502) so the
     button can prompt a retry — unlike the in-turn best-effort latch.
+
+    US-092: an OPTIONAL `customer_email` in the body ("leave your email and a human
+    will follow up") is captured at the escalation moment as metadata for manual
+    follow-up — never a retrieval principal, never an auth identity, and NEVER a gate
+    (a blank/omitted email still escalates; the widget only surfaces this AT
+    escalation, never as a pre-chat wall). A clearly-malformed non-blank value is a
+    400 so the widget can prompt a fix. v1 sends NO automated email (no ESP); the
+    agent sees the address in the US-087 queue and follows up by hand. Because the
+    same endpoint serves both the US-091 "talk to a human" escalate-with-email and
+    the model-mediated case (where the customer leaves an email AFTER the bot already
+    escalated), the idempotent re-latch simply records the email.
     """
     if not x_conversation_token:
         raise HTTPException(status_code=401, detail="missing conversation token")
+    # Validate the OPTIONAL email up front (cheap, no I/O) — mirrors how the message
+    # endpoint validates its body before opening the HTTP client. A blank/omitted
+    # email normalizes to None and never blocks the handoff.
+    customer_email = _normalize_customer_email(req.customer_email if req else None)
     async with httpx.AsyncClient(timeout=10.0) as http:
         await _enforce_widget_session_limit(request)
         conv = await _resume_conversation_by_token(http, x_conversation_token)
@@ -4412,7 +4484,9 @@ async def widget_conversation_escalate(
                 status_code=401, detail="invalid or expired conversation token"
             )
         try:
-            updated = await _escalate_conversation(http, conv["id"])
+            updated = await _escalate_conversation(
+                http, conv["id"], customer_email=customer_email
+            )
         except httpx.HTTPError as e:
             # The strict latch failed (the user pressed a button; surface it so the
             # UI can retry) — distinct from the in-turn best-effort latch.
