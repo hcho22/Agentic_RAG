@@ -122,7 +122,7 @@ supabase/               Migrations + local CLI config
 evals/retrieval/        50-question golden set + E7 escalation golden set + runners + CI workflow integration
 evals/permissions_scale/ Wikipedia 10k corpus benchmark + nightly workflow
 evals/structured_rag/   Text-to-SQL eval
-evals/gate/             Gate-class registry (US-101) + pinned-security loader/asserts (US-102): security outputs are pinned-fail, un-downgradable, silenced only by deleting the eval
+evals/gate/             Gate-class registry (US-101) + pinned-security loader/asserts (US-102): security outputs are pinned-fail, un-downgradable, silenced only by deleting the eval; buyer-authored gate.yaml declaration carries the RAGAS gates' project bindings (cells/thresholds/cross-family judge map, US-103)
 db_seed/                Deterministic seeders for the eval corpora
 docs/                   Long-form writeups (evals, structured RAG, permissions-aware RAG)
 .github/workflows/      PR + nightly eval workflows

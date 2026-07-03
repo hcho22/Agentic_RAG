@@ -1,0 +1,68 @@
+# US-103 (Epic F, ADR-0005): the kit's DEFAULT gate declaration.
+#
+# This file is the buyer-authored home for the eval gate's project bindings — the
+# cells to gate, the cross-family judge map, and the threshold constants that
+# `evals/retrieval/ragas_gates.py` used to hardcode. The detection ALGORITHMS
+# (fixed floors, rolling-median drift, cross-family corroboration, single-judge-
+# red, severity, auto_close_weeks) are unchanged; only these *bindings* are
+# declarative, so a buyer describes THEIR eval shape without forking the detector.
+#
+# The values below reproduce today's `ragas_gates` constants EXACTLY, so shipping
+# this default declaration is byte-identical to the legacy hardcoded gate (the
+# US-103 regression guard, pinned by `evals/gate/test_gate_bindings.py`). A buyer
+# ships their own gate.yaml beside their golden set and edits these values.
+#
+# The `verdicts:` section (US-102/US-104) is intentionally OMITTED here: every
+# quality output then takes its registry default (`comment`), and the security
+# invariants (E4/E6/AU4/E7-P1b) are pinned `fail` and carry no knob at all — a
+# verdict on one is a hard load error (silence only by deletion). See
+# `evals/gate/declaration.py`.
+
+bindings:
+  # The cells the RAGAS gates run over — today the two pre_filter cells that carry
+  # new RAGAS signal (`ragas.RAGAS_CELL_IDS`). Buyer-defined: list YOUR cells here.
+  cells:
+    - "full_access:pre_filter"
+    - "partial_access:pre_filter"
+
+  # Fixed operational floors + rolling-window parameters. Reproduce the FR-8/9/10
+  # constants: coverage floor 0.96, API-error ceiling 2, 5pp drift band, a 0.05
+  # RAGAS-drop trigger, and the minimum snapshot windows the drift/score gates need.
+  thresholds:
+    coverage_floor: 0.96
+    api_error_ceiling: 2
+    coverage_drift_pp: 0.05
+    ragas_drop: 0.05
+    min_drift_history: 3
+    min_regression_history: 4
+
+  # Cross-family corroboration (OPTIONAL). The RAGAS scores are judged by the
+  # OpenAI family (gpt-4o-mini — the same family as the answer generator); the
+  # independent corroborating judge is the Claude/Anthropic family. Because the
+  # two families DIFFER, corroboration is enabled: a RAGAS drop the Claude judge
+  # confirms in the same cell escalates to red, while an uncorroborated drop stays
+  # yellow. `context_precision` / `context_recall` have no entry here, so they fire
+  # single-judge-red on a RAGAS drop.
+  #
+  # Omit this whole block — or set judge_family == generator_family — to run
+  # single-family: every RAGAS drop then degrades to single-judge-red (a weaker,
+  # non-independent proof; see US-109). The judge_cell must be one of the `cells`
+  # above, each judge_equivalent key must be a real RAGAS metric, and each
+  # judge_metric value must name a Claude judge metric (`faithfulness` or
+  # `helpfulness`) — a typo in any of them is a hard load error, never a silent skip.
+  #
+  # NOTE: unlike `cells` and `thresholds`, corroboration is NOT inherited from the
+  # default when omitted. A custom `bindings:` block that leaves this block out
+  # runs single-family / single-judge-red - re-declare the whole `corroboration:`
+  # block here to keep cross-family corroboration.
+  corroboration:
+    generator_family: openai
+    judge_family: anthropic
+    judge_cell: "full_access:pre_filter"
+    judge_equivalent:
+      faithfulness:
+        judge_metric: faithfulness
+        drop: 0.3
+      answer_relevancy:
+        judge_metric: helpfulness
+        drop: 0.2

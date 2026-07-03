@@ -116,6 +116,8 @@ RAGAS ships *alongside* the existing custom Claude judge, not as a replacement �
 - **Score gates roll; operational gates stay fixed.** Operational gates (effective coverage, API errors) use *fixed* thresholds: a degraded pipeline must never quietly redefine "normal." Score gates (the metric values themselves) use a *rolling 4-week median*: a real, sustained quality improvement *should* rebaseline, so it is not later mistaken for a regression. Adapting to degradation is the failure mode to avoid; adapting to genuine improvement is correct — hence the split.
 - **Cross-family corroboration for red.** A RAGAS Faithfulness or Answer Relevancy drop escalates to a red alert only when the independent cross-family Claude judge shows the same drop in the same cell; an uncorroborated single-judge drop stays yellow. Two independent observations agreeing is a far stronger signal than one, and the rule keeps single-judge noise from paging anyone. Context Precision and Context Recall have no Claude equivalent to corroborate against, so a drop there fires `single-judge-red` — still red, but tagged so a reader knows it rests on one judge, and given a longer 2-week auto-close window since there is no second judge to clear it sooner.
 
+These cell, threshold, and corroboration values are the kit defaults declared in `evals/gate/gate.yaml` (US-103, § 6): the gate *algorithms* above are fixed, but their *bindings* are buyer-configurable in that declaration, so a buyer points the same gates at their own cells / thresholds / judge families without forking `evals/retrieval/ragas_gates.py`.
+
 **Determinism caveat.** OpenAI embeddings and LLM outputs are not strictly bit-deterministic across calls, and RAGAS adds its own judge LLM on top. RAGAS scores jitter by a few points across runs even on unchanged inputs — which is exactly why the gates compare against a rolling *median* with absolute thresholds wide enough to clear that jitter, rather than treating any week-to-week wobble as a regression.
 
 ## 4. Example: detecting a regression
@@ -228,6 +230,13 @@ Second, the security invariants are evaluated as **binary asserts**, not thresho
 This closes a real gap - the `security_no_access` table was *rendered* in the summary but never hard-asserted - and now fails the build exactly the way an E6 cross-workspace leak already does (the sibling E6 / AU4 / E7-P1b asserts live at their own call sites; this module owns only the E4 table).
 Like E6, the gate also refuses a **vacuous** pass: when a `no_access` viewer was requested but its sweep produced zero cells (a dropped `no_access` block, a misconfigured sweep), `evals/gate/security.py:e4_structurally_blind` fails the run non-zero rather than let the pinned invariant exit `0` without ever asserting - the "gate silently off" failure US-102 forbids (a no-op when `no_access` was not requested at all, e.g. `--viewers full`).
 Run the tests with `python -m evals.gate.test_pinned_security`.
+
+**Project bindings in a buyer-authored declaration (US-103, Epic F).**
+The same gate declaration also carries the RAGAS gates' *project bindings* under a `bindings:` section that `evals/gate/gate.yaml` ships as the kit default: the cells to gate, the threshold constants (the −0.05 RAGAS drop, the 0.96 coverage floor, the API-error ceiling, the coverage-drift band, the minimum rolling-window sizes), and the cross-family judge map / cell.
+The detection *algorithms* in `evals/retrieval/ragas_gates.py` (fixed floors, rolling-median drift, cross-family corroboration, `single-judge-red`, severity, `auto_close_weeks`) are unchanged; only these bindings moved out of module constants into a `GateBindings` config object the three detection functions take, so a buyer describes *their* cells / thresholds / judge families without forking the detector.
+The shipped `gate.yaml` reproduces today's constants byte-for-byte, so the declaration-driven path is identical to the legacy hardcoded one; an unknown cell / metric / section is a hard load error, never a silent skip.
+Cross-family corroboration is the one binding that is *not* inherited when omitted: a custom `bindings:` block that leaves out the `corroboration:` sub-block (or sets `judge_family == generator_family`) runs single-family, degrading every RAGAS drop to `single-judge-red` (AC4).
+Run the tests with `python -m evals.gate.test_gate_bindings`.
 
 ### The accepted detection-latency gap (F3 / P5)
 

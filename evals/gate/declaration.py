@@ -17,15 +17,23 @@ downgrade. This is what makes "the security gates cannot be turned off, and here
 is the eval that proves it" a true statement a buyer's security reviewer can
 audit.
 
-Scope discipline (this is US-102, not US-103/104/105):
+Scope discipline (US-102 + US-103):
 
-* This loader validates ONLY the ``verdicts:`` section — the tunable loudness map.
-  US-103 extends the schema with the detection *bindings* (cells, judge map,
-  threshold constants) as additional top-level sections; US-104 adds the
-  ``(severity, knob) -> action`` verdict function that consumes ``verdicts``;
-  US-105 adds the per-PR-vs-scheduled determinism check. Each extends
-  ``_KNOWN_SECTIONS`` / this dataclass; none of them may relax the security pin
-  below.
+* US-102 owns the ``verdicts:`` section — the tunable loudness map — and the
+  security pin (a ``security``-class output can never carry a verdict).
+* US-103 adds the ``bindings:`` section — the detection layer's project-specific
+  bindings (cells, the cross-family judge map / cell, threshold constants) that
+  ``evals.retrieval.ragas_gates`` used to hardcode as module constants. This
+  loader parses them into a :class:`~evals.retrieval.ragas_gates.GateBindings`
+  (the object the three detection functions take), with a hard error on an
+  unknown cell / metric / section (no silent skip). The default declaration
+  reproduces today's constants byte-for-byte, so the genericized path is
+  identical to the legacy one (the regression guard lives in
+  ``evals/gate/test_gate_bindings.py``).
+* Still to come: US-104 adds the ``(severity, knob) -> action`` verdict function
+  that consumes ``verdicts``; US-105 adds the per-PR-vs-scheduled determinism
+  check. Each extends ``_KNOWN_SECTIONS`` / this dataclass; none may relax the
+  security pin.
 * A verdict key is a registered **eval-output name** (matching US-102's own
   validation test, which authors ``E4_zero_leak: off``). US-104 layers the
   per-suite grouping on top of this per-output map; a security-output key stays
@@ -40,7 +48,7 @@ Run the tests: ``python -m evals.gate.test_pinned_security``
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Union
 
@@ -50,12 +58,46 @@ from evals.gate.classes import (
     gate_class,
     is_registered,
 )
+from evals.retrieval.ragas import RAGAS_METRICS
+from evals.retrieval.ragas_gates import GateBindings, default_bindings
 
-# The one top-level section US-102 owns. Later stories extend this set:
-#   US-103 adds the detection bindings (`bindings:` / cell + threshold config),
-#   so a declaration with only those sections still loads here. Kept as a frozen
-#   set so an unknown top-level key is a loud typo, not a silent skip.
-_KNOWN_SECTIONS = frozenset({"verdicts"})
+# The top-level sections the loader knows. US-102 shipped `verdicts`; US-103 adds
+# `bindings` (the detection layer's cells / judge map / thresholds). Kept a frozen
+# set so an unknown / misspelled top-level key is a loud error, never a silent skip.
+_KNOWN_SECTIONS = frozenset({"verdicts", "bindings"})
+
+# The sub-keys each `bindings` block accepts (US-103). An unknown sub-key is a hard
+# error — a typo'd threshold name would otherwise be silently ignored, leaving the
+# default in force while the buyer believes they changed it.
+_BINDINGS_KEYS = frozenset({"cells", "thresholds", "corroboration"})
+_THRESHOLD_KEYS = frozenset(
+    {
+        "coverage_floor",
+        "api_error_ceiling",
+        "coverage_drift_pp",
+        "ragas_drop",
+        "min_drift_history",
+        "min_regression_history",
+    }
+)
+# `judge_metric` / `drop` name the corroborating judge's metric and its drop
+# threshold; `judge_cell` is the one cell it covers; the families gate whether
+# corroboration is cross-family (enabled) or same-family (degraded, US-103 AC4).
+_CORROBORATION_KEYS = frozenset(
+    {"generator_family", "judge_family", "judge_cell", "judge_equivalent"}
+)
+_JUDGE_EQUIVALENT_KEYS = frozenset({"judge_metric", "drop"})
+
+# The Claude judge's output metric names — the universe a `judge_metric` VALUE must
+# name. runner.py's judge tool schema requires exactly these two
+# (`generation_keys = ["faithfulness", "helpfulness"]`), and they are the only keys
+# `by_mode[RAGAS_MODE]` carries, so a `judge_metric` that is not one of these would
+# make `_claude_metric_dropped` look up a missing key, get None, and silently never
+# corroborate. Pinned LOCALLY (like classes.py::_RECALL_KS) to keep this loader
+# import-light — importing the heavy runner.py (asyncpg/openai/httpx) for two
+# strings would defeat that; the drift is guarded by the shipped gate.yaml, which
+# uses exactly these values and must equal default_bindings().
+_JUDGE_METRIC_NAMES = frozenset({"faithfulness", "helpfulness"})
 
 # The exact, audit-quotable message a downgrade attempt produces. Security
 # reviewers grep for this; keep the wording stable.
@@ -75,9 +117,16 @@ class GateDeclaration:
     a resolved value (with the registry default filled in) through
     :meth:`verdict_for`, which also re-pins security outputs so a caller can never
     read a loudness for one.
+
+    ``bindings`` is the detection layer's project bindings (US-103) — the cells,
+    cross-family judge map / cell, and threshold constants the three
+    ``ragas_gates`` detection functions take as config. When the ``bindings:``
+    section is absent it defaults to :func:`~evals.retrieval.ragas_gates.default_bindings`
+    (today's constants), so a verdicts-only declaration behaves exactly as before.
     """
 
     verdicts: Mapping[str, str]
+    bindings: GateBindings = field(default_factory=default_bindings)
 
     def verdict_for(self, output: str) -> str:
         """The resolved loudness verdict for ``output``.
@@ -124,6 +173,258 @@ def _coerce_source(source: "Union[str, Path, Mapping[str, Any]]") -> "Mapping[st
     return data
 
 
+def _threshold_number(
+    thresholds: "Mapping[str, Any]", key: str, default: float, *, integral: bool
+) -> float:
+    """Read one threshold, defaulting to today's constant when absent.
+
+    A present value must be a number of the right kind (an ``int`` for the
+    integral thresholds — ``api_error_ceiling`` / ``min_*_history`` — a real
+    number otherwise). A YAML boolean (``true``/``false`` parses to a Python
+    ``bool``, an ``int`` subclass) is rejected up front so a stray ``on`` is a
+    loud error, not a silent ``1``.
+    """
+    if key not in thresholds:
+        return default
+    value = thresholds[key]
+    kind = "integer" if integral else "number"
+    if isinstance(value, bool):
+        raise ValueError(
+            f"gate-declaration `bindings.thresholds.{key}` must be a {kind}, "
+            f"got a boolean ({value!r})"
+        )
+    if integral:
+        if not isinstance(value, int):
+            raise ValueError(
+                f"gate-declaration `bindings.thresholds.{key}` must be an integer, "
+                f"got {type(value).__name__} ({value!r})"
+            )
+        return value
+    if not isinstance(value, (int, float)):
+        raise ValueError(
+            f"gate-declaration `bindings.thresholds.{key}` must be a number, "
+            f"got {type(value).__name__} ({value!r})"
+        )
+    return float(value)
+
+
+def _parse_corroboration(
+    raw_corr: Any, cell_set: "frozenset[str]"
+) -> "tuple[dict[str, tuple[str, float]], str | None, str | None, str | None]":
+    """Parse the optional ``corroboration`` binding (US-103 AC4).
+
+    Returns ``(claude_equivalent, judge_cell, generator_family, judge_family)``.
+    When the block is **omitted** (``raw_corr is None``) corroboration is disabled
+    — an empty map + all-``None`` — so every RAGAS drop degrades to
+    single-judge-red. When PRESENT the block must be COMPLETE (all four keys):
+    a half-specified block is a loud error, never a silent disable. The metric
+    keys are validated against the RAGAS metric universe, each ``judge_metric``
+    value against the Claude judge's metric universe (:data:`_JUDGE_METRIC_NAMES`),
+    and ``judge_cell`` against the declared cells (an unknown metric key / judge
+    metric / cell is a hard error, AC5) — a typo in any of them would otherwise
+    silently switch corroboration off for that metric.
+    """
+    if raw_corr is None:
+        return ({}, None, None, None)
+    if not isinstance(raw_corr, Mapping):
+        raise ValueError(
+            "gate-declaration `bindings.corroboration` must be a mapping, got "
+            f"{type(raw_corr).__name__}"
+        )
+    unknown = set(raw_corr) - _CORROBORATION_KEYS
+    if unknown:
+        raise ValueError(
+            f"gate-declaration `bindings.corroboration` has unknown key(s) "
+            f"{sorted(unknown)}; known keys are {sorted(_CORROBORATION_KEYS)}"
+        )
+    missing = _CORROBORATION_KEYS - set(raw_corr)
+    if missing:
+        raise ValueError(
+            "a `bindings.corroboration` block must set every key "
+            f"{sorted(_CORROBORATION_KEYS)} (missing {sorted(missing)}); omit the "
+            "whole block to disable corroboration (single-judge-red)."
+        )
+
+    generator_family = str(raw_corr["generator_family"])
+    judge_family = str(raw_corr["judge_family"])
+    judge_cell = str(raw_corr["judge_cell"])
+    if judge_cell not in cell_set:
+        raise ValueError(
+            f"gate-declaration `corroboration.judge_cell` {judge_cell!r} is not one "
+            f"of the declared cells {sorted(cell_set)} (unknown cell — no silent skip)."
+        )
+
+    raw_je = raw_corr["judge_equivalent"]
+    if not isinstance(raw_je, Mapping) or not raw_je:
+        raise ValueError(
+            "gate-declaration `corroboration.judge_equivalent` must be a non-empty "
+            "mapping of RAGAS-metric -> {judge_metric, drop}"
+        )
+    claude_equivalent: "dict[str, tuple[str, float]]" = {}
+    for metric, spec in raw_je.items():
+        metric = str(metric)
+        if metric not in RAGAS_METRICS:
+            raise ValueError(
+                f"gate-declaration `corroboration.judge_equivalent` names unknown "
+                f"metric {metric!r}; keys must be RAGAS metrics {sorted(RAGAS_METRICS)}."
+            )
+        if not isinstance(spec, Mapping):
+            raise ValueError(
+                f"gate-declaration `corroboration.judge_equivalent.{metric}` must be "
+                f"a mapping {{judge_metric, drop}}, got {type(spec).__name__}"
+            )
+        unknown_spec = set(spec) - _JUDGE_EQUIVALENT_KEYS
+        if unknown_spec:
+            raise ValueError(
+                f"gate-declaration `corroboration.judge_equivalent.{metric}` has "
+                f"unknown key(s) {sorted(unknown_spec)}; expected "
+                f"{sorted(_JUDGE_EQUIVALENT_KEYS)}"
+            )
+        if "judge_metric" not in spec or "drop" not in spec:
+            raise ValueError(
+                f"gate-declaration `corroboration.judge_equivalent.{metric}` must set "
+                "both `judge_metric` and `drop`"
+            )
+        drop = spec["drop"]
+        if isinstance(drop, bool) or not isinstance(drop, (int, float)):
+            raise ValueError(
+                f"gate-declaration `corroboration.judge_equivalent.{metric}.drop` "
+                f"must be a number, got {type(drop).__name__} ({drop!r})"
+            )
+        judge_metric = str(spec["judge_metric"])
+        if judge_metric not in _JUDGE_METRIC_NAMES:
+            raise ValueError(
+                f"gate-declaration `corroboration.judge_equivalent.{metric}."
+                f"judge_metric` names unknown judge metric {judge_metric!r}; the "
+                f"Claude judge emits only {sorted(_JUDGE_METRIC_NAMES)} (a typo would "
+                "silently never corroborate — no silent skip, AC5)."
+            )
+        claude_equivalent[metric] = (judge_metric, float(drop))
+
+    return (claude_equivalent, judge_cell, generator_family, judge_family)
+
+
+def _parse_bindings(raw: Any) -> GateBindings:
+    """Parse a ``bindings:`` block into a :class:`GateBindings` (US-103).
+
+    The buyer's cells / cross-family judge map / thresholds, validated into the
+    exact config object the ``ragas_gates`` detection functions take. ``cells``
+    and every ``thresholds`` field default to today's constant
+    (:func:`default_bindings`) when omitted, so a partial ``bindings`` block
+    inherits the default for whatever those two sections do not name.
+    ``corroboration`` is the EXCEPTION and does NOT inherit: omitting the
+    ``corroboration:`` sub-block does not fall back to the default map - it
+    DISABLES cross-family corroboration (empty judge map + all-``None`` families)
+    so every score regression degrades to single-judge-red (AC4). A custom
+    ``bindings:`` block that edits only ``cells`` / ``thresholds`` therefore runs
+    single-family; to keep cross-family corroboration the block must RE-DECLARE
+    the ``corroboration:`` sub-block in full. Hard errors (no silent skip): an
+    unknown section / threshold / corroboration key, a blank or empty cell list,
+    an unknown corroboration metric or judge cell (AC5).
+
+    Note on the cell universe: the cells are BUYER-defined (the whole point of the
+    genericization), so they are not constrained to the kit's default cell set —
+    the only cell check is that ``corroboration.judge_cell`` names one of THIS
+    declaration's cells (a dangling judge cell would silently never corroborate).
+    """
+    if not isinstance(raw, Mapping):
+        raise ValueError(
+            "gate-declaration `bindings` must be a mapping of "
+            f"{sorted(_BINDINGS_KEYS)}; got {type(raw).__name__}"
+        )
+    unknown = set(raw) - _BINDINGS_KEYS
+    if unknown:
+        raise ValueError(
+            f"gate-declaration `bindings` has unknown section(s) {sorted(unknown)}; "
+            f"known sections are {sorted(_BINDINGS_KEYS)}"
+        )
+
+    defaults = default_bindings()
+
+    # -- cells (buyer-defined; default to today's cell list when omitted).
+    raw_cells = raw.get("cells")
+    if raw_cells is None:
+        cell_ids = defaults.cell_ids
+    else:
+        if not isinstance(raw_cells, (list, tuple)) or not raw_cells:
+            raise ValueError(
+                "gate-declaration `bindings.cells` must be a non-empty list of "
+                f"cell-id strings; got {raw_cells!r}"
+            )
+        cell_ids = tuple(str(c) for c in raw_cells)
+        if any(not c.strip() for c in cell_ids):
+            raise ValueError(
+                "gate-declaration `bindings.cells` contains a blank cell id"
+            )
+    cell_set = frozenset(cell_ids)
+
+    # -- thresholds (each defaults to today's constant when omitted).
+    raw_thresholds = raw.get("thresholds")
+    if raw_thresholds is None:
+        raw_thresholds = {}
+    if not isinstance(raw_thresholds, Mapping):
+        raise ValueError(
+            "gate-declaration `bindings.thresholds` must be a mapping, got "
+            f"{type(raw_thresholds).__name__}"
+        )
+    unknown_t = set(raw_thresholds) - _THRESHOLD_KEYS
+    if unknown_t:
+        raise ValueError(
+            f"gate-declaration `bindings.thresholds` has unknown key(s) "
+            f"{sorted(unknown_t)}; known thresholds are {sorted(_THRESHOLD_KEYS)}"
+        )
+    coverage_floor = _threshold_number(
+        raw_thresholds, "coverage_floor", defaults.coverage_floor, integral=False
+    )
+    api_error_ceiling = int(
+        _threshold_number(
+            raw_thresholds, "api_error_ceiling", defaults.api_error_ceiling,
+            integral=True,
+        )
+    )
+    coverage_drift_pp = _threshold_number(
+        raw_thresholds, "coverage_drift_pp", defaults.coverage_drift_pp,
+        integral=False,
+    )
+    ragas_drop = _threshold_number(
+        raw_thresholds, "ragas_drop", defaults.ragas_drop, integral=False
+    )
+    min_drift_history = int(
+        _threshold_number(
+            raw_thresholds, "min_drift_history", defaults.min_drift_history,
+            integral=True,
+        )
+    )
+    min_regression_history = int(
+        _threshold_number(
+            raw_thresholds, "min_regression_history",
+            defaults.min_regression_history, integral=True,
+        )
+    )
+
+    # -- corroboration (optional; omitting it degrades to single-judge-red, AC4).
+    (
+        claude_equivalent,
+        judge_cell,
+        generator_family,
+        judge_family,
+    ) = _parse_corroboration(raw.get("corroboration"), cell_set)
+
+    return GateBindings(
+        cell_ids=cell_ids,
+        coverage_floor=coverage_floor,
+        api_error_ceiling=api_error_ceiling,
+        coverage_drift_pp=coverage_drift_pp,
+        ragas_drop=ragas_drop,
+        min_drift_history=min_drift_history,
+        min_regression_history=min_regression_history,
+        claude_equivalent=claude_equivalent,
+        claude_judge_cell=judge_cell,
+        generator_family=generator_family,
+        judge_family=judge_family,
+    )
+
+
 def load_gate_declaration(
     source: "Union[str, Path, Mapping[str, Any]]",
 ) -> GateDeclaration:
@@ -139,7 +440,11 @@ def load_gate_declaration(
       the load-time enforcement of "silence only by deletion" (AC1/AC5);
     * every verdict value must be one of ``off | comment | fail`` — an unquoted
       YAML ``off`` (which parses to the boolean ``False``) is normalized back to
-      ``"off"`` so a buyer's natural ``recall_at_5: off`` works unquoted.
+      ``"off"`` so a buyer's natural ``recall_at_5: off`` works unquoted;
+    * the optional ``bindings:`` section (US-103) is parsed into a
+      :class:`~evals.retrieval.ragas_gates.GateBindings`; an unknown cell / metric
+      / sub-key is a hard error. When absent, the bindings default to today's
+      constants, so a verdicts-only declaration is unchanged.
     """
     data = _coerce_source(source)
 
@@ -147,7 +452,7 @@ def load_gate_declaration(
     if unknown_sections:
         raise ValueError(
             f"unknown gate-declaration section(s) {sorted(unknown_sections)}; "
-            f"US-102 knows {sorted(_KNOWN_SECTIONS)} (later stories add more). "
+            f"the loader knows {sorted(_KNOWN_SECTIONS)} (later stories add more). "
             "A stray/misspelled section is a hard error, never a silent skip."
         )
 
@@ -212,4 +517,7 @@ def load_gate_declaration(
 
         verdicts[name] = verdict
 
-    return GateDeclaration(verdicts=verdicts)
+    raw_bindings = data.get("bindings")
+    bindings = default_bindings() if raw_bindings is None else _parse_bindings(raw_bindings)
+
+    return GateDeclaration(verdicts=verdicts, bindings=bindings)
