@@ -122,7 +122,7 @@ supabase/               Migrations + local CLI config
 evals/retrieval/        50-question golden set + E7 escalation golden set + runners + CI workflow integration
 evals/permissions_scale/ Wikipedia 10k corpus benchmark + nightly workflow
 evals/structured_rag/   Text-to-SQL eval
-evals/gate/             Gate-class registry (US-101): tags every eval output security (pinned-fail) vs quality (tunable)
+evals/gate/             Gate-class registry (US-101) + pinned-security loader/asserts (US-102): security outputs are pinned-fail, un-downgradable, silenced only by deleting the eval
 db_seed/                Deterministic seeders for the eval corpora
 docs/                   Long-form writeups (evals, structured RAG, permissions-aware RAG)
 .github/workflows/      PR + nightly eval workflows
@@ -358,7 +358,7 @@ export OPENAI_API_KEY=sk-...
 python -m db_seed.corpus_seed
 
 # Eval runs
-python -m evals.retrieval.runner                      # all three modes
+python -m evals.retrieval.runner                      # all three modes; exits 1 on an E4 no_access zero-leak breach (pinned security invariant, US-102)
 python -m evals.retrieval.runner --mode vector        # single mode (faster)
 python -m evals.retrieval.runner --include-generation # adds LLM-judge faithfulness/helpfulness (needs ANTHROPIC_API_KEY)
 python -m evals.retrieval.runner --include-e6         # adds the E6 second-workspace zero-leak gate (exits 1 on a cross-workspace leak)

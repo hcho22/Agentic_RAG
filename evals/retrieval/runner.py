@@ -95,6 +95,17 @@ from .ragas_gates import (  # noqa: E402
     load_ragas_history,
 )
 
+# US-102: E4 zero-leak is a pinned `fail` security invariant, evaluated as a
+# binary assert over the `security_no_access` table (sibling `evals.gate`
+# package, absolute import). Kept import-light — `evals.gate.security` pulls in
+# only stdlib + the gate-class registry. `e4_structurally_blind` is the
+# fail-closed guard that refuses a vacuous pass when the no_access sweep was
+# requested but produced no cells.
+from evals.gate.security import (  # noqa: E402
+    check_no_access_zero_leak,
+    e4_structurally_blind,
+)
+
 log = logging.getLogger("agentic_rag.evals.retrieval")
 
 DEFAULT_QUESTIONS = Path(__file__).resolve().parent / "retrieval_gold.yaml"
@@ -1733,6 +1744,40 @@ async def amain() -> int:
             f"  E6 (workspace zero-leak): NOT RUN — transient execution error "
             f"(non-blocking): {e6_error}"
         )
+
+    # US-102: refuse a VACUOUS E4 pass. `check_no_access_zero_leak` treats an
+    # empty `security_no_access` table as clean (nothing to leak), so if the
+    # no_access viewer was REQUESTED but its sweep produced 0 cells (a dropped
+    # no_access block, a misconfigured sweep), the pinned zero-leak gate would
+    # exit 0 without ever asserting — the exact "gate silently off" failure
+    # US-102 forbids. Mirror E6's structural-blindness guard and fail non-zero.
+    # When no_access was NOT requested (e.g. `--viewers full`) the invariant
+    # legitimately does not apply, so this is a no-op (US-102 AC3).
+    if e4_structurally_blind(viewers, aggregates.get("security_no_access", {})):
+        log.error(
+            "E4 STRUCTURALLY BLIND — no_access viewer was requested but the "
+            "security_no_access sweep produced 0 cells; refusing a vacuous pass "
+            "(pinned security invariant, US-102)."
+        )
+        return 1
+
+    # US-102: E4 zero-leak is a PINNED `fail` security invariant. It is a binary
+    # assert — `security_no_access[filter][mode] == 1.0` for every no_access
+    # cell — not a threshold a buyer can loosen. A cell below 1.0 means a
+    # no_access viewer retrieved gold (a leak); the run fails non-zero,
+    # independent of any buyer verdict config (there is NO knob to downgrade it —
+    # silence only by deleting the eval, US-102). The E4 JSON + summary.md are
+    # already written above, so the leak detail is preserved despite the exit.
+    e4_violations = check_no_access_zero_leak(aggregates.get("security_no_access", {}))
+    if e4_violations:
+        log.error(
+            "E4 ZERO-LEAK BREACH — a no_access viewer retrieved gold on %d "
+            "cell(s) (pinned security invariant, US-102):",
+            len(e4_violations),
+        )
+        for v in e4_violations:
+            log.error("  %s", v.detail)
+        return 1
 
     # US-005: a red operational gate finding fails the run. The JSON +
     # summary.md are already written above, so the weekly workflow can still
