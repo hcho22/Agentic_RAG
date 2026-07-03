@@ -1,0 +1,1137 @@
+{
+  "aggregates": {
+    "recall_at_5_by_viewer_ef": {
+      "viewer_10pct": {
+        "200": 0.0,
+        "40": 0.0,
+        "500": 0.0,
+        "80": 0.0
+      },
+      "viewer_1pct": {
+        "200": 0.0,
+        "40": 0.0,
+        "500": 0.0,
+        "80": 0.0
+      },
+      "viewer_50pct": {
+        "200": 0.0,
+        "40": 0.0,
+        "500": 0.0,
+        "80": 0.0
+      }
+    }
+  },
+  "config": {
+    "ef_search_for_gold": 500,
+    "ef_search_values": [
+      40,
+      80,
+      200,
+      500
+    ],
+    "top_k": 5,
+    "viewers": [
+      {
+        "id": "00000000-0000-0000-0000-000000005000",
+        "name": "viewer_50pct",
+        "visible_chunks": 5000
+      },
+      {
+        "id": "00000000-0000-0000-0000-000000001000",
+        "name": "viewer_10pct",
+        "visible_chunks": 1000
+      },
+      {
+        "id": "00000000-0000-0000-0000-000000000100",
+        "name": "viewer_1pct",
+        "visible_chunks": 100
+      }
+    ]
+  },
+  "elapsed_s": 8.63,
+  "generated_at": "2026-07-03T06:26:26+00:00",
+  "n_corpus_chunks": 10000,
+  "n_questions": 15,
+  "per_question": [
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q21",
+      "question": "What's the expedited warranty replacement workflow for a Gold-tier customer with a defective home goods item?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q22",
+      "question": "Can a Platinum customer use the goodwill refund exception 55 days after their order shipped?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q23",
+      "question": "What's the chain of events when a worn apparel item is returned with its original packaging intact?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q24",
+      "question": "What happens if an electronics SKU shows a 22% return rate over the trailing quarter?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q25",
+      "question": "What's the SOP for handling a customer requesting a $700 refund 50 days after their order shipped?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q26",
+      "question": "If a Silver-tier customer places a $40 order, what shipping cost and timing apply?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q27",
+      "question": "How does the order's shipped_at timestamp affect refund eligibility?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q28",
+      "question": "What's the inspection-and-refund flow for a damaged-in-transit electronics order?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q29",
+      "question": "How does the loyalty-tier grace period interact with the monthly tier recalculation and active-customer metric?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q30",
+      "question": "How is an active-hours fraud report handled after the phone line closes for the day?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q31",
+      "question": "What's required from the customer when a glassware item arrives broken, and what refund amount applies?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q32",
+      "question": "Why might SUM(unit_price * quantity) on order_items differ from SUM(products.list_price * quantity), and which should be used for reporting revenue?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q33",
+      "question": "What's the difference between the cancellation cutoff and the refund eligibility window?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q34",
+      "question": "How are international import duties handled when an international order is later refunded?"
+    },
+    {
+      "by_viewer": {
+        "viewer_10pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_1pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        },
+        "viewer_50pct": {
+          "200": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "40": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "500": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          },
+          "80": {
+            "n_returned": 0,
+            "recall_at_5": 0.0,
+            "top_stable_ids": []
+          }
+        }
+      },
+      "id": "q35",
+      "question": "What benefits does a customer lose immediately if they close their Platinum account?"
+    }
+  ]
+}
