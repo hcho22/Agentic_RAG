@@ -12,11 +12,25 @@
 # US-103 regression guard, pinned by `evals/gate/test_gate_bindings.py`). A buyer
 # ships their own gate.yaml beside their golden set and edits these values.
 #
-# The `verdicts:` section (US-102/US-104) is intentionally OMITTED here: every
-# quality output then takes its registry default (`comment`), and the security
-# invariants (E4/E6/AU4/E7-P1b) are pinned `fail` and carry no knob at all — a
-# verdict on one is a hard load error (silence only by deletion). See
-# `evals/gate/declaration.py`.
+# The `suites:` and `verdicts:` sections (US-102/US-104) are intentionally OMITTED
+# here: every quality SUITE then takes its `comment` default (the shipped PR
+# comment-only posture), and the security invariants (E4/E6/AU4/E7-P1b) are pinned
+# `fail` and carry no knob at all — a verdict on one is a hard load error (silence
+# only by deletion). See `evals/gate/declaration.py`.
+#
+# US-104 loudness knobs (per QUALITY SUITE — `off|comment|fail` over the existing
+# red/yellow severity; `fail` => red blocks / yellow comments, `comment` => both
+# comment, `off` => silent). Uncomment to change loudness WITHOUT touching the
+# detector. The two postures the repo already ships are two values of this knob:
+# the weekly red->exit-non-zero posture is `fail`; the PR comment-only posture is
+# `comment`. `false_resolve`'s ceiling breach is a pinned invariant and ignores
+# this knob (it always fails). A finer per-OUTPUT override may still be set under
+# `verdicts:` (e.g. `answer_relevancy: comment`) and wins over its suite's knob.
+#
+# suites:
+#   retrieval_metrics: comment   # recall@k / mrr / ndcg
+#   ragas: fail                  # the four RAGAS scores + coverage gates
+#   escalation: comment          # deflection / false_escalate (NOT the ceiling)
 
 bindings:
   # The cells the RAGAS gates run over — today the two pre_filter cells that carry

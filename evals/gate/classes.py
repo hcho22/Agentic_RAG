@@ -17,10 +17,10 @@ postures without a buyer ever being able to blur them:
   `red`/`yellow` severity.
 - `false_resolve` **straddles**: it is a `quality` metric (the buyer picks the
   *value* of its ceiling, US-050) but its ceiling breach is a **pinned
-  invariant** (`straddle="ceiling_is_invariant"`) — US-103's verdict layer
-  treats a breach as a hard fail regardless of the escalation suite's loudness
-  knob (US-104). So the buyer sets the tolerance; they cannot configure the gate
-  to *ignore* a breach of their own tolerance.
+  invariant** (`straddle="ceiling_is_invariant"`) — US-104's verdict layer
+  (`evals/gate/verdict.py`) treats a breach as a hard fail regardless of the
+  escalation suite's loudness knob. So the buyer sets the tolerance; they cannot
+  configure the gate to *ignore* a breach of their own tolerance.
 
 Design note — this registry is deliberately **import-safe and dependency-light**.
 It is a pinned-invariant module that other stories build on, so it must always
@@ -248,9 +248,9 @@ def _build_registry() -> "dict[str, GateClass]":
 
     # -- `false_resolve` STRADDLES: a quality metric (the buyer sets its ceiling
     #    VALUE, US-050) whose ceiling breach is a pinned invariant (US-059). It is
-    #    explicitly NOT a plain tunable metric — US-103's verdict layer treats a
+    #    explicitly NOT a plain tunable metric — US-104's verdict layer treats a
     #    ceiling breach as a hard `fail` regardless of the escalation suite's
-    #    loudness knob (US-104).
+    #    loudness knob (`evals/gate/verdict.py`).
     rows.append(
         GateClass(
             "false_resolve",

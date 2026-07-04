@@ -30,14 +30,18 @@ Scope discipline (US-102 + US-103):
   reproduces today's constants byte-for-byte, so the genericized path is
   identical to the legacy one (the regression guard lives in
   ``evals/gate/test_gate_bindings.py``).
-* Still to come: US-104 adds the ``(severity, knob) -> action`` verdict function
-  that consumes ``verdicts``; US-105 adds the per-PR-vs-scheduled determinism
-  check. Each extends ``_KNOWN_SECTIONS`` / this dataclass; none may relax the
-  security pin.
+* US-104 (landed) adds the ``suites:`` section — one ``off|comment|fail`` knob per
+  quality suite — and the ``(severity, knob) -> action`` verdict layer
+  (:mod:`evals.gate.verdict`) that consumes both ``suites`` and ``verdicts``. It
+  extends ``_KNOWN_SECTIONS`` / this dataclass without relaxing the security pin
+  (a security output is in no suite, so a ``suites:`` key can never name one).
+  Still to come: US-105 adds the per-PR-vs-scheduled determinism check.
 * A verdict key is a registered **eval-output name** (matching US-102's own
-  validation test, which authors ``E4_zero_leak: off``). US-104 layers the
-  per-suite grouping on top of this per-output map; a security-output key stays
-  rejected regardless of granularity, because a security output is in no suite.
+  validation test, which authors ``E4_zero_leak: off``). US-104's ``suites:``
+  knobs are the coarse per-suite grouping; the per-output ``verdicts`` map is the
+  finer override layered ON TOP (see :meth:`GateDeclaration.action_for_finding` /
+  :meth:`GateDeclaration.resolve_knob`). A security-output key stays rejected at
+  either granularity, because a security output is in no suite.
 
 The class name for the loudness value is the AC's ``off | comment | fail`` verdict
 (spelled ``loudness`` in :mod:`evals.gate.classes`, off the reserved ``class``
@@ -58,13 +62,28 @@ from evals.gate.classes import (
     gate_class,
     is_registered,
 )
+from evals.gate.verdict import (
+    BLOCK,
+    QUALITY_SUITES,
+    TAG_FALSE_RESOLVE_CEILING,
+    SuiteVerdicts,
+    suite_for_finding,
+    suite_for_output,
+    verdict_action,
+)
 from evals.retrieval.ragas import RAGAS_METRICS
-from evals.retrieval.ragas_gates import GateBindings, default_bindings
+from evals.retrieval.ragas_gates import GateBindings, GateFinding, default_bindings
 
 # The top-level sections the loader knows. US-102 shipped `verdicts`; US-103 adds
-# `bindings` (the detection layer's cells / judge map / thresholds). Kept a frozen
-# set so an unknown / misspelled top-level key is a loud error, never a silent skip.
-_KNOWN_SECTIONS = frozenset({"verdicts", "bindings"})
+# `bindings` (the detection layer's cells / judge map / thresholds); US-104 adds
+# `suites` (the per-suite `off|comment|fail` loudness knobs). Kept a frozen set so
+# an unknown / misspelled top-level key is a loud error, never a silent skip.
+_KNOWN_SECTIONS = frozenset({"verdicts", "bindings", "suites"})
+
+# The per-suite knob keys the `suites:` section accepts (US-104). An unknown /
+# misspelled suite is a hard error, never a silent skip (a typo'd `ragass: off`
+# would otherwise leave the RAGAS suite silently at its `comment` default).
+_SUITE_KEYS = frozenset(QUALITY_SUITES)
 
 # The sub-keys each `bindings` block accepts (US-103). An unknown sub-key is a hard
 # error — a typo'd threshold name would otherwise be silently ignored, leaving the
@@ -123,19 +142,27 @@ class GateDeclaration:
     ``ragas_gates`` detection functions take as config. When the ``bindings:``
     section is absent it defaults to :func:`~evals.retrieval.ragas_gates.default_bindings`
     (today's constants), so a verdicts-only declaration behaves exactly as before.
+
+    ``suites`` is the per-suite loudness knobs (US-104) — one ``off|comment|fail``
+    per quality suite (retrieval-metrics / RAGAS / escalation). When the ``suites:``
+    section is absent every suite takes its ``comment`` default (the shipped PR
+    posture). :meth:`action_for_finding` layers the per-output ``verdicts`` map as
+    a finer override on top of these per-suite knobs.
     """
 
     verdicts: Mapping[str, str]
     bindings: GateBindings = field(default_factory=default_bindings)
+    suites: SuiteVerdicts = field(default_factory=SuiteVerdicts)
 
     def verdict_for(self, output: str) -> str:
-        """The resolved loudness verdict for ``output``.
+        """The resolved per-output loudness verdict for ``output``.
 
-        Returns the buyer's explicit setting when present, else the registry
-        default (``comment``). Raises :class:`SecurityGateError` for a
-        ``security``-class output — there is no knob to read, it is pinned
-        ``fail`` (mirrors ``GateClass.loudness``). Raises ``KeyError`` for an
-        unregistered output.
+        Returns the buyer's explicit per-output setting when present, else the
+        registry default (``comment``). This is the US-102 per-output resolver — it
+        does NOT consult the per-suite knobs (use :meth:`resolve_knob` for the full
+        US-104 layering). Raises :class:`SecurityGateError` for a ``security``-class
+        output — there is no knob to read, it is pinned ``fail`` (mirrors
+        ``GateClass.loudness``). Raises ``KeyError`` for an unregistered output.
         """
         gc = gate_class(output)  # KeyError for an unknown output (no silent skip)
         if gc.is_security:
@@ -146,6 +173,56 @@ class GateDeclaration:
         if output in self.verdicts:
             return self.verdicts[output]
         return gc.loudness  # the registry default for a quality output
+
+    def resolve_knob(self, output: str) -> str:
+        """The effective loudness knob for ``output`` under the US-104 layering.
+
+        Precedence (finest wins): an explicit per-output ``verdicts`` setting, else
+        the output's per-suite knob (:meth:`SuiteVerdicts.knob_for`), else the
+        ``comment`` default. So a buyer can set a whole suite to ``off`` and still
+        override one output back to ``fail``. Raises :class:`SecurityGateError` for
+        a ``security``-class output (no knob) and ``KeyError`` for an unregistered
+        output — the same pins as :meth:`verdict_for`.
+        """
+        gc = gate_class(output)  # KeyError for an unknown output (no silent skip)
+        if gc.is_security:
+            raise SecurityGateError(
+                f"{output!r} is a security-class invariant, pinned `fail`; "
+                f"{_PINNED_MESSAGE} (US-102)."
+            )
+        if output in self.verdicts:
+            return self.verdicts[output]  # per-output override wins
+        return self.suites.knob_for(suite_for_output(output))
+
+    def action_for_finding(self, finding: GateFinding) -> str:
+        """Resolve one detected finding to a CI action (``block``/``comment``/``none``).
+
+        The US-104 verdict layer, with the declaration's config folded in:
+
+        * a ``false_resolve`` **ceiling breach** (tag
+          :data:`~evals.gate.verdict.TAG_FALSE_RESOLVE_CEILING`) maps to ``block``
+          regardless of any knob — the pinned-invariant short-circuit (AC3);
+        * otherwise the finding's effective knob is resolved with the same
+          per-output-over-per-suite precedence as :meth:`resolve_knob` (a per-output
+          ``verdicts`` entry for the finding's metric overrides its suite knob), and
+          :func:`~evals.gate.verdict.verdict_action` maps ``(severity, knob)``.
+
+        Pure read — the finding is never mutated, so detection output is identical
+        across knob values (US-104 AC: "Loudness changes the action surface only").
+        """
+        if finding.tag == TAG_FALSE_RESOLVE_CEILING:
+            return BLOCK
+        metric = finding.metric
+        if (
+            metric
+            and is_registered(metric)
+            and not gate_class(metric).is_security
+            and metric in self.verdicts
+        ):
+            knob = self.verdicts[metric]  # per-output override
+        else:
+            knob = self.suites.knob_for(suite_for_finding(finding))
+        return verdict_action(finding.severity, knob)
 
 
 def _coerce_source(source: "Union[str, Path, Mapping[str, Any]]") -> "Mapping[str, Any]":
@@ -425,6 +502,52 @@ def _parse_bindings(raw: Any) -> GateBindings:
     )
 
 
+def _parse_suites(raw: Any) -> SuiteVerdicts:
+    """Parse a ``suites:`` block into a :class:`SuiteVerdicts` (US-104).
+
+    A mapping of ``suite -> off|comment|fail`` over the three quality suites
+    (``retrieval_metrics`` / ``ragas`` / ``escalation``). Hard errors, no silent
+    skip: an unknown suite key (a typo would leave that suite silently at its
+    ``comment`` default), an unknown verdict value. A ``security`` output can never
+    appear here — security invariants are pinned ``fail`` and are in no suite, so a
+    security-named key is simply an "unknown suite" rejection (US-102 intact). The
+    YAML-1.1 ``off`` gotcha (unquoted ``off`` parses to ``False``) is normalized
+    back to the string ``"off"`` so ``ragas: off`` works unquoted.
+    """
+    if not isinstance(raw, Mapping):
+        raise ValueError(
+            "gate-declaration `suites` must be a mapping of "
+            f"suite -> ({'|'.join(sorted(_LOUDNESS_VALUES))}); got {type(raw).__name__}"
+        )
+    knobs: "dict[str, str]" = {}
+    for suite, knob in raw.items():
+        suite = str(suite)
+        if suite not in _SUITE_KEYS:
+            raise ValueError(
+                f"gate-declaration `suites` names unknown suite {suite!r}; the "
+                f"quality suites are {sorted(_SUITE_KEYS)} (security invariants are "
+                "pinned `fail` and are in no suite — no silent skip)."
+            )
+        # YAML 1.1 boolean gotcha (mirrors the `verdicts` section): an unquoted
+        # `off` parses to the boolean False, never the string "off". `off` IS a
+        # valid knob, so normalize False -> "off" up front.
+        if knob is False:
+            knob = "off"
+        if not isinstance(knob, str) or knob not in _LOUDNESS_VALUES:
+            hint = ""
+            if isinstance(knob, bool):
+                hint = (
+                    " (an unquoted YAML `on`/`yes`/`true` parses to a boolean; "
+                    "only `off|comment|fail` are knobs)"
+                )
+            raise ValueError(
+                f"gate-declaration `suites.{suite}` has invalid loudness knob "
+                f"{knob!r}; expected one of {sorted(_LOUDNESS_VALUES)}{hint}"
+            )
+        knobs[suite] = knob
+    return SuiteVerdicts(knobs=knobs)
+
+
 def load_gate_declaration(
     source: "Union[str, Path, Mapping[str, Any]]",
 ) -> GateDeclaration:
@@ -445,6 +568,11 @@ def load_gate_declaration(
       :class:`~evals.retrieval.ragas_gates.GateBindings`; an unknown cell / metric
       / sub-key is a hard error. When absent, the bindings default to today's
       constants, so a verdicts-only declaration is unchanged.
+    * the optional ``suites:`` section (US-104) is parsed into a
+      :class:`~evals.gate.verdict.SuiteVerdicts` — one ``off|comment|fail`` knob
+      per quality suite (``retrieval_metrics`` / ``ragas`` / ``escalation``); an
+      unknown suite / knob is a hard error. When absent every suite defaults to
+      ``comment`` (the shipped PR posture).
     """
     data = _coerce_source(source)
 
@@ -520,4 +648,7 @@ def load_gate_declaration(
     raw_bindings = data.get("bindings")
     bindings = default_bindings() if raw_bindings is None else _parse_bindings(raw_bindings)
 
-    return GateDeclaration(verdicts=verdicts, bindings=bindings)
+    raw_suites = data.get("suites")
+    suites = SuiteVerdicts() if raw_suites is None else _parse_suites(raw_suites)
+
+    return GateDeclaration(verdicts=verdicts, bindings=bindings, suites=suites)
