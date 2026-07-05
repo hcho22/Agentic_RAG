@@ -31,6 +31,22 @@
 #   retrieval_metrics: comment   # recall@k / mrr / ndcg
 #   ragas: fail                  # the four RAGAS scores + coverage gates
 #   escalation: comment          # deflection / false_escalate (NOT the ceiling)
+#
+# US-105 per-PR merge-blocking placement (the DETERMINISM axis, orthogonal to the
+# loudness knob above). `per_pr:` names the DETERMINISTIC quality gates whose `fail`
+# blocks the merge on the per-PR workflow. Only deterministic gates may appear - the
+# retrieval-metrics suite / recall@k / mrr / ndcg. A NON-deterministic (LLM-judged)
+# gate here - `ragas`, `escalation`, or an output like `faithfulness` - is a hard
+# load error: a judge wobble must never red-bar an innocent merge, so those run
+# scheduled-only (fail the weekly workflow + file an issue, never block a merge).
+# The security invariants (E4/E6/AU4/E7-P1b) already block per-PR through their own
+# binary asserts and carry no knob - they must not appear here. Omitted by default,
+# so no quality gate blocks the merge via config (today's advisory-per-PR posture).
+#
+# per_pr:
+#   retrieval_metrics: fail      # recall@k / mrr / ndcg may hard-block a PR
+#   # recall_at_5: fail          # or opt in a single deterministic output
+#   # ragas: fail                # REJECTED - non-deterministic, scheduled-only
 
 bindings:
   # The cells the RAGAS gates run over — today the two pre_filter cells that carry

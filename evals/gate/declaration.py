@@ -35,7 +35,15 @@ Scope discipline (US-102 + US-103):
   (:mod:`evals.gate.verdict`) that consumes both ``suites`` and ``verdicts``. It
   extends ``_KNOWN_SECTIONS`` / this dataclass without relaxing the security pin
   (a security output is in no suite, so a ``suites:`` key can never name one).
-  Still to come: US-105 adds the per-PR-vs-scheduled determinism check.
+* US-105 (landed) adds the ``per_pr:`` section - the **placement** axis
+  (:mod:`evals.gate.placement`): the buyer opts a *deterministic* quality gate
+  (a suite or output) into per-PR merge-blocking (``fail``). The loader rejects a
+  **non-deterministic** target there with :class:`~evals.gate.placement.PlacementError`
+  - a **structural** load error (a judge wobble must never red-bar an innocent
+  merge, AC5), the placement counterpart to US-102's security pin. Loudness
+  (``suites:`` / ``verdicts:``) and placement (``per_pr:``) stay orthogonal: the
+  former governs how a finding surfaces on whatever workflow it runs, the latter
+  whether a deterministic quality finding blocks the *merge* per-PR.
 * A verdict key is a registered **eval-output name** (matching US-102's own
   validation test, which authors ``E4_zero_leak: off``). US-104's ``suites:``
   knobs are the coarse per-suite grouping; the per-output ``verdicts`` map is the
@@ -62,6 +70,11 @@ from evals.gate.classes import (
     gate_class,
     is_registered,
 )
+from evals.gate.placement import (
+    finding_blocks_merge,
+    finding_files_issue,
+    validate_per_pr_target,
+)
 from evals.gate.verdict import (
     BLOCK,
     QUALITY_SUITES,
@@ -76,9 +89,18 @@ from evals.retrieval.ragas_gates import GateBindings, GateFinding, default_bindi
 
 # The top-level sections the loader knows. US-102 shipped `verdicts`; US-103 adds
 # `bindings` (the detection layer's cells / judge map / thresholds); US-104 adds
-# `suites` (the per-suite `off|comment|fail` loudness knobs). Kept a frozen set so
-# an unknown / misspelled top-level key is a loud error, never a silent skip.
-_KNOWN_SECTIONS = frozenset({"verdicts", "bindings", "suites"})
+# `suites` (the per-suite `off|comment|fail` loudness knobs); US-105 adds `per_pr`
+# (the placement axis - which deterministic quality gates block a merge per-PR).
+# Kept a frozen set so an unknown / misspelled top-level key is a loud error,
+# never a silent skip.
+_KNOWN_SECTIONS = frozenset({"verdicts", "bindings", "suites", "per_pr"})
+
+# The per-PR placement verdict. `per_pr:` is exclusively about the merge-blocking
+# verdict - a deterministic quality gate named here `fail`s the per-PR workflow
+# (blocks the merge). `comment` / `off` are loudness knobs (`suites:` / `verdicts:`),
+# not placements, so the only accepted value is `fail`; anything else is a hard
+# error pointing the buyer at the loudness sections.
+_PER_PR_VALUE = "fail"
 
 # The per-suite knob keys the `suites:` section accepts (US-104). An unknown /
 # misspelled suite is a hard error, never a silent skip (a typo'd `ragass: off`
@@ -148,11 +170,21 @@ class GateDeclaration:
     section is absent every suite takes its ``comment`` default (the shipped PR
     posture). :meth:`action_for_finding` layers the per-output ``verdicts`` map as
     a finer override on top of these per-suite knobs.
+
+    ``per_pr`` is the placement set (US-105) - the *deterministic* quality gates
+    (suite and/or output names) the buyer opted into per-PR merge-blocking. The
+    loader guarantees every member is deterministic (a non-deterministic target is
+    a :class:`~evals.gate.placement.PlacementError` at load), so
+    :meth:`blocks_merge` can trust that a red finding on one of these blocks the
+    merge. When the ``per_pr:`` section is absent this is empty - no quality gate
+    blocks the merge via config (the security invariants block per-PR through their
+    own asserts, US-102; the retrieval metrics stay advisory, US-035).
     """
 
     verdicts: Mapping[str, str]
     bindings: GateBindings = field(default_factory=default_bindings)
     suites: SuiteVerdicts = field(default_factory=SuiteVerdicts)
+    per_pr: "frozenset[str]" = field(default_factory=frozenset)
 
     def verdict_for(self, output: str) -> str:
         """The resolved per-output loudness verdict for ``output``.
@@ -223,6 +255,33 @@ class GateDeclaration:
         else:
             knob = self.suites.knob_for(suite_for_finding(finding))
         return verdict_action(finding.severity, knob)
+
+    def blocks_merge(self, finding: GateFinding) -> bool:
+        """True when ``finding`` should block the merge on the **per-PR** workflow.
+
+        The US-105 placement predicate: a red finding blocks the merge iff it is on
+        a **deterministic** gate (a non-deterministic finding can NEVER block a
+        merge - the load-bearing guarantee) that the buyer opted into per-PR
+        blocking via this declaration's ``per_pr:`` set (its metric or its suite).
+        Independent of the loudness knob - ``per_pr:`` is the only switch that turns
+        a deterministic quality gate into a per-PR merge blocker (see
+        :meth:`files_issue` for the scheduled surface). The security invariants
+        block per-PR through their own binary asserts (US-102), not this predicate.
+        """
+        return finding_blocks_merge(finding, self.per_pr)
+
+    def files_issue(self, finding: GateFinding) -> bool:
+        """True when ``finding`` should fail a **scheduled** run and file an issue.
+
+        The scheduled counterpart to :meth:`blocks_merge`: a finding whose resolved
+        loudness action is :data:`~evals.gate.verdict.BLOCK` (folding the per-suite
+        knob + the pinned ``false_resolve`` ceiling short-circuit) fails the
+        scheduled workflow, which files one issue per tag (today's
+        ``retrieval-eval-ragas-weekly.yml`` behavior). Same non-zero exit as a
+        per-PR block, but a scheduled run files an issue instead of blocking a
+        merge - so an LLM-judged regression is caught weekly, never per-PR.
+        """
+        return finding_files_issue(finding, self.suites)
 
 
 def _coerce_source(source: "Union[str, Path, Mapping[str, Any]]") -> "Mapping[str, Any]":
@@ -548,6 +607,66 @@ def _parse_suites(raw: Any) -> SuiteVerdicts:
     return SuiteVerdicts(knobs=knobs)
 
 
+def _parse_per_pr(raw: Any) -> "frozenset[str]":
+    """Parse a ``per_pr:`` block into the validated per-PR merge-blocking set (US-105).
+
+    A mapping of ``suite_or_output -> fail`` naming the *deterministic* quality
+    gates the buyer wants to block a merge per-PR. Every entry is validated through
+    :func:`~evals.gate.placement.validate_per_pr_target`, which enforces the
+    US-105 rule structurally (hard errors, no silent skip):
+
+    * a **non-deterministic** target (a RAGAS/escalation suite or an LLM-judged
+      output like ``faithfulness``) → :class:`~evals.gate.placement.PlacementError`
+      (AC5: a judge wobble must never block an innocent merge);
+    * a **security** output → :class:`SecurityGateError` (pinned ``fail``; it blocks
+      per-PR structurally and carries no tunable knob - the placement counterpart to
+      the ``verdicts:`` / ``suites:`` security pin);
+    * an **unknown** target (neither a known suite nor a registered output) →
+      ``ValueError``.
+
+    The only accepted value is ``fail`` - ``per_pr:`` is exclusively the
+    merge-blocking verdict; a ``comment`` / ``off`` here is a category error
+    (that is loudness - set it under ``suites:`` / ``verdicts:``). A YAML-1.1
+    unquoted ``off`` (→ ``False``) is caught and pointed at the loudness sections
+    rather than silently normalized, since ``off`` is never a valid placement.
+    """
+    if not isinstance(raw, Mapping):
+        raise ValueError(
+            "gate-declaration `per_pr` must be a mapping of "
+            f"suite-or-output -> `{_PER_PR_VALUE}`; got {type(raw).__name__}"
+        )
+    targets: "set[str]" = set()
+    for name, value in raw.items():
+        name = str(name)
+        # Enforce the placement rule FIRST so the actionable structural message
+        # (PlacementError / SecurityGateError) is what a buyer sees, rather than a
+        # generic value complaint on a mistyped verdict. An unknown target raises
+        # KeyError inside; re-cast it to the loader's ValueError convention with a
+        # message naming the known targets (mirrors the `verdicts:` unknown-output
+        # handling - no silent skip).
+        try:
+            validate_per_pr_target(name)  # PlacementError / SecurityGateError / KeyError
+        except KeyError:
+            raise ValueError(
+                f"gate declaration `per_pr` names unknown target {name!r}; a "
+                "`per_pr:` key must be a quality suite "
+                f"{sorted(QUALITY_SUITES)} or a registered quality output "
+                "(security invariants block per-PR structurally and carry no knob; "
+                "see US-101/US-102/US-105)."
+            ) from None
+        if value != _PER_PR_VALUE:
+            hint = (
+                " - `per_pr:` is only the merge-blocking verdict; set loudness "
+                "(`comment`/`off`) under `suites:` or `verdicts:` instead"
+            )
+            raise ValueError(
+                f"gate-declaration `per_pr.{name}` must be `{_PER_PR_VALUE}` "
+                f"(the per-PR merge-blocking verdict), got {value!r}{hint}"
+            )
+        targets.add(name)
+    return frozenset(targets)
+
+
 def load_gate_declaration(
     source: "Union[str, Path, Mapping[str, Any]]",
 ) -> GateDeclaration:
@@ -573,6 +692,14 @@ def load_gate_declaration(
       per quality suite (``retrieval_metrics`` / ``ragas`` / ``escalation``); an
       unknown suite / knob is a hard error. When absent every suite defaults to
       ``comment`` (the shipped PR posture).
+    * the optional ``per_pr:`` section (US-105) is the placement axis - a mapping
+      of ``suite-or-output -> fail`` naming the *deterministic* quality gates that
+      block a merge per-PR. A **non-deterministic** target is a structural load
+      error (:class:`~evals.gate.placement.PlacementError`): a judge-driven gate is
+      never offered a per-PR ``fail`` (AC5). A security output is rejected (pinned
+      ``fail``, blocks per-PR structurally), and an unknown target / non-``fail``
+      value is a hard error. When absent, no quality gate blocks the merge via
+      config.
     """
     data = _coerce_source(source)
 
@@ -651,4 +778,9 @@ def load_gate_declaration(
     raw_suites = data.get("suites")
     suites = SuiteVerdicts() if raw_suites is None else _parse_suites(raw_suites)
 
-    return GateDeclaration(verdicts=verdicts, bindings=bindings, suites=suites)
+    raw_per_pr = data.get("per_pr")
+    per_pr = frozenset() if raw_per_pr is None else _parse_per_pr(raw_per_pr)
+
+    return GateDeclaration(
+        verdicts=verdicts, bindings=bindings, suites=suites, per_pr=per_pr
+    )

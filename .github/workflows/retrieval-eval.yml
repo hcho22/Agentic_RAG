@@ -28,6 +28,46 @@
 # sweep is deliberately NOT here (it lives in escalation-eval-weekly.yml); a judge
 # wobble must never red-bar an innocent merge.
 #
+# US-105: determinism, NOT buyer preference, decides what may block a merge.
+# The whole four-workflow split reduces to ONE rule (formalized in code as
+# evals/gate/placement.py::placement_for and in docs/evals.md "Determinism decides
+# merge-blocking"):
+#
+#   * DETERMINISTIC gates - recall@k / MRR / nDCG, the pinned E4/E6/AU4/E7-P1b
+#     invariants, and the deterministic retrieval-gate tripwire (pure arithmetic /
+#     binary asserts) - run PER-PR here and a `fail` BLOCKS THE MERGE (non-zero
+#     exit on this pull_request workflow).
+#   * NON-DETERMINISTIC gates - the four RAGAS scores, the runtime faithfulness
+#     gate, the full E7 P2/P3 deflection + false-resolve sweep (all LLM-judged) -
+#     are STRUCTURALLY scheduled-only (retrieval-eval-ragas-weekly.yml /
+#     retrieval-eval-nightly.yml / permissions-scale-eval.yml + escalation-eval-
+#     weekly.yml): a `fail` there fails the scheduled workflow + files one issue
+#     per tag, NEVER a merge block. A judge wobble must never red-bar an innocent
+#     merge. The gate-declaration loader REJECTS a config that requests a per-PR
+#     `fail` on a non-deterministic gate (evals/gate/declaration.py, a structural
+#     load error) so the split cannot be reconfigured away.
+#
+# This workflow is the per-PR / deterministic / may-block face of that rule. It
+# runs the deterministic security invariants (E4 + E6 in the `retrieval-eval` job;
+# AU4 in the `au4-security-invariants` job below) and the deterministic E7 P1a/P1b
+# retrieval-leg tripwire - so a cross-workspace leak introduced by a PR fails
+# BEFORE merge. AU4 imports backend/main.py (docling/torch), which the slim
+# requirements-ci.txt deliberately avoids, so it runs as a SEPARATE job (its own
+# runner = its own disk budget) rather than bloating the dual-checkout eval job.
+#
+# US-105 (review follow-up): the two jobs trigger on DIFFERENT diffs, split by a
+# lightweight `changes` job (dorny/paths-filter). The `retrieval-eval` job keeps
+# its narrower RETRIEVAL-only scope, so it does NOT pay the dual-checkout + double
+# corpus-seed cost on a backend/main.py-only PR. The `au4-security-invariants` job
+# ADDITIONALLY covers the API-edge endpoint surface (backend/main.py): AU4's Phase 1
+# auth floor (`get_user`) and its Phase 3 widget transcript / first-message opaque-
+# token binding checks are ENDPOINT-level logic in main.py, not the RLS migrations,
+# so a PR weakening the transcript binding, the first-message key gate, or the auth
+# floor directly in main.py re-runs AU4 before merge (closing the coverage gap where
+# a main.py-only PR would previously trigger NO per-PR security gate at all). This
+# only refines WHICH deterministic per-PR gate runs for a given diff; determinism-
+# decides-merge-blocking (US-105) is unchanged - a `fail` in either job still blocks.
+#
 # Reranker modes (cohere / voyage / llm) are NOT exercised here — they
 # cost real money per call and add API-dependency flake to PR checks.
 # The nightly workflow (retrieval-eval-nightly.yml) is where rerankers
@@ -47,6 +87,11 @@ name: Retrieval eval (PR)
 
 on:
   pull_request:
+    # Workflow-level trigger = the UNION of the two jobs' path sets; the `changes`
+    # job (below) then splits the diff per-job so each deterministic gate runs only
+    # for a relevant change (retrieval paths -> the retrieval-eval job; the API-edge
+    # endpoint + RLS surface -> the au4-security-invariants job). The union is kept
+    # here so the workflow triggers whenever EITHER gate must run.
     paths:
       - 'backend/retrieval.py'
       - 'backend/chunking.py'
@@ -55,6 +100,17 @@ on:
       # E7 per-PR tripwire (below) exercises, so a gate change must re-run it.
       - 'backend/escalation.py'
       - 'backend/**/*prompt*'
+      # US-105: AU4 (backend/test_au4_auth_attacks.py, the au4-security-invariants
+      # job below) is a deterministic per-PR security invariant. Its leak-critical
+      # surface is the RLS migrations (already listed), the permission resolver
+      # (backend/permissions.py), AND the API-edge endpoint logic in backend/main.py
+      # - the Phase 1 auth floor (`get_user`) and the Phase 3 widget transcript /
+      # first-message opaque-token binding checks it pins are endpoint-level, not
+      # RLS. A change to any of these must re-run the API-layer auth-attack suite
+      # before merge (the per-job `changes` filter routes it to AU4 only).
+      - 'backend/main.py'
+      - 'backend/permissions.py'
+      - 'backend/test_au4_auth_attacks.py'
       - 'evals/retrieval/**'
       - 'db_seed/corpus/**'
       - 'db_seed/corpus_seed.py'
@@ -70,8 +126,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # US-105 (review follow-up): compute a per-job path split from the PR diff so the
+  # two deterministic gates trigger independently. The workflow-level `paths:` union
+  # (above) decides whether the workflow runs at all; this job then decides WHICH of
+  # the two jobs runs. The retrieval-eval job stays retrieval-only (it must not pay
+  # the dual-checkout + double corpus-seed cost on a main.py-only PR), while the AU4
+  # job additionally covers the API-edge endpoint surface (backend/main.py), whose
+  # Phase 1 auth floor + Phase 3 widget opaque-token binding checks are endpoint-
+  # level, not RLS. A skipped downstream job (its filter false) reports "skipped",
+  # which branch protection treats as a pass, so a retrieval-only PR does not hang on
+  # the AU4 check and vice versa.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      retrieval: ${{ steps.filter.outputs.retrieval }}
+      au4: ${{ steps.filter.outputs.au4 }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            retrieval:
+              - 'backend/retrieval.py'
+              - 'backend/chunking.py'
+              - 'backend/embeddings.py'
+              - 'backend/escalation.py'
+              - 'backend/**/*prompt*'
+              - 'evals/retrieval/**'
+              - 'db_seed/corpus/**'
+              - 'db_seed/corpus_seed.py'
+              - 'supabase/migrations/**'
+              - '.github/workflows/retrieval-eval.yml'
+            au4:
+              - 'backend/main.py'
+              - 'backend/permissions.py'
+              - 'supabase/migrations/**'
+              - 'backend/test_au4_auth_attacks.py'
+              - '.github/workflows/retrieval-eval.yml'
+
   retrieval-eval:
     name: PR vs main
+    needs: changes
+    if: needs.changes.outputs.retrieval == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -288,3 +389,84 @@ jobs:
               });
               core.info(`created new comment ${created.id}`);
             }
+
+  # US-105: the API-layer auth-attack suite (AU4) is a DETERMINISTIC per-PR
+  # security invariant (`au4_auth_attacks` in evals/gate/classes.py, pinned `fail`),
+  # the API-edge counterpart to the E6 cross-workspace boundary the retrieval-eval
+  # job already gates. It exits NON-ZERO on any breach (a cross-workspace read, a
+  # broken opaque-token binding, a customer token that retrieves), so a leak
+  # introduced by a PR fails BEFORE merge. Its assertions are exact `== 0` /
+  # `rejected` binary checks - no LLM judge - so a real verdict can never flake and
+  # is allowed to hard-block, exactly like E4/E6/E7-P1b.
+  #
+  # It is a SEPARATE job (not a step in `retrieval-eval`) because it imports
+  # backend/main.py, which pulls docling/torch - the multi-GB ML stack the slim
+  # requirements-ci.txt deliberately omits to fit the eval job's dual pr+main
+  # checkout + double corpus seed. A dedicated job gets its own fresh runner (own
+  # ~14 GB disk), so the heavy install here never competes with the eval job.
+  # AU4 self-seeds its W1/W2/W3 fixtures (no corpus_seed) and skips cleanly
+  # (exit 0) when the required env is unset, so it is never an infra-flake block.
+  au4-security-invariants:
+    name: AU4 API-layer auth attacks (deterministic, may block)
+    needs: changes
+    if: needs.changes.outputs.au4 == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Supabase CLI
+        # Pinned 2.90.0, same rationale as the retrieval-eval job above: a newer
+        # CLI changed the local stack's JWT key format, gateway-rejecting (403)
+        # the suite's self-minted HS256 JWTs. Keep the pin in lockstep across
+        # every eval workflow.
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.90.0
+
+      - name: Start local Supabase stack
+        run: |
+          # Brings up pgvector + PostgREST + auth and applies the PR's migrations
+          # (supabase/migrations/) - the RLS boundary AU4 attacks. Surface the
+          # running stack's real coordinates so the suite authenticates against
+          # THIS instance rather than baked-in local-dev fallbacks (the 403-on-
+          # first-query drift the CLI pin also guards).
+          supabase start
+          supabase status -o env > /tmp/supabase.env
+          grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|JWT_SECRET|DB_URL)=' /tmp/supabase.env \
+            | sed -E 's/^(.*)="(.*)"$/\1=\2/' \
+            >> "$GITHUB_ENV"
+
+      - name: Install backend deps
+        run: |
+          # Full backend install: AU4 imports backend/main.py (fastapi + docling +
+          # torch + …). This is the heavy stack requirements-ci.txt avoids; it is
+          # acceptable HERE because this job's runner is dedicated to AU4 alone.
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Run AU4 API-layer auth attacks (deterministic - may block)
+        env:
+          SUPABASE_URL: ${{ env.API_URL }}
+          SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
+          DATABASE_URL: ${{ env.DB_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # Exact `== 0` / `rejected` binary security assertions across the auth
+          # floor, the cross-workspace / no-membership data boundary, and (when the
+          # Epic-E tables are present) the widget/conversation surface (US-093).
+          # Any breach raises and exits non-zero, FAILING this required check and
+          # BLOCKING the merge - the deterministic, pinned-`fail` posture (US-102/
+          # US-105). Missing env → clean skip (exit 0), never an infra-flake block.
+          python -m backend.test_au4_auth_attacks

@@ -217,7 +217,7 @@ This mirrors the P1a/P1b/non-disclosure blindness guards, so the safety ceiling 
 The consolidated metrics (US-055) divide into two classes the gate treats differently (US-059 AC3):
 
 - **`false-resolve` is the pinned SAFETY number** (the Risk #3 failure: an unanswerable question auto-resolved). The buyer sets one risk knob — `ESCALATION_FALSE_RESOLVE_CEILING` (default 5%) — and a *measured* false-resolve rate above it fails the run (`assert_false_resolve_ceiling`), never downgraded to a comment. It is enforced in `e7_runner`'s exit code, so the weekly workflow merely reflects it. The gated rate is the **faithfulness-leg (P3)** false-resolve — the population where a false-resolve can actually occur once a draft clears the retrieval gate. The retrieval-leg P1a/P1b false-resolves are deliberately *excluded* from this rate (see below), so it cannot be diluted by always-escalating true-negatives as the gold set grows.
-- **`deflection` and `false-escalate` are tunable QUALITY metrics.** A regression there is governed by the configurable E8 gate (Area F) — the escalation suite's `off|comment|fail` loudness knob (US-104, below) over their `red`/`yellow` severity, not a hard block. The knob layer ships in `evals/gate/verdict.py`; until it is wired onto the escalation runner's exit / comment call sites (US-105) they remain advisory (reported in the weekly snapshot).
+- **`deflection` and `false-escalate` are tunable QUALITY metrics.** A regression there is governed by the configurable E8 gate (Area F) - the escalation suite's `off|comment|fail` loudness knob (US-104, below) over their `red`/`yellow` severity, not a hard block. They are also **non-deterministic** (LLM-judged), so US-105's determinism rule structurally places them scheduled-only - a `fail` there fails the weekly workflow + files an issue, never a per-PR merge block. The knob + placement layers ship in `evals/gate/verdict.py` / `evals/gate/placement.py` (with `GateDeclaration.blocks_merge` / `files_issue` as the consuming seam); until those predicates are wired onto the escalation runner's own exit / comment call sites they remain advisory (reported in the weekly snapshot).
 
 **Where the classification lives (US-101, Epic F).** This security-vs-quality split is no longer just prose - `evals/gate/classes.py` is the single authoritative registry that tags every eval output with `class ∈ {security, quality}` plus an orthogonal `determinism` flag. `gate_class(name)` is the lookup. The **security** members (`E4_zero_leak`, `e6_workspace_boundary`, `au4_auth_attacks`, `e7_p1b_non_disclosure`) are pinned `fail` and carry no loudness knob at all - querying one raises `SecurityGateError`, and a security row declared with a loudness knob is a build error at import; the only way to silence a security invariant is to delete its eval. The **quality** members (`recall_at_k`, `mrr`, `ndcg_at_5`, the four `RAGAS_METRICS`, `deflection_rate`, `false_escalate_rate`) are tunable. `false_resolve` is registered `quality` but `straddle="ceiling_is_invariant"`, so a ceiling breach stays a hard fail regardless of any loudness knob - the buyer sets the tolerance value but cannot configure the gate to ignore a breach of it. US-101 is the classification layer only; the tunable `off|comment|fail` verdict-to-action layer over the quality metrics is US-104 (below). Run the tests with `python -m evals.gate.test_classes`.
 
@@ -247,8 +247,34 @@ The knob is **per quality suite**, not a single global flag: the three suites - 
 A `security`-class output is in **no** suite (pinned `fail`, no knob - US-102), and `false_resolve`'s **ceiling breach** is a pinned invariant that ignores the knob entirely: a ceiling-breach finding (tag `false-resolve-ceiling`) always maps to `block`, so the buyer sets the ceiling *value* (US-050) but cannot configure the gate to ignore a breach of their own tolerance.
 The knob lives in the gate declaration's optional `suites:` section (`evals/gate/gate.yaml`); an unknown suite or knob is a hard load error, and the shipped default omits the section so every suite stays at `comment`.
 A finer per-*output* `verdicts:` entry (US-102) still wins over its suite's knob (`GateDeclaration.action_for_finding` / `resolve_knob`).
-US-104 ships the verdict layer and the declaration seam; wiring it onto the runner exit / PR-comment call sites and the per-PR-vs-scheduled determinism split is US-105 (the same seam-before-call-site discipline as US-075→076 / US-077→079).
+US-104 ships the verdict layer and the declaration seam; the per-PR-vs-scheduled determinism split that decides which of those `fail`s may block a merge is US-105 (below).
 Run the tests with `python -m evals.gate.test_verdict`.
+
+**Determinism decides merge-blocking - the one-rule four-workflow split (US-105, Epic F).**
+The last gate piece answers a different question from loudness: not *how loud* a finding is, but *where it runs and what its `fail` may block*.
+The rule is the **determinism axis, not buyer preference** - `evals/gate/placement.py` is its single source of truth (`placement_for(gate)`), and the whole four-workflow split reduces to it:
+
+| Determinism | Gates | CI placement | A `fail` there |
+|---|---|---|---|
+| **deterministic** | recall@k / MRR / nDCG, the pinned E4 / E6 / AU4 / E7-P1b invariants, the deterministic retrieval-gate tripwire (pure arithmetic / binary asserts) | **per-PR** (`retrieval-eval.yml`) | **blocks the merge** (non-zero exit on the `pull_request` workflow) |
+| **non-deterministic** | the four RAGAS scores, the runtime faithfulness gate, the full E7 P2/P3 deflection + false-resolve sweep (all LLM-judged) | **scheduled** (`retrieval-eval-ragas-weekly.yml` / `retrieval-eval-nightly.yml` / `permissions-scale-eval.yml` + `escalation-eval-weekly.yml`) | **fails the scheduled workflow + files one issue per tag**, never a merge block |
+
+Two enforcement points make the rule structural rather than prose:
+
+- **The loader rejects a per-PR `fail` on a non-deterministic gate.**
+  A gate declaration's optional `per_pr:` section names the *deterministic* quality gates (a suite or output) the buyer opts into per-PR merge-blocking (`per_pr: {recall_at_5: fail}`).
+  Naming a **non-deterministic** target there - `per_pr: {faithfulness: fail}`, or a whole `ragas` / `escalation` suite - is a **structural load error** (`evals/gate/placement.py::PlacementError`, a `ValueError` subclass), rejected before the run ever starts, exactly like a security downgrade (US-102).
+  A judge wobble must never red-bar an innocent merge, so the config simply *cannot express* a per-PR `fail` on an LLM-judged gate.
+  A security output is rejected too (it is pinned `fail` and blocks per-PR through its own binary assert, carrying no tunable knob); an unknown target or a non-`fail` value is a hard error.
+- **A new per-PR AU4 job.**
+  `retrieval-eval.yml` already runs E4 (the `security_no_access` binary assert), E6 (the cross-workspace boundary), and the deterministic E7 P1a/P1b retrieval-leg tripwire as hard-blocking per-PR gates.
+  US-105 adds the API-layer auth-attack suite (`backend/test_au4_auth_attacks.py`) as a **new per-PR job** (`au4-security-invariants`) so a cross-workspace leak at the API edge also fails before merge.
+  It is a separate job (not a step) because it imports `backend/main.py` (docling/torch) - the heavy stack `requirements-ci.txt` avoids - so it gets its own runner's disk budget; its assertions are exact `== 0` / `rejected` binary checks (no judge), so it is allowed to hard-block.
+
+Loudness (`suites:` / `verdicts:`) and placement (`per_pr:`) stay orthogonal: `GateDeclaration.blocks_merge(finding)` answers "does this deterministic red finding block the *merge* per-PR?" (True only for a deterministic gate opted into `per_pr:` - a non-deterministic finding can **never** block a merge, the load-bearing guarantee), while `GateDeclaration.files_issue(finding)` answers "does it fail the *scheduled* run and file an issue?" (the same non-zero exit, but scheduled).
+So `false_resolve`'s **pinned ceiling** breach - always the `block` action (US-104 AC3) but a *non-deterministic* metric - files an issue on the scheduled run and is **never** a per-PR merge block: that is exactly the accepted faithfulness-leg detection-latency gap (F3 / P5, below), whose per-PR mitigation is the deterministic P1a/P1b retrieval-leg tripwire.
+The shipped default `gate.yaml` omits `per_pr:`, so no quality gate blocks the merge via config - today's posture (retrieval metrics stay advisory per-PR, US-035; the security invariants block per-PR through their own asserts).
+Run the tests with `python -m evals.gate.test_placement`.
 
 ### The accepted detection-latency gap (F3 / P5)
 
