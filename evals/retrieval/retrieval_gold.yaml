@@ -1,26 +1,49 @@
-# US-033: golden set for the retrieval eval.
+# US-033 / US-107: golden set for the retrieval eval.
 #
 # 50 questions across four categories, distributed per the PRD: 20 single_chunk,
-# 15 multi_hop, 10 adversarial, 5 paraphrase. Each question references one or
-# more chunks by `stable_id` (US-032 schema: "{filename_slug}:{chunk_index}").
+# 15 multi_hop, 10 adversarial, 5 paraphrase.
 #
-# Authoring process: drafted by Claude Opus (mirroring the PRD's "LLM-drafted
-# + human-edited" methodology — GPT-4o was the PRD's example, but the LLM
-# family doesn't matter as long as it's a different family from the embedder)
-# against the 14 chunks produced by db_seed.corpus_seed at 500/50 default
-# tokenisation. The adversarial-question filter step (running each candidate
-# through current retrieval and keeping only those where ≥1 mode fails) is
-# the user-side step once the runner produces real numbers — until then,
-# these 10 adversarials are candidates ranked by how cleanly they construct a
-# lexical-vs-semantic divergence.
+# US-107 — CONTENT ANCHORS (this is the load-bearing change):
+#   Each gold label is authored as an **answer-bearing content anchor** — a
+#   quoted span that actually appears in the corpus — NOT as a
+#   `{filename_slug}:{chunk_index}` chunk-index primitive. At eval time
+#   `evals/retrieval/content_anchors.py` resolves each anchor to whichever chunk
+#   stable_id(s) currently *contain* its text and injects the resolved
+#   `gold_stable_ids` list the scorer consumes. Consequences:
+#     * A `chunk_size`/overlap/docling re-seed needs ZERO re-labeling — the same
+#       anchor re-resolves to the new chunk indices.
+#     * A span in the chunker's overlap region (a paragraph carried from one
+#       chunk into the next) is a verbatim substring of BOTH adjacent chunks and
+#       resolves to both stable_ids — the recall scorer's multi-gold partial
+#       credit (`recall_at_k` divides by |gold|) handles it. q07 is the shipped
+#       straddle case (the return-fee sentence lives in returns-process:{0,1}).
+#     * An anchor that matches no current chunk is a HARD ERROR naming the
+#       question id + anchor text — never a silent `recall=0`. Editing the
+#       source content so the quoted span no longer appears breaks the anchor by
+#       design; the resolver does not fuzzy-match around a content edit.
+#   The stable_id survives only as the resolved *internal* representation; it is
+#   never authored here.
 #
 # Field semantics:
-#   id              — qNN, sequential, never reused
-#   category        — single_chunk | multi_hop | adversarial | paraphrase
-#   question        — the natural-language query passed to retrieval
-#   gold_stable_ids — list of one or more chunk stable_ids; recall@k counts
-#                     each gold chunk that appears in top_k (partial credit)
-#   notes           — optional authoring rationale; not consumed by the runner
+#   id            — qNN, sequential, never reused
+#   category      — single_chunk | multi_hop | adversarial | paraphrase
+#   question      — the natural-language query passed to retrieval
+#   gold_anchors  — list of one or more content anchors. Each is either a bare
+#                   string (an answer-bearing span, resolved unscoped) or a
+#                   {text, doc} mapping where `doc` is a filename_slug that
+#                   restricts resolution to that document's chunks. A multi_hop
+#                   question authors one anchor per required chunk; the resolved
+#                   gold is the union.
+#   notes         — optional authoring rationale; not consumed by the runner
+#
+# Authoring anchors: spans are copied verbatim from the seeded corpus chunks
+# (matching is whitespace-normalized but otherwise exact — case, punctuation,
+# and en/em dashes must match), then verified to resolve by the resolver before
+# commit. A few legacy chunk-index labels drifted from the current 500/50
+# chunking (e.g. the "sum unit_price * quantity from order_items" guidance and
+# the "restocking fees do not apply" line now live in a different chunk than the
+# hand-authored index claimed) — the content anchor re-points to wherever the
+# answer text actually is, which is exactly the drift this story eliminates.
 
 # US-042: viewer parameterization. Each question is replayed under three
 # permission setups so the eval can demonstrate three independent claims:
@@ -33,7 +56,9 @@
 # The construction rule lives here, not in the runner — that way the YAML
 # is the audit trail for what each viewer setup actually saw. The random
 # choice for `partial_access` is seeded by `question.id` so two runs of the
-# eval produce the same visible-set per question.
+# eval produce the same visible-set per question. The construction consumes the
+# *resolved* gold (US-107), so `gold ∪ N filler` and `all_non_gold` track the
+# anchors automatically across a re-seed.
 viewer_construction:
   full_access:
     # The corpus owner — sees every chunk via chunks.user_id ownership.
@@ -41,14 +66,14 @@ viewer_construction:
     # (same JWT used by the pre-Module-11 baseline).
     type: owner
   partial_access:
-    # Visible set = gold_stable_ids ∪ N random non-gold corpus chunks.
+    # Visible set = resolved gold ∪ N random non-gold corpus chunks.
     # Random.seed(question.id) -> sample N non-gold stable_ids without
     # replacement. Materialised as chunk_acl rows for a fixed test viewer.
     type: gold_plus_n_extra
     n_extra_chunks: 5
   no_access:
-    # Visible set = corpus chunks ∖ gold_stable_ids — the viewer holds
-    # ACL grants for every non-gold chunk and zero gold chunks. A correctly
+    # Visible set = corpus chunks ∖ resolved gold — the viewer holds ACL
+    # grants for every non-gold chunk and zero gold chunks. A correctly
     # pre-filtering SQL surface should therefore *never* return a gold
     # chunk for this viewer; the Security table proves that invariant.
     type: all_non_gold
@@ -58,324 +83,388 @@ questions:
   - id: q01
     category: single_chunk
     question: What's the standard shipping window for domestic orders?
-    gold_stable_ids: [shipping-faq:0]
+    gold_anchors:
+      - Standard shipping is 3–5 business days within the contiguous US
     notes: standard shipping = 3–5 business days in contiguous US
 
   - id: q02
     category: single_chunk
     question: How long is the electronics warranty?
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Electronics carry a 12-month limited warranty against manufacturing defects
 
   - id: q03
     category: single_chunk
     question: What is the SKU format used in the product catalog?
-    gold_stable_ids: [product-catalog:0]
+    gold_anchors:
+      - Each product carries an SKU of the form `CAT-NNNN`
     notes: CAT-NNNN with three-letter category prefix
 
   - id: q04
     category: single_chunk
     question: What is the refund eligibility window after the shipped_at date?
-    gold_stable_ids: [refund-policy:0]
+    gold_anchors:
+      - Customers may request a refund within 30 days of the order's `shipped_at` date
     notes: 30 days from shipped_at
 
   - id: q05
     category: single_chunk
     question: What's the spend threshold for Gold loyalty tier?
-    gold_stable_ids: [loyalty-program:0]
+    gold_anchors:
+      - "**Gold**: Trailing 12-month spend of $1,000 or more"
 
   - id: q06
     category: single_chunk
     question: Which carriers handle standard domestic shipping?
-    gold_stable_ids: [shipping-faq:0]
+    gold_anchors:
+      - Standard domestic shipping uses USPS or UPS Ground depending on package weight
 
   - id: q07
     category: single_chunk
     question: What's the return shipping fee for items between 5 and 20 pounds?
-    gold_stable_ids: [returns-process:0]
-    notes: $14.95
+    gold_anchors:
+      - $14.95 for returns 5–20 lbs
+    notes: |
+      $14.95. STRADDLE CASE (US-107): the return-fee sentence is the block the
+      chunker carries as overlap, so it appears verbatim in BOTH
+      returns-process:0 and returns-process:1 and this anchor resolves to both
+      stable_ids — the shipped demonstration that a straddling span yields two
+      gold chunks and the recall scorer's multi-gold partial credit handles it.
 
   - id: q08
     category: single_chunk
     question: What return rate triggers a quality review by the merchandising team?
-    gold_stable_ids: [returns-process:1]
+    gold_anchors:
+      - surfaces SKUs with a return rate above 8% to the merchandising team for quality review
     notes: 8% over trailing 90 days
 
   - id: q09
     category: single_chunk
     question: What's the warranty window for printing defects on books?
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Books carry a 30-day warranty against printing defects
 
   - id: q10
     category: single_chunk
     question: What's the response time target for live chat support?
-    gold_stable_ids: [customer-service-sop:0]
+    gold_anchors:
+      - "**Live chat**: First response within 60 seconds during business hours"
     notes: 60 seconds during business hours
 
   - id: q11
     category: single_chunk
     question: How long is the warranty on home goods?
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Home goods carry a 6-month warranty against manufacturing defects
     notes: 6 months
 
   - id: q12
     category: single_chunk
     question: When does the cancellation cutoff occur after payment?
-    gold_stable_ids: [returns-process:0]
-    notes: when the order enters fulfillment-processing — 2–4 hrs weekdays, 24 hrs weekends
+    gold_anchors:
+      - The cancellation cutoff is when the order enters the fulfillment-processing state
+    notes: fulfillment-processing state — 2–4 hrs weekdays, 24 hrs weekends
 
   - id: q13
     category: single_chunk
     question: How long does a refund take to settle on a credit card?
-    gold_stable_ids: [refund-policy:0]
+    gold_anchors:
+      - Card refunds typically settle in 5–7 business days
     notes: 5–7 business days
 
   - id: q14
     category: single_chunk
     question: Where is the fulfillment center that dispatches our shipments?
-    gold_stable_ids: [shipping-faq:0]
+    gold_anchors:
+      - We dispatch from our Ohio fulfillment center
     notes: Ohio
 
   - id: q15
     category: single_chunk
     question: What gross margin range does Acme Co target across categories?
-    gold_stable_ids: [product-catalog:0]
+    gold_anchors:
+      - the resulting gross margin lands in the 30–50% range
     notes: 30–50%
 
   - id: q16
     category: single_chunk
     question: How is an active customer defined for tier purposes?
-    gold_stable_ids: [loyalty-program:1]
+    gold_anchors:
+      - an "active customer" is one whose `last_order_at` is within the trailing 90 days
     notes: last_order_at within trailing 90 days
 
   - id: q17
     category: single_chunk
     question: What carrier do we use for international shipping to most destinations?
-    gold_stable_ids: [shipping-faq:0]
+    gold_anchors:
+      - International orders ship via DHL Express for most destinations
     notes: DHL Express
 
   - id: q18
     category: single_chunk
     question: How long is the apparel warranty?
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Apparel carries a 90-day warranty against stitching defects
     notes: 90 days
 
   - id: q19
     category: single_chunk
     question: What annual store credit do Platinum members receive?
-    gold_stable_ids: [loyalty-program:0]
+    gold_anchors:
+      - an annual $100 store credit issued on the customer's program anniversary
     notes: $100 on program anniversary
 
   - id: q20
     category: single_chunk
     question: What identity verification is required for a refund above $100?
-    gold_stable_ids: [customer-service-sop:0]
+    gold_anchors:
+      - confirm the last four digits of the payment method on file or a recent order number
     notes: last four digits of payment method or a recent order number
 
   # ── multi_hop (15) ────────────────────────────────────────────────────
   - id: q21
     category: multi_hop
     question: What's the expedited warranty replacement workflow for a Gold-tier customer with a defective home goods item?
-    gold_stable_ids: [loyalty-program:0, warranty-terms:1]
+    gold_anchors:
+      - Gold members may also request expedited warranty replacement for apparel, home goods, and books
+      - we ship the replacement before receiving the defective item back, provided the customer authorizes a hold on the original payment method
     notes: Gold benefit (loyalty:0) + expedited replacement details with payment-method hold (warranty:1)
 
   - id: q22
     category: multi_hop
     question: Can a Platinum customer use the goodwill refund exception 55 days after their order shipped?
-    gold_stable_ids: [loyalty-program:0, refund-policy:0]
+    gold_anchors:
+      - Platinum members receive everything in Gold plus a dedicated customer service line
+      - A loyalty-tier customer (Gold or Platinum) requests a refund within 60 days of `shipped_at`
     notes: Platinum tier exists (loyalty:0) + goodwill exception 60-day window for Gold/Platinum (refund:0)
 
   - id: q23
     category: multi_hop
     question: What's the chain of events when a worn apparel item is returned with its original packaging intact?
-    gold_stable_ids: [returns-process:1, warranty-terms:0]
+    gold_anchors:
+      - "**Partial pass** (product usable but not resaleable, e.g. opened software, worn apparel): partial refund at 50–80% of original price"
+      - Apparel warranty claims do not cover wear-and-tear
     notes: partial-pass inspection 50–80% refund (returns:1) + apparel wear-and-tear not covered (warranty:0)
 
   - id: q24
     category: multi_hop
     question: What happens if an electronics SKU shows a 22% return rate over the trailing quarter?
-    gold_stable_ids: [returns-process:1, product-catalog:1]
+    gold_anchors:
+      - A SKU placed on quality review may be temporarily de-listed from the storefront
+      - Electronics carry the longest warranty (12 months) and the strictest return-inspection process
     notes: 8% threshold + de-list pending review (returns:1) + electronics category context (product:1)
 
   - id: q25
     category: multi_hop
     question: What's the SOP for handling a customer requesting a $700 refund 50 days after their order shipped?
-    gold_stable_ids: [customer-service-sop:0, refund-policy:0]
+    gold_anchors:
+      - The customer requests a refund above $500 outside the 30-day window
+      - Goodwill refunds are capped at 50% of the order total unless escalated to a supervisor
     notes: escalation trigger above $500 outside 30-day (sop:0) + goodwill 50% cap unless escalated (refund:0)
 
   - id: q26
     category: multi_hop
     question: If a Silver-tier customer places a $40 order, what shipping cost and timing apply?
-    gold_stable_ids: [loyalty-program:0, shipping-faq:0]
+    gold_anchors:
+      - Silver members receive everything in Bronze plus free standard shipping on orders over $25
+      - Standard shipping is 3–5 business days within the contiguous US
     notes: Silver free shipping over $25 (loyalty:0) + 3–5 business day window (shipping:0)
 
   - id: q27
     category: multi_hop
     question: How does the order's shipped_at timestamp affect refund eligibility?
-    gold_stable_ids: [shipping-faq:0, refund-policy:0]
+    gold_anchors:
+      - "`shipped_at` is set when the carrier scans the package at our fulfillment center"
+      - Customers may request a refund within 30 days of the order's `shipped_at` date
     notes: shipped_at set at carrier scan (shipping:0) + 30-day refund window keyed off shipped_at (refund:0)
 
   - id: q28
     category: multi_hop
     question: What's the inspection-and-refund flow for a damaged-in-transit electronics order?
-    gold_stable_ids: [returns-process:1, refund-policy:0]
-    notes: inspection outcomes (returns:1) + damaged-in-transit = full refund + free return shipping (refund:0)
+    gold_anchors:
+      - "**Pass** (product in resaleable condition): full refund per policy"
+      - Full refunds are the default for damaged-in-transit, wrong-item-shipped, and product-defect cases
+    notes: inspection outcomes (returns:1) + damaged-in-transit = full refund (refund:0)
 
   - id: q29
     category: multi_hop
     question: How does the loyalty-tier grace period interact with the monthly tier recalculation and active-customer metric?
-    gold_stable_ids: [loyalty-program:0, loyalty-program:1]
+    gold_anchors:
+      - Tier is recalculated on the first day of each calendar month based on the customer's spend over the trailing 12 months
+      - the customer retains the tier for one additional month as a grace period. The grace period applies once per calendar year
     notes: monthly recalc (loyalty:0) + grace period + active customer (loyalty:1)
 
   - id: q30
     category: multi_hop
     question: How is an active-hours fraud report handled after the phone line closes for the day?
-    gold_stable_ids: [customer-service-sop:0, customer-service-sop:1]
+    gold_anchors:
+      - phone is reserved for time-sensitive issues like delivery problems and active fraud reports
+      - Active fraud reports and delivery emergencies route to the on-call supervisor via a separate escalation queue
     notes: phone reserved for fraud (sop:0) + on-call supervisor queue after hours (sop:1)
 
   - id: q31
     category: multi_hop
     question: What's required from the customer when a glassware item arrives broken, and what refund amount applies?
-    gold_stable_ids: [warranty-terms:0, refund-policy:0]
-    notes: home goods covers glassware breakage, photo required, don't return (warranty:0) + damaged-in-transit full refund (refund:0)
+    gold_anchors:
+      - Glassware warranty claims require a photo of the broken item; the customer is not required to return the broken piece
+      - Full refunds are the default for damaged-in-transit, wrong-item-shipped, and product-defect cases
+    notes: home goods glassware breakage, photo required (warranty:0) + damaged-in-transit full refund (refund:0)
 
   - id: q32
     category: multi_hop
     question: Why might SUM(unit_price * quantity) on order_items differ from SUM(products.list_price * quantity), and which should be used for reporting revenue?
-    gold_stable_ids: [product-catalog:0, product-catalog:1]
-    notes: unit_price snapshot ±10% drift (product:0) + use order_items for gross revenue (product:1)
+    gold_anchors:
+      - gross-revenue calculations should sum `unit_price * quantity` from `order_items` rather than recomputing from `products.list_price`
+      - Discontinued products keep their row in the `products` table for revenue-reporting continuity
+    notes: unit_price snapshot drift + use order_items (product:0) + discontinued-product revenue continuity (product:1)
 
   - id: q33
     category: multi_hop
     question: What's the difference between the cancellation cutoff and the refund eligibility window?
-    gold_stable_ids: [returns-process:0, refund-policy:0]
+    gold_anchors:
+      - typically 2 to 4 hours after `paid_at` on weekdays and up to 24 hours on weekends
+      - Customers may request a refund within 30 days of the order's `shipped_at` date
     notes: cancellation 2–4 hours after paid_at (returns:0) + refund 30 days from shipped_at (refund:0)
 
   - id: q34
     category: multi_hop
     question: How are international import duties handled when an international order is later refunded?
-    gold_stable_ids: [shipping-faq:0, refund-policy:1]
+    gold_anchors:
+      - These charges are the customer's responsibility and are collected by the carrier at delivery
+      - Refunds do not include the original shipping cost on orders shipped via expedited or international carriers
     notes: duties at customer's expense (shipping:0) + refunds don't include original shipping (refund:1)
 
   - id: q35
     category: multi_hop
     question: What benefits does a customer lose immediately if they close their Platinum account?
-    gold_stable_ids: [loyalty-program:0, loyalty-program:1]
-    notes: Platinum benefits incl. $100 credit (loyalty:0) + close-account loses all tier benefits (loyalty:1)
+    gold_anchors:
+      - an annual $100 store credit issued on the customer's program anniversary
+      - Customers who close their account lose all tier benefits immediately
+    notes: |
+      Platinum benefits incl. $100 credit (loyalty:0) + close-account loses all
+      tier benefits. The close-account sentence is in the loyalty overlap block,
+      so it resolves to {loyalty:0, loyalty:1}; union with the $100-credit anchor
+      is {loyalty:0, loyalty:1}.
 
   # ── adversarial (10) ──────────────────────────────────────────────────
   - id: q36
     category: adversarial
     question: What's the deadline to cancel my order?
-    gold_stable_ids: [returns-process:0]
+    gold_anchors:
+      - The cancellation cutoff is when the order enters the fulfillment-processing state
     notes: |
-      Lexical trap: refund-policy:0 mentions "eligibility window" / "30 days"
-      / "deadline-flavour" keywords. Correct answer is the cancellation cutoff
-      (2–4 hours after paid_at) in returns-process:0.
+      Lexical trap: refund-policy:0 mentions "eligibility window" / "30 days".
+      Correct answer is the cancellation cutoff in returns-process:0.
 
   - id: q37
     category: adversarial
     question: How should I compute revenue from product list prices?
-    gold_stable_ids: [product-catalog:1]
+    gold_anchors:
+      - gross-revenue calculations should sum `unit_price * quantity` from `order_items` rather than recomputing from `products.list_price`
     notes: |
       Lexical trap: product-catalog:0 defines "list_price" and pricing
-      conventions in detail. The actual guidance — "sum unit_price *
-      quantity from order_items rather than recomputing from products.list_price"
-      — is in product-catalog:1.
+      conventions in detail. The actual guidance — sum unit_price * quantity
+      from order_items — is the answer-bearing text this anchor resolves to.
+      (Legacy label said product-catalog:1; under 500/50 chunking the guidance
+      sentence lives in product-catalog:0 — US-107 re-points to where it is.)
 
   - id: q38
     category: adversarial
     question: What discount do Platinum members get?
-    gold_stable_ids: [loyalty-program:0]
+    gold_anchors:
+      - a 10% loyalty discount on all orders
     notes: |
-      Lexical trap: refund-policy:0/:1 mention discount-flavour terms
-      (partial refunds, percentages); product-catalog mentions promotional
-      discounts and order-level discounts. Correct answer is the 10% loyalty
-      discount in loyalty-program:0.
+      Lexical trap: refund-policy mentions partial-refund percentages;
+      product-catalog mentions promotional discounts. Correct answer is the 10%
+      loyalty discount (Gold benefit inherited by Platinum) in loyalty-program:0.
 
   - id: q39
     category: adversarial
     question: If my book arrives damaged in transit, what's my recourse?
-    gold_stable_ids: [refund-policy:0]
+    gold_anchors:
+      - Full refunds are the default for damaged-in-transit, wrong-item-shipped, and product-defect cases
     notes: |
-      Lexical trap: warranty-terms:0 has the "books — 30-day printing
-      defects" line that lexically matches "book" + "damaged". Damaged in
-      transit goes through refund-policy:0 (damaged-in-transit = full refund,
-      free return shipping), regardless of warranty.
+      Lexical trap: warranty-terms:0 has the "books — 30-day printing defects"
+      line that lexically matches "book" + "damaged". Damaged in transit goes
+      through refund-policy:0 (damaged-in-transit = full refund).
 
   - id: q40
     category: adversarial
     question: How quickly do you respond to my messages?
-    gold_stable_ids: [customer-service-sop:0]
+    gold_anchors:
+      - "**Live chat**: First response within 60 seconds during business hours"
     notes: |
-      Lexical trap: shipping-faq mentions "respond" / response-flavour terms
-      around tracking and updates. Correct answer is the response-time
-      targets table in customer-service-sop:0 (phone 90s, chat 60s, email
-      4 business hours).
+      Lexical trap: shipping-faq mentions "respond" around tracking updates.
+      Correct answer is the response-time targets in customer-service-sop:0.
 
   - id: q41
     category: adversarial
     question: When will my package leave the warehouse?
-    gold_stable_ids: [shipping-faq:0]
+    gold_anchors:
+      - Orders placed before 2 PM Eastern ship the same day
     notes: |
-      Lexical trap: returns-process:0 mentions "warehouse" (unauthorised
-      returns refused at warehouse). Correct answer is shipping-faq:0
-      dispatch description (Ohio fulfillment center, same-day under 2 PM
-      for expedited).
+      Lexical trap: returns-process:0 mentions "warehouse" (unauthorised returns
+      refused at warehouse). Correct answer is shipping-faq:0 dispatch timing.
 
   - id: q42
     category: adversarial
     question: Do you charge a restocking fee on returns?
-    gold_stable_ids: [refund-policy:0]
+    gold_anchors:
+      - Restocking fees do not apply at Acme Co; we do not deduct from the refund amount for handling
     notes: |
-      Lexical trap: returns-process:0 has explicit return fees ($7.95, $14.95)
-      and discusses fee-flavour topics. The actual answer is in refund-policy:0
-      — "Restocking fees do not apply at Acme Co; we do not deduct from the
-      refund amount for handling."
+      Lexical trap: returns-process:0 has explicit return fees ($7.95, $14.95).
+      The actual answer is the "restocking fees do not apply" line. (Legacy
+      label said refund-policy:0; under 500/50 chunking that line lives in
+      refund-policy:1 — US-107 re-points to where the answer text is.)
 
   - id: q43
     category: adversarial
     question: Do you sell coffee subscriptions?
-    gold_stable_ids: [product-catalog:1]
+    gold_anchors:
+      - Subscription-style food orders (granola, coffee, tea) are handled outside this document
     notes: |
       Lexical trap: loyalty-program:0 references "Subscription-style orders
-      follow the Loyalty Program cancellation rules" (subscription appears
-      explicitly). Correct answer is product-catalog:1 — Food category,
-      subscription-style food orders (granola, coffee, tea) covered in a
-      separate runbook.
+      follow the Loyalty Program cancellation rules". Correct answer is the Food
+      category subscription note in product-catalog:1.
 
   - id: q44
     category: adversarial
     question: What's the cancellation policy for my subscription?
-    gold_stable_ids: [loyalty-program:1]
+    gold_anchors:
+      - Cancelled subscriptions and refunded orders reduce trailing-12-month spend and may trigger a tier drop at the next recalculation
     notes: |
       Lexical trap: returns-process:0 has a "Cancellation vs Return" section.
-      Correct answer is the loyalty-program:1 cancellation/tier-preservation
-      section, which is the subscription-cancellation context for Acme Co's
-      subscription-style orders.
+      Correct answer is the loyalty-program "Cancellation and tier preservation"
+      section. That section is the block the chunker carries as overlap, so this
+      anchor resolves to {loyalty-program:0, loyalty-program:1} (the original
+      loyalty:1 label plus loyalty:0, which also contains the section) — the
+      recall scorer's multi-gold partial credit handles it.
 
   - id: q45
     category: adversarial
     question: What's the trailing 12-month spend window used for tier qualification?
-    gold_stable_ids: [loyalty-program:0]
+    gold_anchors:
+      - based on the customer's spend over the trailing 12 months
     notes: |
       Lexical trap: customer-service-sop:0 escalation triggers reference a
-      "trailing 6 months" window for refund frequency. Correct answer is
-      loyalty-program:0 — trailing 12-month spend determines tier.
+      "trailing 6 months" window. Correct answer is loyalty-program:0 —
+      trailing 12-month spend determines tier.
 
   # ── paraphrase (5) ────────────────────────────────────────────────────
   - id: q46
     category: paraphrase
     question: Who pays for return postage when I change my mind?
-    gold_stable_ids: [returns-process:0]
+    gold_anchors:
+      - "Return shipping is paid by the customer (deducted from the refund or charged to the original payment method)"
     notes: |
       Out-of-vocab: "postage" → corpus uses "shipping"; "change my mind" →
-      corpus uses "customer changed their mind" / "customer no longer needs
-      the item". Answer: customer pays ($7.95 under 5lb, etc.).
+      corpus uses "Customer changed their mind". Answer: customer pays.
 
   - id: q47
     category: paraphrase
     question: If I paid by ACH transfer, when will I see my money back?
-    gold_stable_ids: [refund-policy:0]
+    gold_anchors:
+      - bank transfers in 3–5 business days
     notes: |
       Out-of-vocab: "ACH transfer" → corpus uses "bank transfer". Answer:
       3–5 business days for bank transfer in refund-policy:0.
@@ -383,25 +472,27 @@ questions:
   - id: q48
     category: paraphrase
     question: If a customer mentions their complaint on Twitter or Trustpilot, what's the agent's playbook?
-    gold_stable_ids: [customer-service-sop:1]
+    gold_anchors:
+      - agents should not request that the review be removed or modified in exchange for resolution
     notes: |
       Out-of-vocab: "Twitter" / "Trustpilot" → corpus uses "social media,
-      Trustpilot, etc." (Trustpilot does appear) and "negative reviews".
-      Answer: don't request review removal in exchange for resolution.
+      Trustpilot, etc.". Answer: don't request review removal for resolution.
 
   - id: q49
     category: paraphrase
     question: What happens to a product's discoverability on the storefront when too many people send it back?
-    gold_stable_ids: [returns-process:1]
+    gold_anchors:
+      - A SKU placed on quality review may be temporarily de-listed from the storefront
     notes: |
       Out-of-vocab: "discoverability" → corpus uses "de-listed from the
-      storefront"; "send it back" → corpus uses "returned" / "returns".
-      Answer: SKU placed on quality review may be temporarily de-listed.
+      storefront"; "send it back" → corpus uses "returned". Answer: temporarily
+      de-listed pending quality review.
 
   - id: q50
     category: paraphrase
     question: Are digital gift vouchers eligible for cash-back?
-    gold_stable_ids: [refund-policy:1]
+    gold_anchors:
+      - Gift cards are not refundable
     notes: |
       Out-of-vocab: "digital gift vouchers" → corpus uses "gift cards";
       "cash-back" → corpus uses "refundable". Answer: gift cards are not

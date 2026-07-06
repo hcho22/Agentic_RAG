@@ -68,6 +68,11 @@ from retrieval import (  # noqa: E402
     search_documents,
 )
 
+from .content_anchors import (  # noqa: E402
+    ContentAnchorResolver,
+    fetch_chunk_contents,
+    parse_gold_anchors,
+)
 from .e6 import (  # noqa: E402
     E6_VIEWER_EMAIL,
     E6_VIEWER_ID,
@@ -244,6 +249,11 @@ def load_questions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
     `viewer_construction` is an empty dict when the YAML lacks the block
     (legacy format); the runner then falls back to full_access only.
+
+    US-107: gold is authored as `gold_anchors` (answer-bearing content spans),
+    not `gold_stable_ids`. This validates the anchor *structure* only (DB-free);
+    the anchors are resolved to concrete `gold_stable_ids` at eval time in
+    `main()`, once the chunk contents are fetched (`resolve_gold_anchors`).
     """
     with path.open() as f:
         data = yaml.safe_load(f)
@@ -264,9 +274,10 @@ def load_questions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
             raise RuntimeError(
                 f"{qid}: category must be one of {CATEGORY_ORDER}, got {q.get('category')!r}"
             )
-        gold = q.get("gold_stable_ids")
-        if not isinstance(gold, list) or not gold:
-            raise RuntimeError(f"{qid}: gold_stable_ids must be a non-empty list")
+        # US-107: validate the content-anchor structure (non-empty list of
+        # answer-bearing spans). Resolution to stable_ids happens later, once
+        # chunk contents are available. `gold_stable_ids` is never authored.
+        parse_gold_anchors(q)
     viewer_construction = data.get("viewer_construction", {}) or {}
     return questions, viewer_construction
 
@@ -294,6 +305,28 @@ async def fetch_stable_id_map(database_url: str) -> dict[str, str]:
     finally:
         await conn.close()
     return {str(r["id"]): r["stable_id"] for r in rows}
+
+
+def resolve_gold_anchors(
+    questions: list[dict[str, Any]], chunk_contents: dict[str, str]
+) -> None:
+    """US-107: resolve every question's content anchors to `gold_stable_ids`.
+
+    Injects the resolved list into each question dict in place so the rest of
+    the runner (viewer construction, recall scoring, E6) reads `gold_stable_ids`
+    exactly as it did when the field was authored — the anchor layer is
+    invisible past this point. A `ZeroResolveError` (an anchor matching no
+    current chunk) propagates and fails the whole run — never a silent
+    `recall=0`. A straddling anchor resolves to both overlapping chunks.
+    """
+    resolver = ContentAnchorResolver(chunk_contents)
+    resolver.resolve_all(questions)
+    total_gold = sum(len(q["gold_stable_ids"]) for q in questions)
+    log.info(
+        "US-107: resolved content anchors for %d questions -> %d gold stable_ids",
+        len(questions),
+        total_gold,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1508,6 +1541,14 @@ async def amain() -> int:
         raise RuntimeError(
             "no chunks with stable_id found — run `python -m db_seed.corpus_seed` first"
         )
+
+    # US-107: resolve the authored content anchors against the CURRENT chunk
+    # contents and inject `gold_stable_ids` per question. Done here (not in
+    # load_questions) because resolution needs the live chunk text; a re-seed at
+    # a different chunk_size re-resolves with zero golden-set edits. A
+    # zero-resolve anchor raises here and fails the run before any retrieval.
+    chunk_contents = await fetch_chunk_contents(database_url)
+    resolve_gold_anchors(questions, chunk_contents)
 
     # US-042: post-US-037 the match_chunks predicate requires auth.uid() to
     # match either the chunk owner or an ACL row, so service-role-only

@@ -2,9 +2,11 @@
 
 Reads markdown files from `db_seed/corpus/`, chunks them via the same
 `backend.chunking.chunk_text` the real ingestion path uses, embeds via
-OpenAI, and inserts deterministic `documents` + `chunks` rows so the
-US-033 golden set can key on `chunks.stable_id` values that survive
-re-seeds and clean CI bootstraps.
+OpenAI, and inserts deterministic `documents` + `chunks` rows that are
+byte-identical across re-seeds and clean CI bootstraps, so the US-033
+golden set resolves reproducibly against the corpus (its gold labels are
+content anchors resolved to the current `chunks.stable_id`s at eval time,
+US-107).
 
 Re-runnable: identifies existing corpus rows by
 `documents.metadata->>'corpus_seed' = 'true'` and deletes them before

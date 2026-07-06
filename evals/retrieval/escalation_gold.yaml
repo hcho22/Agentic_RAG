@@ -30,8 +30,10 @@
 #   id              — e7-{pop}-NN, unique, never reused
 #   escalation      — no_context | answerable_faithful | should_escalate
 #   question        — the natural-language customer message passed to the pipeline
-#   gold_stable_ids — content anchor (db_seed.corpus_seed stable_ids,
-#                     "{filename_slug}:{chunk_index}"); REQUIRED non-empty for
+#   gold_stable_ids — chunk-index list (db_seed.corpus_seed stable_ids,
+#                     "{filename_slug}:{chunk_index}"); the legacy directly-authored
+#                     form the retrieval gold used before US-107 (its content-anchor
+#                     conversion is US-108). REQUIRED non-empty for
 #                     answerable_faithful/should_escalate, ABSENT for no_context
 #   reference       — hand-authored gold answer; REQUIRED non-empty for
 #                     answerable_faithful (P2, US-053) and should_escalate
