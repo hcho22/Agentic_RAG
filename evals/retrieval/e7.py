@@ -1,19 +1,35 @@
-"""US-051: E7 escalation golden-set schema + loader (ADR-0003 / E9 support face).
+"""US-051 / US-108: E7 escalation golden-set schema + loader (ADR-0003 / E9).
 
-E7 is the **support-face** eval layer: it scores the deflection pipeline (the
-US-047 retrieval gate + the US-048 faithfulness gate) instead of raw retrieval
-recall. Like E6, it is **additive** to the E4 retrieval sweep — a separate
-golden set in `escalation_gold.yaml`, run by its own machinery (US-052+), never
-touching the six-cell `full/partial/no_access × pre/post` sweep in `runner.py`.
+E7 is the **support-face** layer of the one layered golden set: it scores the
+deflection pipeline (the US-047 retrieval gate + the US-048 faithfulness gate)
+instead of raw retrieval recall. Like E6, it is **additive** to the E4 retrieval
+sweep — a separate golden set in `escalation_gold.yaml`, run by its own machinery
+(US-052+), never touching the six-cell `full/partial/no_access × pre/post` sweep
+in `runner.py`.
 
-This module owns the **schema + loader** only (US-051). The populations are
-*derived from the existing gold-chunk anchor*, not authored as a parallel set:
-each question carries exactly one `escalation` label, and the P2/P3 labels are
-authored directly as a `gold_stable_ids` chunk-index list (`db_seed.corpus_seed`
-stable_ids, "{filename_slug}:{chunk_index}"). This is the legacy directly-authored
-form the retrieval gold used before US-107 moved it to content anchors resolved
-at eval time; E7's `escalation_gold.yaml` keeps the chunk-index form (its
-content-anchor conversion is US-108).
+**The layered format (US-108).** The kit ships ONE layered golden-set format so a
+buyer's authoring burden scales with the faces they ship:
+
+* **Base** (every buyer) — `question → gold content-anchor labels + category`, the
+  minimal primitive authored in `retrieval_gold.yaml` (US-107).
+* **Derived for free** — the runner builds the three E4 viewer setups AND the E7
+  P1b no-access replay from the gold labels; the buyer hand-writes neither a
+  permission test nor a P1b case.
+* **Support-face** (support buyers only) — one `escalation` label per question, the
+  layer this module owns. It is **optional**: a knowledge-assistant-only buyer
+  ships no escalation labels and runs the base + derived-for-free layers without
+  error (`runner.load_questions` recognizes the layer as optional); a support
+  buyer additionally runs this escalation suite.
+
+This module owns the support-face **schema + loader + anchor resolver** (US-051 +
+US-108). The P2/P3 gold labels are authored on the SAME US-107 content-anchor
+primitive as the base layer — an answer-bearing `gold_anchors` span resolved to
+the current chunk stable_id(s) at eval time (`content_anchors.py`), replacing the
+legacy directly-authored `gold_stable_ids` chunk-index list. So a
+`chunk_size`/overlap re-seed needs ZERO re-labeling here too, and an anchor that
+matches no chunk is a HARD ERROR (never a silent miss). The populations are still
+*derived from the existing gold anchor*, not authored as a parallel set: each
+question carries exactly one `escalation` label.
 
 The three hand-authored populations (E9 support-face layer) and their P-codes:
 
@@ -36,7 +52,7 @@ gold chunks?".
 **P1b is deliberately NOT a label here.** P1b — a question that *is* answerable
 in general but for which *this viewer* can see no gold chunk — is the derived,
 viewer-parameterized case (US-057): the runner reconstructs it at run time from a
-P2/P3 row via `runner.compute_visible_stable_ids`'s ``no_access`` construction.
+P2 row via `runner.compute_visible_stable_ids`'s ``no_access`` construction.
 It is never hand-authored, so the schema has no `p1b` value and the loader
 rejects one as out-of-enum.
 """
@@ -47,6 +63,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from evals.retrieval.content_anchors import (
+    ContentAnchorResolver,
+    parse_gold_anchors,
+)
 
 # The default E7 golden set, sibling to the E4 `retrieval_gold.yaml`.
 ESCALATION_GOLD = Path(__file__).resolve().parent / "escalation_gold.yaml"
@@ -64,9 +85,9 @@ POPULATION_BY_LABEL: dict[str, str] = {
 }
 
 # The gold-chunk labels: a P2/P3 row MUST name the gold chunks that make
-# retrieval strong (authored directly as `gold_stable_ids`, the legacy
-# chunk-index form; see the module docstring). A `no_context`
-# (P1a) row MUST NOT — there is, by definition, no corpus chunk to anchor on.
+# retrieval strong, authored as US-107 `gold_anchors` content anchors (US-108;
+# see the module docstring). A `no_context` (P1a) row MUST NOT — there is, by
+# definition, no corpus chunk to anchor on.
 _ANCHORED_LABELS = ("answerable_faithful", "should_escalate")
 
 # Labels scored end-to-end against the OFFLINE cross-family Claude judge, which
@@ -84,10 +105,12 @@ def load_escalation_questions(path: Path = ESCALATION_GOLD) -> list[dict[str, An
     Mirrors the enum/dedup discipline of `runner.load_questions`: a top-level
     `questions` non-empty list, each row with a unique string `id`, a non-empty
     `question`, and exactly one `escalation` label in `ESCALATION_LABELS`. The
-    gold-chunk anchor is **required and non-empty** for the gold-chunk
-    labels (`answerable_faithful` / `should_escalate`) and **forbidden** for
-    `no_context` (genuinely-no-context rows carry no gold). The two LLM-judged
-    labels (`answerable_faithful` P2, US-053; `should_escalate` P3, US-054) each
+    gold anchor is **required and non-empty** for the gold-chunk labels
+    (`answerable_faithful` / `should_escalate`) — a US-107 `gold_anchors` list of
+    content anchors, structurally validated by `content_anchors.parse_gold_anchors`
+    (bare string or `{text, doc}` mapping) — and **forbidden** for `no_context`
+    (genuinely-no-context rows carry no gold). The two LLM-judged labels
+    (`answerable_faithful` P2, US-053; `should_escalate` P3, US-054) each
     additionally **require** a non-empty `reference` answer — the gold the offline
     Claude judge scores the drafted answer against (for P3 the gold encodes the
     should-escalate / human-deferral expectation).
@@ -97,8 +120,9 @@ def load_escalation_questions(path: Path = ESCALATION_GOLD) -> list[dict[str, An
     a typo or a stray P1b row fails loudly instead of being silently scored.
     Returns the raw question dicts unchanged (the scoring runner — US-052+ —
     consumes them), so this loader stays pure: no DB, no network, no backend
-    import. Membership of each `stable_id` in the live corpus is a scoring-time
-    concern, validated then, not here.
+    import. This validates only the anchor *structure*; RESOLVING each anchor to a
+    current chunk stable_id (and the fail-loud zero-resolve check) is a
+    scoring-time concern handled by `resolve_escalation_gold`, not here.
     """
     with path.open() as f:
         data = yaml.safe_load(f)
@@ -127,25 +151,24 @@ def load_escalation_questions(path: Path = ESCALATION_GOLD) -> list[dict[str, An
         if label not in ESCALATION_LABELS:
             raise RuntimeError(
                 f"{qid}: escalation must be one of {ESCALATION_LABELS}, got {label!r} "
-                "(P1b is the derived no-access case rebuilt from a P2/P3 row at run "
+                "(P1b is the derived no-access case rebuilt from a P2 row at run "
                 "time — never a hand-authored label)"
             )
 
-        gold = q.get("gold_stable_ids")
+        gold = q.get("gold_anchors")
         if label in _ANCHORED_LABELS:
             if not isinstance(gold, list) or not gold:
                 raise RuntimeError(
                     f"{qid}: a {label} ({POPULATION_BY_LABEL[label]}) row must carry a "
-                    "non-empty gold_stable_ids list (content-anchored on the chunks "
+                    "non-empty gold_anchors list (US-107 content anchors on the chunks "
                     "that make retrieval strong)"
                 )
-            if not all(isinstance(s, str) and s for s in gold):
-                raise RuntimeError(
-                    f"{qid}: gold_stable_ids must be non-empty strings, got {gold!r}"
-                )
+            # Validate each anchor's shape (bare string or {text, doc} mapping),
+            # reusing the same structural validator the base retrieval gold uses.
+            parse_gold_anchors(q)
         elif gold:  # no_context — gold must be absent or empty
             raise RuntimeError(
-                f"{qid}: a no_context (P1a) row must have NO gold_stable_ids "
+                f"{qid}: a no_context (P1a) row must have NO gold_anchors "
                 f"(genuinely-no-context), got {gold!r}"
             )
 
@@ -159,3 +182,31 @@ def load_escalation_questions(path: Path = ESCALATION_GOLD) -> list[dict[str, An
                 )
 
     return questions
+
+
+def resolve_escalation_gold(
+    questions: list[dict[str, Any]],
+    chunk_contents: dict[str, str],
+) -> None:
+    """Resolve each gold-bearing escalation row's content anchors in place (US-108).
+
+    The P2/P3 gold labels carry US-107 `gold_anchors` content anchors; this
+    resolves them against `chunk_contents` (the live corpus text the runner
+    fetched from the DB) to the current chunk `stable_id`(s) and injects the
+    resolved `gold_stable_ids` list the P1b no-access replay consumes — exactly as
+    `runner.resolve_gold_anchors` does for the base retrieval gold. A `no_context`
+    (P1a) row has no anchors and gets an empty `gold_stable_ids`.
+
+    Any anchor matching zero current chunks raises `content_anchors.ZeroResolveError`
+    (naming the question id + anchor text) and fails the run — never a silent miss.
+    Pure: it mutates the dicts and touches no DB/network (the caller fetches
+    `chunk_contents`), so the resolver stays unit-testable against an offline
+    chunking of the corpus.
+    """
+    resolver = ContentAnchorResolver(chunk_contents)
+    for q in questions:
+        if q.get("gold_anchors"):
+            q["gold_stable_ids"] = resolver.resolve_question(q)
+        else:
+            # no_context (P1a): genuinely no gold chunk to anchor on.
+            q["gold_stable_ids"] = []

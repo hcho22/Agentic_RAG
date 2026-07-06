@@ -1,8 +1,8 @@
-"""US-051 validation test: E7 escalation golden-set schema + loader.
+"""US-051 / US-108 validation test: E7 escalation golden-set schema + loader.
 
-Pure / offline — no DB, no network, no backend import — like the offline half of
-`test_e6.py`. Exercises `evals.retrieval.e7.load_escalation_questions` against
-the shipped `escalation_gold.yaml` and against tmp YAML fixtures.
+Pure / offline — no DB, no network — like the offline half of `test_e6.py`.
+Exercises `evals.retrieval.e7.load_escalation_questions` against the shipped
+`escalation_gold.yaml` and against tmp YAML fixtures.
 
 Covers the PRD validation test:
   * a golden YAML with one P1a, one P2, one P3 row loads with its labels;
@@ -11,8 +11,10 @@ Covers the PRD validation test:
 plus the failure indicators:
   * an out-of-enum label (including a hand-authored `p1b`) is rejected, never
     silently accepted, and the message names the allowed set;
-  * the content-anchor rules: a no_context (P1a) row may NOT carry gold; an
-    answerable_faithful/should_escalate row MUST carry a non-empty gold list;
+  * the content-anchor rules (US-108): a no_context (P1a) row may NOT carry gold;
+    an answerable_faithful/should_escalate row MUST carry a non-empty
+    `gold_anchors` list (US-107 content anchors — bare string or {text, doc}),
+    replacing the legacy `gold_stable_ids` chunk-index primitive;
   * the reference rule (US-053/054): an answerable_faithful (P2) AND a
     should_escalate (P3) row MUST each carry a non-empty `reference` answer (the
     offline judge's gold); only no_context (P1a) needs none;
@@ -37,7 +39,8 @@ from evals.retrieval.e7 import (
 )
 
 # A minimal valid trio: one of each hand-authored population, anchored to real
-# corpus chunks for the content-anchored labels.
+# corpus spans for the content-anchored labels (US-108). Exercises BOTH anchor
+# forms — the P2 row uses a bare-string anchor, the P3 row a {text, doc} mapping.
 _VALID_TRIO = """\
 questions:
   - id: e7-p1a-x
@@ -46,12 +49,15 @@ questions:
   - id: e7-p2-x
     escalation: answerable_faithful
     question: How long is the electronics warranty?
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Electronics carry a 12-month limited warranty against manufacturing defects
     reference: Electronics carry a 12-month limited warranty from shipped_at.
   - id: e7-p3-x
     escalation: should_escalate
     question: What is the warranty period for jewelry?
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - text: Acme Co's product warranty terms by category
+        doc: warranty-terms
     reference: The policy does not cover jewelry, so no warranty period can be grounded; escalate to a human.
 """
 
@@ -86,10 +92,18 @@ def test_prd_valid_trio_loads() -> None:
     assert len(rows) == 3, f"expected 3 rows, got {len(rows)}"
     labels = [r["escalation"] for r in rows]
     assert labels == ["no_context", "answerable_faithful", "should_escalate"], labels
-    # P1a has no anchor; the anchored rows do.
+    # P1a has no anchor; the anchored rows do. The loader validates anchor
+    # STRUCTURE and never injects `gold_stable_ids` (resolution is a later,
+    # DB-backed step — `resolve_escalation_gold`).
     by_id = {r["id"]: r for r in rows}
-    assert "gold_stable_ids" not in by_id["e7-p1a-x"]
-    assert by_id["e7-p2-x"]["gold_stable_ids"] == ["warranty-terms:0"]
+    assert "gold_anchors" not in by_id["e7-p1a-x"]
+    assert "gold_stable_ids" not in by_id["e7-p2-x"]
+    assert by_id["e7-p2-x"]["gold_anchors"] == [
+        "Electronics carry a 12-month limited warranty against manufacturing defects"
+    ]
+    assert by_id["e7-p3-x"]["gold_anchors"] == [
+        {"text": "Acme Co's product warranty terms by category", "doc": "warranty-terms"}
+    ]
     # US-053/054: the P2 AND P3 rows carry the reference answer the offline judge
     # scores against (the P3 reference encodes the should-escalate expectation).
     assert by_id["e7-p2-x"]["reference"].startswith("Electronics carry a 12-month")
@@ -104,7 +118,8 @@ def test_prd_invalid_label_rejected() -> None:
   - id: e7-bogus
     escalation: maybe_escalate
     question: Should this be escalated?
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Electronics carry a 12-month limited warranty against manufacturing defects
 """
     _expect_error(bad, "e7-bogus", "no_context", "answerable_faithful", "should_escalate")
     print("ok: an out-of-enum escalation label is rejected, naming the allowed enum")
@@ -118,7 +133,8 @@ questions:
   - id: e7-p1b-hand
     escalation: p1b
     question: A viewer-specific no-access question someone tried to hand-author.
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Electronics carry a 12-month limited warranty against manufacturing defects
 """
     _expect_error(text, "e7-p1b-hand", "escalation must be one of")
     print("ok: a hand-authored p1b label is rejected (P1b is derived, not authored)")
@@ -131,10 +147,11 @@ questions:
   - id: e7-bad-p1a
     escalation: no_context
     question: A no-context question that wrongly names a gold chunk.
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Electronics carry a 12-month limited warranty against manufacturing defects
 """
-    _expect_error(text, "e7-bad-p1a", "no_context", "NO gold_stable_ids")
-    print("ok: a no_context row with gold_stable_ids is rejected")
+    _expect_error(text, "e7-bad-p1a", "no_context", "NO gold_anchors")
+    print("ok: a no_context row with gold_anchors is rejected")
 
 
 def test_anchored_without_gold_rejected() -> None:
@@ -147,15 +164,15 @@ questions:
     escalation: {label}
     question: A content-anchored row missing its gold anchor.
 """
-        _expect_error(missing, "e7-noanchor", "non-empty gold_stable_ids")
+        _expect_error(missing, "e7-noanchor", "non-empty gold_anchors")
         empty = f"""\
 questions:
   - id: e7-emptyanchor
     escalation: {label}
     question: A content-anchored row with an empty gold anchor.
-    gold_stable_ids: []
+    gold_anchors: []
 """
-        _expect_error(empty, "e7-emptyanchor", "non-empty gold_stable_ids")
+        _expect_error(empty, "e7-emptyanchor", "non-empty gold_anchors")
     print("ok: P2/P3 rows without a non-empty gold anchor are rejected")
 
 
@@ -171,7 +188,8 @@ questions:
   - id: e7-noref
     escalation: {label}
     question: A content-anchored row missing its reference.
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Electronics carry a 12-month limited warranty against manufacturing defects
 """
         _expect_error(missing, "e7-noref", "non-empty `reference`")
         empty = f"""\
@@ -179,7 +197,8 @@ questions:
   - id: e7-emptyref
     escalation: {label}
     question: A content-anchored row with an empty reference.
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - Electronics carry a 12-month limited warranty against manufacturing defects
     reference: ""
 """
         _expect_error(empty, "e7-emptyref", "non-empty `reference`")
@@ -195,18 +214,31 @@ questions:
     print("ok: a P2/P3 row without a reference is rejected; P1a needs none (US-053/054)")
 
 
-def test_nonstring_gold_rejected() -> None:
-    """gold_stable_ids must be non-empty strings (catches a YAML typo like an int
-    chunk index or an empty entry)."""
-    text = """\
+def test_malformed_anchor_rejected() -> None:
+    """A gold_anchors entry must be a bare string or a {text, doc} mapping — a bare
+    int (e.g. a YAML typo) is rejected by the shared content-anchor validator, and
+    an unknown mapping key is rejected too (US-107 parse_gold_anchors)."""
+    bad_int = """\
 questions:
   - id: e7-badgold
     escalation: answerable_faithful
-    question: A row whose gold anchor is not a list of strings.
-    gold_stable_ids: [123]
+    question: A row whose gold anchor is a bare int, not a string or mapping.
+    gold_anchors: [123]
+    reference: some reference
 """
-    _expect_error(text, "e7-badgold", "non-empty strings")
-    print("ok: non-string gold_stable_ids entries are rejected")
+    _expect_error(bad_int, "e7-badgold", "must be a string or a")
+    bad_key = """\
+questions:
+  - id: e7-badkey
+    escalation: answerable_faithful
+    question: A row whose gold anchor mapping has an unknown key.
+    gold_anchors:
+      - text: Electronics carry a 12-month limited warranty against manufacturing defects
+        chunk: warranty-terms:0
+    reference: some reference
+"""
+    _expect_error(bad_key, "e7-badkey", "unknown key")
+    print("ok: malformed gold_anchors entries (bare int, unknown key) are rejected")
 
 
 def test_structural_errors_rejected() -> None:
@@ -256,7 +288,7 @@ def test_shipped_golden_set_is_consistent() -> None:
         assert label in ESCALATION_LABELS, f"{r['id']}: out-of-enum label {label!r}"
         assert label != "p1b", "the shipped set must contain NO hand-authored p1b row"
         seen_labels.add(label)
-        gold = r.get("gold_stable_ids")
+        gold = r.get("gold_anchors")
         if label == "no_context":
             assert not gold, f"{r['id']}: P1a must carry no gold"
         else:
@@ -278,10 +310,10 @@ def main() -> None:
     test_no_context_with_gold_rejected()
     test_anchored_without_gold_rejected()
     test_referenced_labels_without_reference_rejected()
-    test_nonstring_gold_rejected()
+    test_malformed_anchor_rejected()
     test_structural_errors_rejected()
     test_shipped_golden_set_is_consistent()
-    print("\nPASS: 9 E7 schema/loader (US-051/053/054) test groups")
+    print("\nPASS: 9 E7 schema/loader (US-051/053/054/108) test groups")
 
 
 if __name__ == "__main__":

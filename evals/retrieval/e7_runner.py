@@ -141,6 +141,7 @@ from .e7 import (  # noqa: E402
     ESCALATION_GOLD,
     POPULATION_BY_LABEL,
     load_escalation_questions,
+    resolve_escalation_gold,
 )
 
 log = logging.getLogger("agentic_rag.evals.retrieval.e7")
@@ -2896,6 +2897,18 @@ async def amain() -> int:
         # member (else the US-003 membership clause hides the whole corpus).
         await r.ensure_viewer_users(p1b_database_url)
         stable_id_map = await r.fetch_stable_id_map(p1b_database_url)
+        # US-108: resolve the P2/P3 content anchors to the CURRENT chunk stable_ids
+        # against the live corpus text — the same fail-loud resolution
+        # `runner.resolve_gold_anchors` runs for the base retrieval gold. This
+        # injects each gold-bearing row's `gold_stable_ids` (P1a rows stay empty)
+        # so the no-access replay below can revoke exactly this question's gold; a
+        # non-resolving anchor raises ZeroResolveError and fails the run here,
+        # before any retrieval.
+        from .content_anchors import fetch_chunk_contents
+
+        resolve_escalation_gold(
+            questions, await fetch_chunk_contents(p1b_database_url)
+        )
         p1b_all_stable_ids = sorted(stable_id_map.values())
         p1b_sid_to_chunk_id = {
             sid: uuid.UUID(cid) for cid, sid in stable_id_map.items()

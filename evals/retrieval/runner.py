@@ -83,6 +83,11 @@ from .e6 import (  # noqa: E402
     render_e6_section,
     run_e6,
 )
+# US-108: the support-face layer's label vocabulary, so the base loader can
+# recognize + fail-closed-validate the OPTIONAL `escalation` field on the one
+# layered golden set. `e7` imports only `content_anchors` (never `runner`), so
+# this edge introduces no import cycle.
+from .e7 import ESCALATION_LABELS  # noqa: E402
 from .ragas import (  # noqa: E402
     RAGAS_CELL_IDS,
     RAGAS_JUDGE_MODEL,
@@ -254,6 +259,16 @@ def load_questions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     not `gold_stable_ids`. This validates the anchor *structure* only (DB-free);
     the anchors are resolved to concrete `gold_stable_ids` at eval time in
     `main()`, once the chunk contents are fetched (`resolve_gold_anchors`).
+
+    US-108 (the layered golden set): the base layer is `gold_anchors + category`;
+    the three E4 viewer setups and the E7 P1b population are DERIVED from it (the
+    buyer hand-writes no permission/P1b entries). The support-face `escalation`
+    label is an OPTIONAL layer — a base-only (knowledge-assistant) golden set
+    carries none and loads/runs unchanged, so it is never required here. When a
+    question DOES carry the label it is validated fail-closed against
+    `ESCALATION_LABELS` (a typo is rejected, not silently ignored); the escalation
+    SUITE that scores those labels is run separately by `e7_runner`
+    (`load_escalation_questions`).
     """
     with path.open() as f:
         data = yaml.safe_load(f)
@@ -278,8 +293,27 @@ def load_questions(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         # answer-bearing spans). Resolution to stable_ids happens later, once
         # chunk contents are available. `gold_stable_ids` is never authored.
         parse_gold_anchors(q)
+        # US-108: the OPTIONAL support-face layer. Absent on a base-only set (no
+        # error); present -> fail-closed validate the label so a typo can't slip
+        # a support question past the enum silently.
+        esc = q.get("escalation")
+        if esc is not None and esc not in ESCALATION_LABELS:
+            raise RuntimeError(
+                f"{qid}: optional `escalation` support-face label must be one of "
+                f"{ESCALATION_LABELS}, got {esc!r}"
+            )
     viewer_construction = data.get("viewer_construction", {}) or {}
     return questions, viewer_construction
+
+
+def has_support_layer(questions: list[dict[str, Any]]) -> bool:
+    """True iff any question carries the optional `escalation` support-face layer.
+
+    US-108: a base-only (knowledge-assistant) golden set has none — it runs only
+    the base + derived-for-free layers (retrieval recall + the E4 viewer matrix);
+    a support golden set additionally runs the escalation suite (`e7_runner`).
+    """
+    return any(q.get("escalation") is not None for q in questions)
 
 
 def load_generation_gold(path: Path) -> dict[str, str]:

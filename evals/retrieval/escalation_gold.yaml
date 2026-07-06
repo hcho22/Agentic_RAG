@@ -1,15 +1,43 @@
-# US-051: E7 escalation golden set (ADR-0003 / E9 support-face layer).
+# US-051 / US-108: E7 escalation golden set — the SUPPORT-FACE layer of the one
+# layered golden set (ADR-0003 / E9).
 #
-# Scores the deflection pipeline (US-047 retrieval gate + US-048 faithfulness
-# gate), NOT raw retrieval recall — so it is additive to the E4 sweep in
-# `retrieval_gold.yaml` and never touches it. Loaded + validated by
-# `evals.retrieval.e7.load_escalation_questions`.
+# THE LAYERED FORMAT (US-108):
+#   The kit ships ONE layered golden-set format with three layers, so authoring
+#   burden scales with the faces a buyer ships:
+#     * BASE (every buyer)      — question → gold content-anchor labels + category.
+#       The minimal primitive, authored in `retrieval_gold.yaml` (US-107).
+#     * DERIVED FOR FREE        — the three E4 viewer setups (full/partial/no_access)
+#       AND the E7 P1b no-access replay are constructed by the runner from the gold
+#       labels; the buyer hand-writes neither a permission test nor a P1b case.
+#     * SUPPORT-FACE (this file, support buyers only) — one `escalation` label per
+#       question. Absent for a knowledge-assistant-only buyer; the loader treats
+#       this layer as optional (a non-support golden set omits it entirely and
+#       still runs the base + derived-for-free layers without error).
+#
+#   This file is the support-face layer, built on the SAME US-107 content-anchor
+#   primitive as the base layer — NOT a parallel gold format. It scores the
+#   deflection pipeline (the US-047 retrieval gate + the US-048 faithfulness gate),
+#   NOT raw retrieval recall, so it is additive to the E4 sweep in
+#   `retrieval_gold.yaml` and never touches it. Loaded + validated by
+#   `evals.retrieval.e7.load_escalation_questions`.
+#
+# US-108 — CONTENT ANCHORS (the change from the US-051 baseline):
+#   The P2/P3 gold labels are now authored as **answer-bearing content anchors**
+#   (a quoted span that appears verbatim in the corpus — case/punctuation exact,
+#   whitespace-normalized), exactly like `retrieval_gold.yaml`, replacing the
+#   legacy directly-authored `gold_stable_ids` chunk-index primitive. At eval time
+#   `evals.retrieval.content_anchors` resolves each anchor to whichever chunk
+#   stable_id(s) currently CONTAIN its text; `e7.resolve_escalation_gold` injects
+#   the resolved `gold_stable_ids` list the P1b no-access replay consumes. So a
+#   `chunk_size`/overlap/docling re-seed needs ZERO re-labeling here too, and an
+#   anchor that matches no chunk is a HARD ERROR naming the question id + anchor
+#   text (never a silent miss).
 #
 # Each question carries exactly ONE `escalation` label; the populations are
 # DERIVED from the existing gold-chunk anchor, not authored as a parallel set:
 #
 #   no_context          (P1a) — genuinely-no-context. The answer is absent from
-#                               the corpus, so there are NO gold chunks. Expected
+#                               the corpus, so there are NO gold anchors. Expected
 #                               to escalate at the retrieval gate (weak cosine),
 #                               no draft/judge call. (US-052)
 #   answerable_faithful (P2)  — strong retrieval AND a faithful grounded answer
@@ -23,18 +51,20 @@
 #                               metric the ceiling governs. (US-054/055/059)
 #
 # P1b is NOT a label: it is the derived viewer-parameterized no-access case
-# (US-057), rebuilt at run time from a P2/P3 row via the runner's
+# (US-057), rebuilt at run time from a P2 row via the runner's
 # `compute_visible_stable_ids` no_access construction — never hand-authored.
 #
 # Field semantics:
 #   id              — e7-{pop}-NN, unique, never reused
 #   escalation      — no_context | answerable_faithful | should_escalate
 #   question        — the natural-language customer message passed to the pipeline
-#   gold_stable_ids — chunk-index list (db_seed.corpus_seed stable_ids,
-#                     "{filename_slug}:{chunk_index}"); the legacy directly-authored
-#                     form the retrieval gold used before US-107 (its content-anchor
-#                     conversion is US-108). REQUIRED non-empty for
-#                     answerable_faithful/should_escalate, ABSENT for no_context
+#   gold_anchors    — list of one or more content anchors (US-107 format). Each is
+#                     either a bare string (an answer-bearing span, resolved
+#                     unscoped) or a {text, doc} mapping where `doc` is a
+#                     filename_slug restricting resolution to that document's
+#                     chunks. REQUIRED non-empty for answerable_faithful /
+#                     should_escalate (the chunks that make retrieval strong),
+#                     ABSENT for no_context (genuinely-no-context — no gold chunk).
 #   reference       — hand-authored gold answer; REQUIRED non-empty for
 #                     answerable_faithful (P2, US-053) and should_escalate
 #                     (P3, US-054), scored end-to-end by the OFFLINE cross-family
@@ -46,7 +76,9 @@
 #
 # Anchored against the 7-doc / 14-chunk e-commerce support corpus
 # (db_seed/corpus): shipping-faq, warranty-terms, refund-policy, returns-process,
-# loyalty-program, product-catalog, customer-service-sop — 2 chunks each.
+# loyalty-program, product-catalog, customer-service-sop — 2 chunks each. The
+# anchor spans are copied verbatim from those chunks (and re-use the exact spans
+# `retrieval_gold.yaml` already proves resolve), then verified by the resolver.
 
 questions:
   # ── no_context / P1a (genuinely off-topic — no gold chunk) ───────────────
@@ -82,46 +114,63 @@ questions:
   - id: e7-p2-01
     escalation: answerable_faithful
     question: How long is the electronics warranty?
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - text: Electronics carry a 12-month limited warranty against manufacturing defects
+        doc: warranty-terms
     reference: Electronics carry a 12-month limited warranty against manufacturing defects, starting on the order's shipped_at date.
     notes: warranty-terms:0 Electronics section — 12-month limited warranty from shipped_at.
 
   - id: e7-p2-02
     escalation: answerable_faithful
     question: How long does standard domestic shipping take?
-    gold_stable_ids: [shipping-faq:0]
+    gold_anchors:
+      - text: Standard shipping is 3–5 business days within the contiguous US
+        doc: shipping-faq
     reference: Standard shipping takes 3–5 business days within the contiguous US (rural ZIP codes may add 1–2 days).
     notes: shipping-faq:0 — 3–5 business days within the contiguous US.
 
   - id: e7-p2-03
     escalation: answerable_faithful
     question: Within how many days of the shipped_at date can I request a refund?
-    gold_stable_ids: [refund-policy:0]
+    gold_anchors:
+      - text: Customers may request a refund within 30 days of the order's `shipped_at` date
+        doc: refund-policy
     reference: You can request a refund within 30 days of the order's shipped_at date.
     notes: refund-policy:0 Eligibility Window — 30 days from shipped_at.
 
   - id: e7-p2-04
     escalation: answerable_faithful
     question: What is the return shipping fee for an item between 5 and 20 pounds that I changed my mind about?
-    gold_stable_ids: [returns-process:0]
+    gold_anchors:
+      - text: $14.95 for returns 5–20 lbs
+        doc: returns-process
     reference: For a changed-mind (customer-fault) return of an item weighing 5–20 lbs, the return shipping fee is $14.95, deducted from the refund or charged to the original payment method.
-    notes: returns-process:0 — customer-fault returns 5–20 lbs are $14.95.
+    notes: >-
+      returns-process:0 — customer-fault returns 5–20 lbs are $14.95. STRADDLE
+      anchor (US-107): the return-fee sentence is the chunker's overlap block, so
+      it resolves to returns-process:{0,1}; the no-access replay revokes both, and
+      P1b's leak check is unaffected (any gold stable id reaching the viewer leaks).
 
   # ── should_escalate / P3 (strong retrieval, NO faithful answer) ──────────
   - id: e7-p3-01
     escalation: should_escalate
     question: What is the warranty period for jewelry?
-    gold_stable_ids: [warranty-terms:0]
+    gold_anchors:
+      - text: Acme Co's product warranty terms by category
+        doc: warranty-terms
     reference: The warranty policy covers Electronics, Apparel, and Home Goods but does not list jewelry, so no warranty period for jewelry can be grounded in the corpus; this should be escalated to a human rather than answered with an invented period.
     notes: >-
-      strong retrieval of the warranty doc, but its categories are Electronics /
-      Apparel / Home Goods / Books / Food — jewelry is not covered, so no faithful
-      answer exists and the row must escalate (not invent a period).
+      strong retrieval of the warranty doc (anchored on its by-category intro), but
+      its categories are Electronics / Apparel / Home Goods / Books / Food — jewelry
+      is not covered, so no faithful answer exists and the row must escalate (not
+      invent a period).
 
   - id: e7-p3-02
     escalation: should_escalate
     question: How many business days does standard shipping to Hawaii take?
-    gold_stable_ids: [shipping-faq:0]
+    gold_anchors:
+      - text: Standard shipping is 3–5 business days within the contiguous US
+        doc: shipping-faq
     reference: The shipping FAQ gives the standard delivery window only for the contiguous US and never addresses Hawaii, so no specific Hawaii timeline can be grounded in the corpus; this should be escalated to a human rather than answered with a guessed number of days.
     notes: >-
       shipping-faq:0 states the standard window only for the *contiguous* US;
@@ -131,7 +180,9 @@ questions:
   - id: e7-p3-03
     escalation: should_escalate
     question: If my delivery is delayed past the estimated date, exactly what refund amount am I owed?
-    gold_stable_ids: [refund-policy:0]
+    gold_anchors:
+      - text: the refunded amount is typically 10% to 80% of the order total
+        doc: refund-policy
     reference: The refund policy places delivery-delay cases on a partial refund of 10–80% at the agent's discretion, so no exact refund amount can be grounded in the corpus; this should be escalated to a human rather than auto-resolved with a fabricated figure.
     notes: >-
       refund-policy:0 places delivery-delay cases on a partial refund of 10–80%
