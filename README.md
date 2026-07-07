@@ -124,7 +124,7 @@ evals/retrieval/        50-question golden set + E7 escalation golden set + runn
 evals/permissions_scale/ Wikipedia 10k corpus benchmark + nightly workflow
 evals/structured_rag/   Text-to-SQL eval
 evals/gate/             Gate-class registry (US-101) + pinned-security loader/asserts (US-102): security outputs are pinned-fail, un-downgradable, silenced only by deleting the eval; buyer-authored gate.yaml declaration carries the RAGAS gates' project bindings (cells/thresholds/cross-family judge map, US-103) + a per-suite off|comment|fail verdict layer mapping severity to a CI action over the 3 quality suites (US-104) + the determinism-to-CI-placement rule (placement.py, US-105): a per_pr: section opts deterministic gates into per-PR merge-blocking and structurally rejects a per-PR fail on a non-deterministic (LLM-judged) gate
-db_seed/                Deterministic seeders for the eval corpora
+db_seed/                Deterministic seeders for the eval corpora (+ generic_seed for your own/production corpus)
 docs/                   Long-form writeups (evals, structured RAG, permissions-aware RAG)
 .github/workflows/      PR + nightly eval workflows
 .claude/                Agent task specs (not needed to run the app)
@@ -200,6 +200,7 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | `ANALYTICS_DATABASE_URL` | no | Postgres URL for the `analytics_readonly` role used by the text-to-SQL baseline |
 | `CRM_DATABASE_URL` | no | Postgres URL for the `crm_readonly` role used by the semantic-layer-aware SQL search. Falls back to `ANALYTICS_DATABASE_URL` |
 | `CRM_SEED_DATABASE_URL` | no | Writable Postgres URL used only by `python -m db_seed.crm_seed`. Falls back to `DATABASE_URL` |
+| `GENERIC_SEED_DATABASE_URL` | no | Writable Postgres URL used only by `python -m db_seed.generic_seed` (seed your own corpus + optional real-grant manifest). Falls back to `DATABASE_URL` |
 | `ALLOWED_SQL_SCHEMAS` | no | Comma-separated schema allowlist for SQL tools. Default `analytics,crm` |
 | `SQL_QUERY_TIMEOUT_MS` | no | Statement timeout for SQL tools. Default 10000 |
 | `ANTHROPIC_API_KEY` | only for eval generation | Required by `evals/retrieval/runner.py --include-generation` (the LLM judge runs Claude). Never read by the live backend |

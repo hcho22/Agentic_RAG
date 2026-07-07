@@ -1,0 +1,64 @@
+# Example manifest for the generic corpus seeder (US-110).
+#
+#   python -m db_seed.generic_seed --docs-dir ./my_corpus \
+#       --manifest ./db_seed/manifest.example.yaml --seed-label acme
+#
+# A manifest describes REAL production data only: the workspace the documents
+# live in, the real principals (users / groups) that exist in your tenant, their
+# memberships, and the real document -> principal grants. The seeder expands each
+# grant into per-chunk `chunk_acl` rows, exactly as the app's share action does.
+#
+# It NEVER describes eval scaffolding. The synthetic eval viewers
+# (partial-access / no-access) and the derived full/partial/no_access ACL matrix
+# are built transiently by the eval runner at run time, never seeded — so a
+# production seed carries zero test principals.
+#
+# The whole manifest is OPTIONAL. Run the seeder with no `--manifest` and you
+# get an owner-only corpus (documents + chunks owned by a default owner, an
+# empty `chunk_acl`), consistent with the kit's no-backfill rollout.
+
+version: 1
+
+# The owner every seeded document + chunk is attributed to. With no grants this
+# owner is the only principal that can see the corpus (owner-only). auth.uid()
+# resolves to this id; public.profiles is mirrored automatically.
+owner:
+  id: 00000000-0000-0000-0000-0000000ce001
+  email: owner@acme.example
+
+# The workspace the documents belong to (documents.workspace_id). The owner is
+# added as a member automatically.
+workspace:
+  id: 00000000-0000-0000-0000-0000000ce0a0
+  name: Acme Docs
+
+# Real principals in your tenant. Both keys are optional.
+principals:
+  # Individual users. Each becomes an auth.users row + a workspace membership.
+  users:
+    - id: 00000000-0000-0000-0000-0000000ce101
+      email: analyst@acme.example
+      role: member          # workspace membership role: 'member' | 'admin'
+    - id: 00000000-0000-0000-0000-0000000ce102
+      email: support-lead@acme.example
+      role: admin
+
+  # Flat groups (public.principals kind='group') + their memberships. A group
+  # member must be a user declared above (or the owner).
+  groups:
+    - id: 00000000-0000-0000-0000-0000000ce201
+      name: support-team
+      members:
+        - 00000000-0000-0000-0000-0000000ce101
+        - 00000000-0000-0000-0000-0000000ce102
+
+# Real document -> principal grants. `document` is a filename or its slug
+# (e.g. `refund-policy.md` or `refund-policy`). Each grant is expanded to one
+# `chunk_acl` row per chunk of that document.
+grants:
+  - document: refund-policy.md
+    principal_type: user
+    principal_id: 00000000-0000-0000-0000-0000000ce101
+  - document: escalation-runbook.md
+    principal_type: group
+    principal_id: 00000000-0000-0000-0000-0000000ce201

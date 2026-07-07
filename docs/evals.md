@@ -95,6 +95,34 @@ python -m evals.retrieval.runner --include-e6
 
 The runner writes `evals/retrieval/results/<ISO-timestamp>.json` (full per-question detail + aggregates) and `evals/retrieval/summary.md` (two markdown tables ready to drop between the EVAL_SUMMARY markers in the next section).
 
+### 2.6 Seeding your own corpus: the generic seeder (US-110)
+
+`db_seed/corpus_seed.py` (§2.1) seeds the shipped demo corpus into a fixed owner and Default Workspace so the example golden set resolves reproducibly.
+When you replace the demo corpus with your **own** documents, use the **generic seeder** `db_seed/generic_seed.py` instead - it is the same production chunk-and-embed path, generalized to a corpus you can run against **production** data without polluting it with synthetic test principals.
+
+```bash
+export GENERIC_SEED_DATABASE_URL=postgresql://postgres:postgres@localhost:54322/postgres
+export OPENAI_API_KEY=sk-...   # or your EMBEDDER_* provider
+
+# Owner-only corpus: documents + chunks, an empty chunk_acl (no one but the
+# owner sees them). No manifest needed.
+python -m db_seed.generic_seed --docs-dir ./my_corpus --seed-label acme
+
+# With real workspaces / principals / grants from a manifest.
+python -m db_seed.generic_seed --docs-dir ./my_corpus \
+    --manifest ./db_seed/manifest.example.yaml --seed-label acme
+```
+
+Two invariants make it safe against a production corpus:
+
+- **It seeds a corpus (+ optional real grants) and nothing eval-specific.** It reads a folder of `*.md` / `*.txt` documents plus an **optional** manifest describing **real** workspaces, principals (users / groups + memberships), and document→principal grants, then runs the unchanged `chunk_text` + `embed_texts` paths and inserts `documents` + `chunks` (+ real `chunk_acl` / `workspace_membership` / group rows from the manifest). See `db_seed/manifest.example.yaml` for the format. A grant is expanded to one `chunk_acl` row per chunk of its document, exactly as the app's share action does.
+- **It never bakes eval scaffolding into the seed.** The synthetic eval viewers (`partial_access` / `no_access`) and the derived `full/partial/no_access` ACL matrix are **not** a seed concept - they are constructed transiently by the **runner** at run time (`evals/retrieval/runner.py::ensure_viewer_users` / `reset_viewer_acls`) from your gold labels (§4 of `docs/golden-set-authoring.md`) and reset per question. A production seed therefore carries **zero** test principals. The seeder has no reference to those constants at all; the guarantee is structural, pinned by `python -m db_seed.test_generic_seed`.
+
+With no manifest the corpus is owner-only (empty `chunk_acl`), consistent with the no-backfill rollout.
+The seeder is idempotent and byte-stable across re-seeds the same way `corpus_seed.py` is, scoped by `--seed-label` so a buyer seed never clobbers the demo corpus (`corpus_seed=true`) or another labelled seed.
+
+Replacing the corpus and authoring a new golden set are the **same step** (US-107): the demo golden set's content anchors are quoted from the demo docs, so they fail loud against your corpus by design - see `docs/golden-set-authoring.md` (US-109) to author a set on your own content.
+
 ## 3. Results
 
 <!-- BEGIN EVAL_SUMMARY -->
