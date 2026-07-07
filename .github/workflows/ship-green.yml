@@ -1,0 +1,176 @@
+# US-111: "Ship green out of the box." The kit's day-zero promise is that a
+# fresh `seed → eval` on the SHIPPED artifacts — the default 7-doc / 14-chunk
+# e-commerce corpus (`db_seed/corpus/`), its content-anchored golden set
+# (`evals/retrieval/retrieval_gold.yaml`, US-107), and the default gate
+# (`evals/gate/gate.yaml`, US-103) — reproduces the 1.000 E4 no-leak security
+# table with ZERO buyer authoring. This workflow is the guarantee that the
+# promise stays true: a dead or drifted demo corpus embarrasses the quickstart
+# (the P3 build-in-public demo), so the kit's OWN CI runs the clean seed → eval
+# and hard-asserts the green table on every relevant change and on `main`.
+#
+# HOW THIS DIFFERS from the other eval workflows (deliberately a separate file):
+#   * retrieval-eval.yml (PR) is a DELTA-vs-main advisory comment — dual checkout,
+#     recall/MRR/nDCG diff — whose E4/E6 exit is a side effect. This job is an
+#     ABSOLUTE, single-checkout green ASSERTION: does the shipped kit, seeded from
+#     scratch with no edits, produce the 1.000 no-leak table? That is the AC4
+#     "stays green in the kit's own CI" question, not "did this PR move a number."
+#   * retrieval-eval-nightly.yml is a scheduled SNAPSHOT publisher. This job is a
+#     GATE: it also runs on `push: main`, so a merge (or a direct push / a nightly
+#     snapshot commit) that rots the demo is caught on main, not only on PRs.
+#
+# It is E4-only by design (`--viewers all`, no `--include-e6` / no generation):
+# AC2/AC4 name the E4 `no_access` zero-leak table specifically. E6 cross-workspace
+# is already the per-PR hard gate in retrieval-eval.yml, and the LLM-judged quality
+# legs are scheduled-only (US-105); pulling them in here would add cost + flake
+# without serving this job's one question. Determinism-decides-merge-blocking
+# (US-105) is unchanged: the E4 assert is pure arithmetic on cosine scores, so a
+# real leak verdict can never flake and is allowed to hard-block.
+
+name: Ship green (kit demo)
+
+on:
+  # Guard `main` directly: a merge or direct push that rots the demo corpus /
+  # golden set / gate fails here even if it slipped past the PR check.
+  push:
+    branches: [main]
+    paths: &green_paths
+      # The full surface that determines the green table: the shipped corpus,
+      # the seeder, the golden set + runner + content-anchor resolver, the gate
+      # declaration + E4 security assert, the production chunk/embed/retrieval
+      # paths the eval measures, the schema/RLS the E4 table depends on, and this
+      # workflow itself. A change to any of these must re-prove the kit ships green.
+      - 'db_seed/corpus/**'
+      - 'db_seed/corpus_seed.py'
+      - 'evals/retrieval/**'
+      - 'evals/gate/**'
+      - 'backend/retrieval.py'
+      - 'backend/chunking.py'
+      - 'backend/embeddings.py'
+      - 'supabase/migrations/**'
+      - '.github/workflows/ship-green.yml'
+  pull_request:
+    paths: *green_paths
+  # Day-zero verification on demand (the build-in-public "it works" moment).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ship-green-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ship-green:
+    name: Clean seed → eval reproduces the 1.000 no-leak table
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: evals/retrieval/requirements-ci.txt
+
+      - name: Install Supabase CLI
+        # Pinned 2.90.0 in lockstep with every other eval workflow: an unpinned
+        # `latest` drifted to a CLI whose default auth key format gateway-rejects
+        # (403) the runner's self-minted HS256 JWTs on the first match_chunks call.
+        # See retrieval-eval.yml for the full rationale; keep these pins together.
+        uses: supabase/setup-cli@v1
+        with:
+          version: 2.90.0
+
+      - name: Start local Supabase stack
+        run: |
+          # Brings up pgvector + PostgREST + auth and applies supabase/migrations/
+          # — the schema + RLS boundary the E4 no_access table is asserted against.
+          supabase start
+          # Surface the running stack's real coordinates so the eval authenticates
+          # against THIS instance rather than baked-in local-dev fallbacks (the
+          # 403-on-first-query drift the CLI pin also guards). ANON_KEY + JWT_SECRET
+          # let the runner mint + send the per-viewer authenticated JWTs.
+          supabase status -o env > /tmp/supabase.env
+          grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|JWT_SECRET|DB_URL)=' /tmp/supabase.env \
+            | sed -E 's/^(.*)="(.*)"$/\1=\2/' \
+            >> "$GITHUB_ENV"
+
+      - name: Install Python deps
+        run: |
+          # Slim install: requirements-ci.txt is exactly what corpus_seed.py +
+          # runner.py import on the retrieval-only path (no generation, no E6),
+          # avoiding the multi-GB torch/docling stack backend/requirements.txt drags
+          # in — the same slim env retrieval-eval.yml's eval job uses.
+          python -m pip install --upgrade pip
+          pip install -r evals/retrieval/requirements-ci.txt
+
+      - name: Seed the shipped corpus
+        env:
+          SUPABASE_URL: ${{ env.API_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # A CLEAN seed of the shipped 7-doc corpus through the production
+          # chunk_text + embed_texts paths — exactly what a buyer runs day-zero,
+          # no edits. This is the "no buyer authoring" half of AC2.
+          python -m db_seed.corpus_seed
+
+      - name: Run the retrieval eval (E4 no_access sweep)
+        env:
+          SUPABASE_URL: ${{ env.API_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
+          CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
+          DATABASE_URL: ${{ env.DB_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # `--viewers all` sweeps full_access / partial_access / no_access ×
+          # vector/keyword/hybrid × pre_filter/post_filter. The runner's own E4
+          # assert (evals/gate/security.py::check_no_access_zero_leak) already
+          # exits non-zero on any no_access cell < 1.0; the explicit assert step
+          # below re-reads the emitted table so this job's green claim is loud +
+          # self-documenting and does not depend on the runner's exit code alone.
+          python -m evals.retrieval.runner --viewers all --out /tmp/ship-green.json
+
+      - name: Assert the 1.000 no-leak table
+        run: |
+          # AC2/AC4 + the US-111 validation test, step-for-step: read the
+          # `security_no_access` aggregate the runner just emitted and confirm the
+          # E4 no-leak table is 1.000 / 0 gold across every no_access cell. Reuses
+          # the SAME pinned security invariant the runner asserts internally
+          # (evals/gate/security.py) so the two can never drift; `e4_structurally_blind`
+          # refuses a vacuous pass (a no_access sweep that produced 0 cells).
+          python - <<'PY'
+          import json
+          from evals.gate.security import (
+              assert_no_access_zero_leak,
+              e4_structurally_blind,
+          )
+
+          data = json.loads(open("/tmp/ship-green.json").read())
+          viewers = data["viewers"]
+          table = data["aggregates"]["security_no_access"]
+
+          if e4_structurally_blind(viewers, table):
+              raise SystemExit(
+                  "E4 no_access sweep produced 0 cells — refusing a vacuous green "
+                  "pass (US-102). The kit-ships-green run did not actually exercise "
+                  "the no-leak invariant."
+              )
+
+          # Raises SecurityGateError (non-zero exit) on any no_access cell < 1.0.
+          assert_no_access_zero_leak(table)
+
+          cells = sum(len(by_mode) for by_mode in table.values())
+          print(
+              f"kit ships green: E4 no-leak table is 1.000 across all {cells} "
+              "no_access cell(s) on a clean seed of the shipped corpus + golden set."
+          )
+          PY

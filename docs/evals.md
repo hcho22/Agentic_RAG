@@ -123,6 +123,16 @@ The seeder is idempotent and byte-stable across re-seeds the same way `corpus_se
 
 Replacing the corpus and authoring a new golden set are the **same step** (US-107): the demo golden set's content anchors are quoted from the demo docs, so they fail loud against your corpus by design - see `docs/golden-set-authoring.md` (US-109) to author a set on your own content.
 
+### 2.7 The kit ships green out of the box (US-111)
+
+Day-zero, a fresh `seed → eval` on the **shipped** artifacts alone - the default 7-doc / 14-chunk e-commerce corpus (`db_seed/corpus/`), its content-anchored golden set (`evals/retrieval/retrieval_gold.yaml`, §2.2), and the default gate (`evals/gate/gate.yaml`, §"Buyer-authored gate declaration") - reproduces the **1.000 E4 no-leak security table** with **zero buyer authoring**.
+There is nothing to write before the first eval can run: the 50 golden anchors are quoted from the shipped docs so they all resolve (`python -m evals.retrieval.test_content_anchors`), and the default `gate.yaml` reproduces today's gate constants byte-for-byte (`python -m evals.gate.test_gate_bindings`).
+
+A dead or drifted demo corpus embarrasses the quickstart (the P3 build-in-public demo), so the kit's **own** CI keeps the promise honest.
+`.github/workflows/ship-green.yml` runs the clean `python -m db_seed.corpus_seed` → `python -m evals.retrieval.runner --viewers all` on every change to the green-determining surface **and on `main`**, then hard-asserts the `security_no_access` table is `1.000` across every `no_access` cell (reusing the same pinned `evals/gate/security.py` invariant the runner asserts internally, with a `e4_structurally_blind` guard that refuses a vacuous pass).
+It is a separate workflow from the PR delta comment (`retrieval-eval.yml`, an advisory *diff* vs main) and the nightly snapshot (`retrieval-eval-nightly.yml`): this one is the **absolute** "does the shipped kit still ship green" assertion, and by also triggering on `push: main` it catches a demo that rots directly on main.
+It is E4-only by design - E6 cross-workspace is already the per-PR hard gate in `retrieval-eval.yml`, and the LLM-judged quality legs are scheduled-only (US-105), so pulling them in here would add cost and flake without serving this job's one question.
+
 ## 3. Results
 
 <!-- BEGIN EVAL_SUMMARY -->
