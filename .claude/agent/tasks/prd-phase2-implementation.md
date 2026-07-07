@@ -1429,10 +1429,10 @@ E8/E9/E10 turn the project's proven eval suite into *buyer methodology*: a confi
 ### US-112: Demo-corpora worked-examples doc (e-commerce / Wikipedia / CRM) + swap honesty
 **Description:** As a buyer choosing how to model my own data, I want a doc presenting the three demo corpora as role-specific worked examples — not interchangeable defaults — and stating plainly that swapping in my own corpus makes the example anchors fail loud, so that I understand "replace the corpus" and "author a new golden set" are the same step.
 **Acceptance Criteria:**
-- [ ] The doc presents three role-specific examples: **e-commerce** (default — permissions + escalation, small/fast/relatable), **Wikipedia 10k** (scale-benchmark *filler only*, never golden-answerable — golden questions stay anchored to the real docs), **CRM** (text-to-SQL optional-module example, X1).
-- [ ] The doc states the **honest framing** (a direct consequence of content anchoring, US-107): swapping in the buyer's corpus makes the example golden set's anchors **fail loud** — the example set is a **format template to learn from, not a survives-the-swap artifact**; the guide must not imply the example questions will work on the buyer's docs.
-- [ ] The doc cross-references US-110 (seeder = corpus only) and US-108/US-109 (author a new golden set on swap).
-- [ ] Typecheck/lint passes (docs-only)
+- [x] The doc presents three role-specific examples: **e-commerce** (default — permissions + escalation, small/fast/relatable), **Wikipedia 10k** (scale-benchmark *filler only*, never golden-answerable — golden questions stay anchored to the real docs), **CRM** (text-to-SQL optional-module example, X1).
+- [x] The doc states the **honest framing** (a direct consequence of content anchoring, US-107): swapping in the buyer's corpus makes the example golden set's anchors **fail loud** — the example set is a **format template to learn from, not a survives-the-swap artifact**; the guide must not imply the example questions will work on the buyer's docs.
+- [x] The doc cross-references US-110 (seeder = corpus only) and US-108/US-109 (author a new golden set on swap).
+- [x] Typecheck/lint passes (docs-only)
 **Validation Test:**
 - **Setup:** Open the demo-corpora doc.
 - **Steps:** 1. Confirm each corpus is labeled with its role and that Wikipedia is marked filler-only / never-gold. 2. Confirm the swap-fail-loud framing and "replace corpus = author new golden set" statement are present.
