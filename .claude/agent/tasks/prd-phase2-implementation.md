@@ -1384,17 +1384,18 @@ E8/E9/E10 turn the project's proven eval suite into *buyer methodology*: a confi
 ### US-109: Golden-set authoring guide — teach the completeness contract + single-family-weaker caveat
 **Description:** As a buyer authoring my own golden set, I want a guide that teaches exhaustive gold labeling as the correctness contract and states plainly that single-family evals are a weaker proof so that I do not manufacture a false security pass by under-labeling or cite a lenient single-family score as "proven."
 **Acceptance Criteria:**
-- [ ] The guide teaches the **completeness contract**: because `no_access = all_non_gold` and `partial = gold ∪ N filler`, an under-labeled relevant chunk lands in the filler pool and can produce a **false security pass the green checkmark won't reveal** — so exhaustive gold labeling is load-bearing, not merely a recall concern. (Distinct from the re-chunking brittleness, which content anchors solve.)
-- [ ] The guide documents content anchoring (US-107): author answer-bearing text, not chunk indices; zero-resolve fails loud; editing source content breaks the anchor by design.
-- [ ] The guide **actively recommends** cross-family corroboration in moat terms (one extra weekly judge pass, cents, turns "a number moved" into "two independent judges agree") and states the optional binding mechanics (US-103).
-- [ ] The guide states **loudly** that **single-family evals carry same-family bias and are a weaker proof** than the cross-family configuration the kit demonstrates — a buyer must not cite a lenient single-family faithfulness score to a client as "proven." Cross-references the F3 row.
-- [ ] The guide names the support-face escalation label as the only support-only authoring step (US-108).
-- [ ] Typecheck/lint passes (docs-only)
+- [x] The guide teaches the **completeness contract**: because `no_access = all_non_gold` and `partial = gold ∪ N filler`, an under-labeled relevant chunk lands in the filler pool and can produce a **false security pass the green checkmark won't reveal** — so exhaustive gold labeling is load-bearing, not merely a recall concern. (Distinct from the re-chunking brittleness, which content anchors solve.) [`docs/golden-set-authoring.md` §3]
+- [x] The guide documents content anchoring (US-107): author answer-bearing text, not chunk indices; zero-resolve fails loud; editing source content breaks the anchor by design. [§2]
+- [x] The guide **actively recommends** cross-family corroboration in moat terms (one extra weekly judge pass, cents, turns "a number moved" into "two independent judges agree") and states the optional binding mechanics (US-103). [§6]
+- [x] The guide states **loudly** that **single-family evals carry same-family bias and are a weaker proof** than the cross-family configuration the kit demonstrates — a buyer must not cite a lenient single-family faithfulness score to a client as "proven." Cross-references the F3 row. [§7]
+- [x] The guide names the support-face escalation label as the only support-only authoring step (US-108). [§5]
+- [x] Typecheck/lint passes (docs-only)
 **Validation Test:**
 - **Setup:** Open the authoring guide.
 - **Steps:** 1. Confirm a section teaches under-labeling → false security pass, with the `all_non_gold` / `gold ∪ filler` mechanism. 2. Confirm the single-family-weaker caveat is stated as a non-citable-as-proven warning. 3. Confirm content anchoring + fail-loud and the cross-family recommendation are present.
 - **Expected Result:** The guide teaches completeness as the correctness contract and the single-family bias caveat unambiguously.
 - **Failure Indicator:** Under-labeling is framed only as a recall issue, or single-family evals are presented as equivalent proof to cross-family.
+- **Status (2026-07-06):** DONE. Authoring guide shipped at `docs/golden-set-authoring.md` (completeness contract §3, content anchoring §2, cross-family recommendation §6, single-family-weaker caveat §7, support-face label §5, checklist + file map). `docs/evals.md` §2.2 cross-links it. Docs-only; no code touched.
 
 ### US-110: Generic corpus seeder — corpus only, optional manifest, never bakes eval scaffolding
 **Description:** As a buyer, I want the seeder to seed a corpus and nothing eval-specific — point it at a folder of docs plus an optional manifest of workspaces / principals / *real* grants → chunk → embed → index — so that I can run it against my **production** corpus without polluting it with synthetic test principals.

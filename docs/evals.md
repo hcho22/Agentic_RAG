@@ -41,6 +41,8 @@ Each question has fields `id`, `category`, `question`, `gold_anchors` (one or mo
 
 **Authoring process.** Questions were drafted by an LLM (different model family from the embedder, per the PRD's bias-avoidance constraint) and human-edited. The 10 adversarial questions are additionally filtered through current retrieval — questions where all three modes score `recall@5 = 1.0` carry no signal and are either swapped or kept as anchor cases. That filter step runs as soon as the user first executes the runner; until then, the adversarial questions are candidates ranked by how cleanly they construct a lexical-vs-semantic divergence.
 
+**Authoring your own golden set (US-109).** `docs/golden-set-authoring.md` is the buyer-facing guide for replacing this set with one built on your own corpus. It teaches the **completeness contract**: because `no_access = all_non_gold` and `partial_access = gold ∪ N filler`, an un-labeled relevant chunk is silently reclassified as safe-to-disclose and produces a **false security pass the green table won't reveal**, so exhaustive gold labeling is load-bearing for the *security* claim, not merely recall. It also states loudly that a **single-family eval is a weaker proof** (same-family judge bias) that must not be cited to a client as "proven," and actively recommends the cross-family corroboration below (§"RAGAS comparison"). The shipped set is a format template to learn from, not a survives-the-swap artifact - its content anchors fail loud on a corpus swap by design (US-107).
+
 ### 2.3 What the metrics measure
 
 Per question × mode, the runner computes:
