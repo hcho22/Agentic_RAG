@@ -1,4 +1,5 @@
 import { supabase } from '@/lib/supabase'
+import { resolveActiveWorkspace } from '@/lib/workspace'
 
 const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000').replace(/\/$/, '')
 
@@ -108,8 +109,27 @@ export async function uploadDocument(userId: string, file: File): Promise<Upload
     return { document: existing as DocumentRow, duplicate: true }
   }
 
+  // US-005: file the document into the caller's active workspace. `documents`
+  // has a NOT NULL workspace_id (DB-defaulted to the Default Workspace), and the
+  // documents SELECT RLS requires the reader to be a member of the row's
+  // workspace — so omitting this silently drops every upload into a workspace the
+  // user may not belong to, and the insert's return=representation read-back then
+  // fails RLS with a 403. Resolve it explicitly and set it on the insert.
+  const active = await resolveActiveWorkspace()
+  if (active.status === 'none') {
+    throw new Error(
+      'You are not a member of any workspace, so this document has nowhere to go. Ask an admin to add you to a workspace.',
+    )
+  }
+  if (active.status === 'ambiguous') {
+    throw new Error(
+      'You belong to multiple workspaces; ingestion cannot pick one automatically (single active workspace only in v1).',
+    )
+  }
+
   const insertRow = {
     user_id: userId,
+    workspace_id: active.workspaceId,
     filename: file.name,
     storage_path: '', // filled in after we know the document id
     byte_size: file.size,

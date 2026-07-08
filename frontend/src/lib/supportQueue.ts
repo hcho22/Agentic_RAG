@@ -1,5 +1,11 @@
 import { supabase } from '@/lib/supabase'
 
+// Re-exported so existing importers (support queue/settings UI) keep their
+// single import site; the canonical definitions now live in `@/lib/workspace`
+// so the core ingestion path can share them without depending on this support
+// module (which would be a backwards feature dependency).
+export { resolveActiveWorkspace, type ActiveWorkspace, type WorkspaceRole } from '@/lib/workspace'
+
 // The agent-reply endpoint (US-082) is the ONE authenticated `/widget/*` route;
 // the reply is posted to the backend under the agent's real Supabase JWT (the
 // membership RLS is enforced there, under that JWT). Everything else the queue
@@ -19,7 +25,6 @@ const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000'
 // nothing here — the queue is membership-gated, not role-gated (ADR-0002/0004).
 
 export type ConversationStatus = 'active' | 'escalated' | 'resolved'
-export type WorkspaceRole = 'admin' | 'member'
 
 export type ConversationRow = {
   id: string
@@ -38,33 +43,6 @@ export type ConversationRow = {
 
 const CONVERSATION_COLUMNS =
   'id, workspace_id, status, channel, customer_email, escalated_at, claimed_by, claimed_at, created_at'
-
-// US-007 active-workspace resolution, applied CLIENT-SIDE for the queue:
-// default-when-sole, error-on-ambiguous, explicit "none". Reads the caller's
-// own `workspace_membership` rows (RLS: workspace_membership_select_own scopes
-// the result to auth.uid()), so this never crosses the tenant boundary. There
-// is no cross-workspace inbox in v1 — a single active workspace per view — so an
-// ambiguous (≥2) membership set is surfaced as a resolvable UI state rather than
-// silently guessing a workspace (mirrors the backend's 400-on-ambiguous posture).
-export type ActiveWorkspace =
-  | { status: 'resolved'; workspaceId: string; role: WorkspaceRole }
-  | { status: 'none' }
-  | { status: 'ambiguous'; workspaceIds: string[] }
-
-export async function resolveActiveWorkspace(): Promise<ActiveWorkspace> {
-  const { data, error } = await supabase
-    .from('workspace_membership')
-    .select('workspace_id, role')
-    .order('created_at', { ascending: true })
-  if (error) throw error
-
-  const rows = (data ?? []) as { workspace_id: string; role: WorkspaceRole }[]
-  if (rows.length === 0) return { status: 'none' }
-  if (rows.length === 1) {
-    return { status: 'resolved', workspaceId: rows[0].workspace_id, role: rows[0].role }
-  }
-  return { status: 'ambiguous', workspaceIds: rows.map((r) => r.workspace_id) }
-}
 
 // Lists the workspace's escalated conversations, oldest-escalation-first so the
 // longest-waiting customer sits at the top of the handoff queue (FIFO). RLS
