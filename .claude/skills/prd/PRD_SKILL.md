@@ -14,7 +14,7 @@ Create detailed Product Requirements Documents that are clear, actionable, and s
 1. Receive a feature description from the user
 2. Ask 3-5 essential clarifying questions (with lettered options)
 3. Generate a structured PRD based on answers
-4. Save to `.claude/agent/tasks/prd-[feature-name].md`
+4. Save to `.claude/agent/tasks/prd-[feature-name]-[YYYY-MM-DD].md` (append today's date)
 
 **Important:** Do NOT start implementing. Just create the PRD.
 
@@ -161,7 +161,7 @@ The PRD reader may be a junior developer or AI agent. Therefore:
 
 - **Format:** Markdown (`.md`)
 - **Location:** `.claude/agent/tasks/`
-- **Filename:** `prd-[feature-name].md` (kebab-case)
+- **Filename:** `prd-[feature-name]-[YYYY-MM-DD].md` (kebab-case, with the current date appended so multiple PRDs stay easy to track and order). Example: `prd-task-priority-2026-07-10.md`. Use today's actual date, not a placeholder.
 
 ---
 
@@ -314,4 +314,4 @@ Before saving the PRD:
 - [ ] Each user story has a Validation Test with setup, steps, expected result, and failure indicator
 - [ ] Functional requirements are numbered and unambiguous
 - [ ] Non-goals section defines clear boundaries
-- [ ] Saved to `.claude/agent/tasks/prd-[feature-name].md`
+- [ ] Saved to `.claude/agent/tasks/prd-[feature-name]-[YYYY-MM-DD].md` (feature name followed by today's date)
