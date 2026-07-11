@@ -1,6 +1,6 @@
 # PRD: Retrieval-Quality Pass (Lexical Leg Revival + Adaptive Fusion)
 
-Status: draft, stories not started.
+Status: in progress. US-113 (lexical golden-set instrumentation) and US-114 (keyword_search OR-fallback) landed; US-115 through US-118 not started.
 Origin: comparison of Agentic_RAG against RakuenSoftware/aimee (2026-07-10), scoped via grilling session.
 Predecessor numbering: continues after US-112 (Phase-2 PRD, `.claude/agent/tasks/prd-phase2-implementation.md`).
 
@@ -58,13 +58,13 @@ It deliberately borrows nothing that touches trust boundaries.
 
 **Acceptance Criteria:**
 
-- [ ] New migration `supabase/migrations/<timestamp>_keyword_search_or_fallback.sql` that DROPs the current 7-parameter `public.keyword_search` (the live definition is `20260624150100_keyword_search_workspace_filter.sql`, including trailing `filter_workspace_id uuid default null`) and recreates it with a byte-identical signature and return table, `security invoker`, re-issuing the `grant execute` to `authenticated`, following the repo's DROP-and-CREATE migration pattern.
-- [ ] Query semantics: `tsq_and` (current `websearch_to_tsquery`) is tried first; when it fills fewer than `match_count` rows, remaining slots are filled by `tsq_or` built as `to_tsquery('english', array_to_string(tsvector_to_array(to_tsvector('english', query)), ' | '))`, guarded with `nullif`/`numnode` so stopword-only queries return empty rather than erroring.
-- [ ] AND-matched rows always rank above OR-fallback rows; within each block, ordering stays `similarity desc, id asc`.
-- [ ] The visibility predicate block (owner-OR-ACL, workspace-membership EXISTS, `d.deleted_at is null`, `filter_workspace_id`, metadata filters) is copied verbatim; no `role` or `is_bot` appears anywhere in the function (core invariant 1).
-- [ ] No backend code change (`backend/retrieval.py::keyword_search` payload unchanged).
-- [ ] ADR `docs/adr/0009-keyword-or-fallback.md` committed, recording why fallback-not-replacement and why AND-above-OR ranking.
-- [ ] `python -m backend.test_au4_auth_attacks` passes.
+- [x] New migration `supabase/migrations/<timestamp>_keyword_search_or_fallback.sql` that DROPs the current 7-parameter `public.keyword_search` (the live definition is `20260624150100_keyword_search_workspace_filter.sql`, including trailing `filter_workspace_id uuid default null`) and recreates it with a byte-identical signature and return table, `security invoker`, re-issuing the `grant execute` to `authenticated`, following the repo's DROP-and-CREATE migration pattern.
+- [x] Query semantics: `tsq_and` (current `websearch_to_tsquery`) is tried first; when it fills fewer than `match_count` rows, remaining slots are filled by `tsq_or` built as `to_tsquery('english', array_to_string(tsvector_to_array(to_tsvector('english', query)), ' | '))`, guarded with `nullif`/`numnode` so stopword-only queries return empty rather than erroring.
+- [x] AND-matched rows always rank above OR-fallback rows; within each block, ordering stays `similarity desc, id asc`.
+- [x] The visibility predicate block (owner-OR-ACL, workspace-membership EXISTS, `d.deleted_at is null`, `filter_workspace_id`, metadata filters) is copied verbatim; no `role` or `is_bot` appears anywhere in the function (core invariant 1).
+- [x] No backend code change (`backend/retrieval.py::keyword_search` payload unchanged).
+- [x] ADR `docs/adr/0009-keyword-or-fallback.md` committed, recording why fallback-not-replacement and why AND-above-OR ranking.
+- [x] `python -m backend.test_au4_auth_attacks` passes.
 
 **Validation Test:**
 
@@ -75,6 +75,7 @@ It deliberately borrows nothing that touches trust boundaries.
   3. Run `python -m evals.retrieval.e7_runner --include-p1b --out /tmp/us114-e7.json`.
 - **Expected Result:** Keyword recall@5 rises materially (paraphrase no longer 0.000; lexical category strong); E4 security table stays 1.000 in all modes (OR widens matching but the predicate is unchanged); E7 P1a/P1b deterministic legs pass.
 - **Failure Indicator:** Keyword recall unchanged, any E4 cell below 1.000, E7 tripwire fires, or `supabase db reset` fails on the migration.
+- **Result (2026-07-10, local Supabase):** Keyword recall@5 **0.140 → 0.917** (paraphrase **0.000 → 0.800**, lexical **1.000**); hybrid recall@5 0.95 now above vector 0.875. E4 `security_no_access` **1.000** across keyword/hybrid/vector in both pre- and post-filter. `python -m backend.test_au4_auth_attacks` PASS (36 assertions; keyword boundary V=0, MALLORY=0). E7 P1a/P1b PASS (no gold leaked, byte-for-byte generic deferral, no tripwire).
 
 ### US-115: Deterministic-alpha fusion seam (pure functions, not yet wired)
 
