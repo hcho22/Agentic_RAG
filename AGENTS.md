@@ -51,5 +51,5 @@ Do NOT collapse these into one table with a `kind` discriminator branching the p
 - `docs/support-widget-internals.md` - the per-story sharp edges (US-066-093), rationale, and test descriptions relocated from here.
 - `docs/widget-embed.md` - the loader `<script>` / cross-origin iframe embed contract.
 - `docs/evals.md` + `docs/golden-set-authoring.md` - the eval harness, gate classes, and golden-set authoring.
-- `docs/adr/` - committed ADRs (0001 RAGAS, 0002 tenant isolation, 0007 ingestion boundary, 0009 keyword OR-fallback). ADR-0003/0004/0008 are cited but not committed; their record is the internals doc + PRs #51-70.
+- `docs/adr/` - committed ADRs (0001 RAGAS, 0002 tenant isolation, 0007 ingestion boundary, 0009 keyword OR-fallback, 0010 deterministic-alpha fusion). ADR-0003/0004/0008 are cited but not committed; their record is the internals doc + PRs #51-70.
 - `CONTEXT.md` - domain language; `.claude/agent/tasks/prd-phase2-implementation.md` - the Phase-2 PRD + per-story status.

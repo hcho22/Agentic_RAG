@@ -207,6 +207,34 @@ def get_rrf_k() -> int:
     return v
 
 
+def get_hybrid_fusion_alpha() -> Literal["auto"] | float:
+    """Fusion-weight policy from `HYBRID_FUSION_ALPHA` env (US-116).
+
+    Returns the sentinel `"auto"` (the default) to signal per-query adaptive
+    weighting via `predict_alpha`, or a fixed vector-leg weight in [0, 1] that
+    pins fusion for every query regardless of its shape. `0.5` is the ops escape
+    hatch: it reproduces legacy equal-weight RRF byte-for-byte (the seam's
+    `(0.5, 0.5)` collapses to `1 / (k + r)`), so operators can revert adaptive
+    fusion without a deploy. Validation mirrors `get_rrf_k()`: an unparseable or
+    out-of-range value raises rather than silently falling back to a default.
+    """
+    raw = os.environ.get("HYBRID_FUSION_ALPHA")
+    if raw is None or raw.strip() == "":
+        return "auto"
+    v = raw.strip().lower()
+    if v == "auto":
+        return "auto"
+    try:
+        f = float(v)
+    except ValueError as e:
+        raise ValueError(
+            f"HYBRID_FUSION_ALPHA must be 'auto' or a float in [0,1], got {raw!r}"
+        ) from e
+    if not 0.0 <= f <= 1.0:
+        raise ValueError(f"HYBRID_FUSION_ALPHA must be in [0,1], got {f}")
+    return f
+
+
 def get_retrieval_mode() -> RetrievalMode:
     """`RETRIEVAL_MODE` env: `hybrid` (default) | `vector` | `keyword`.
 
@@ -581,6 +609,18 @@ async def hybrid_search(
     `workspace_id` (US-070) is forwarded to BOTH legs so the optional
     non-security active-workspace narrowing applies to the whole fused result.
     `None` (the default, /api/chat) is a no-op on both legs.
+
+    US-116: fusion is query-adaptive. The vector-leg weight `alpha` comes from
+    `predict_alpha(query)` under the default `HYBRID_FUSION_ALPHA=auto`, tilting
+    identifier-dense queries toward the lexical leg and leaving neutral prose at
+    the legacy 0.5 midpoint. Weights are `(alpha, 1 - alpha)` — vector ranking
+    first, matching the fixed argument order below. A fixed `HYBRID_FUSION_ALPHA`
+    float pins every query (`0.5` reproduces legacy equal-weight RRF exactly).
+    The [0.3, 0.7] clamp on `predict_alpha` is load-bearing: keyword-only rows
+    carry no cosine, so an unclamped keyword-heavy top-k could starve the
+    escalation gate's cosine list (US-046 / ADR-0010). The deflection pipeline
+    (`escalation.run_deflection_pipeline`) calls this directly and inherits alpha
+    by design.
     """
     pool_size = min(max(top_k * HYBRID_POOL_MULTIPLIER, top_k), MAX_TOP_K)
 
@@ -605,7 +645,14 @@ async def hybrid_search(
     )
     vector_results, keyword_results = await asyncio.gather(vector_task, keyword_task)
 
-    return _rrf_fuse([vector_results, keyword_results], top_k=top_k, k=get_rrf_k())
+    policy = get_hybrid_fusion_alpha()
+    alpha = predict_alpha(query) if policy == "auto" else policy
+    return _rrf_fuse(
+        [vector_results, keyword_results],
+        top_k=top_k,
+        k=get_rrf_k(),
+        weights=(alpha, 1.0 - alpha),
+    )
 
 
 # -----------------------------------------------------------------------------

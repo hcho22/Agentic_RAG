@@ -81,7 +81,7 @@ selective filters. The full write-up is in
 
 - **Chat with streaming** — OpenAI Responses or Chat Completions API, configurable per-request, streamed token-by-token to the UI. Tool calls and results persist alongside messages.
 - **Drag-and-drop ingestion** — `.txt / .md / .pdf / .docx / .html` parsed via docling, chunked, embedded, indexed. Live status updates via Supabase Realtime. Document-level metadata (title, authors, topics, dates) extracted via LLM structured outputs.
-- **Hybrid retrieval** — vector (pgvector HNSW) + keyword (Postgres full-text) fused via Reciprocal Rank Fusion. Optional reranker layer: Cohere, Voyage, or LLM-as-judge. All retrieval runs under user JWT — RLS enforces per-user visibility.
+- **Hybrid retrieval** — vector (pgvector HNSW) + keyword (Postgres full-text) fused via Reciprocal Rank Fusion, with query-adaptive fusion weighting (`HYBRID_FUSION_ALPHA=auto`) that tilts identifier-dense queries toward the lexical leg and leaves prose at the legacy equal-weight midpoint. Optional reranker layer: Cohere, Voyage, or LLM-as-judge. All retrieval runs under user JWT — RLS enforces per-user visibility.
 - **Per-document sharing** — share documents with individual users or groups via the per-chunk ACL system. Share dialog in the ingestion UI. Per-chunk badges in chat tool attribution show *why* the viewer can see each chunk.
 - **Workspace tenant isolation** — a hard tenant boundary *above* per-document sharing: a chunk is visible only if the viewer is a member of its document's workspace, AND-ed into the same `SECURITY INVOKER` retrieval predicate (resolved from the viewer's JWT, never a backend-passed tenant id) and mirrored in the table RLS. Existing data lives in one operator-managed Default Workspace; the boundary bites once a second workspace exists. See [`docs/adr/0002-workspace-tenant-isolation.md`](docs/adr/0002-workspace-tenant-isolation.md).
 - **Structured RAG (text-to-SQL)** — `query_database` tool over an allowlisted read-only schema, with a semantic-layer-aware compiler so the LLM doesn't have to know table internals.
@@ -190,6 +190,7 @@ To run against hosted Supabase instead of local, push migrations with `supabase 
 | `RETRIEVAL_MODE` | no | `hybrid` (default) / `vector` / `keyword`. Safety escape hatch — production uses hybrid |
 | `SEARCH_SIMILARITY_THRESHOLD` | no | Cosine threshold for `match_chunks` filter. Default 0.3 |
 | `HYBRID_RRF_K` | no | RRF damping constant. Default 60 |
+| `HYBRID_FUSION_ALPHA` | no | Hybrid fusion vector-leg weight. `auto` (default) picks a per-query weight from `predict_alpha`, tilting identifier-dense queries toward the lexical leg; a fixed float in `[0, 1]` pins every query (`0.5` reproduces legacy equal-weight RRF exactly). Junk/out-of-range fails at startup (US-116) |
 | `RERANKER` | no | `none` (default) / `cohere` / `voyage` / `llm` |
 | `COHERE_API_KEY` | only if `RERANKER=cohere` | |
 | `VOYAGE_API_KEY` | only if `RERANKER=voyage` | |

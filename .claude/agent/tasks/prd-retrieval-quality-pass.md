@@ -1,6 +1,6 @@
 # PRD: Retrieval-Quality Pass (Lexical Leg Revival + Adaptive Fusion)
 
-Status: in progress. US-113 (lexical golden-set instrumentation), US-114 (keyword_search OR-fallback), and US-115 (deterministic-alpha fusion seam, pure/unwired) landed; US-116 through US-118 not started.
+Status: in progress. US-113 (lexical golden-set instrumentation), US-114 (keyword_search OR-fallback), US-115 (deterministic-alpha fusion seam, pure/unwired), and US-116 (adaptive alpha wired into hybrid_search) landed; US-117 through US-118 not started.
 Origin: comparison of Agentic_RAG against RakuenSoftware/aimee (2026-07-10), scoped via grilling session.
 Predecessor numbering: continues after US-112 (Phase-2 PRD, `.claude/agent/tasks/prd-phase2-implementation.md`).
 
@@ -108,12 +108,14 @@ It deliberately borrows nothing that touches trust boundaries.
 
 **Acceptance Criteria:**
 
-- [ ] `hybrid_search` computes `alpha = predict_alpha(query)` and passes `weights=(alpha, 1 - alpha)` (vector ranking first, matching current order).
-- [ ] Env knob `HYBRID_FUSION_ALPHA` with values `auto` (default) or a fixed float in [0, 1], validated following the `get_rrf_k()` pattern; `0.5` pins legacy equal-weight behavior as the ops escape hatch.
-- [ ] The deflection pipeline (`backend/escalation.py::run_deflection_pipeline` calls `hybrid_search` directly) inherits alpha by design; this coupling and its guards are documented in the ADR.
-- [ ] `python -m backend.test_escalation_gate` and `python -m backend.test_deflection_pipeline` pass.
-- [ ] Eval evidence in the PR body: hybrid recall@5 and MRR >= vector on every category including lexical; adversarial hybrid MRR > 0.503. This is PR-body evidence, not a new hard gate (per-PR quality blocking stays off per `evals/gate/gate.yaml` policy).
-- [ ] ADR `docs/adr/0010-deterministic-alpha-fusion.md` committed (asymmetric fusion trade-off, deflection coupling, clamp rationale); CLAUDE.md ADR list line updated.
+- [x] `hybrid_search` computes `alpha = predict_alpha(query)` and passes `weights=(alpha, 1 - alpha)` (vector ranking first, matching current order).
+- [x] Env knob `HYBRID_FUSION_ALPHA` with values `auto` (default) or a fixed float in [0, 1], validated following the `get_rrf_k()` pattern; `0.5` pins legacy equal-weight behavior as the ops escape hatch.
+- [x] The deflection pipeline (`backend/escalation.py::run_deflection_pipeline` calls `hybrid_search` directly) inherits alpha by design; this coupling and its guards are documented in the ADR.
+- [x] `python -m backend.test_escalation_gate` and `python -m backend.test_deflection_pipeline` pass.
+- [ ] Eval evidence in the PR body: hybrid recall@5 and MRR >= vector on every category including lexical; adversarial hybrid MRR > 0.503. This is PR-body evidence, not a new hard gate (per-PR quality blocking stays off per `evals/gate/gate.yaml` policy). *(Pending a local-Supabase eval run; the nightly `retrieval-eval` job produces this on the branch.)*
+- [x] ADR `docs/adr/0010-deterministic-alpha-fusion.md` committed (asymmetric fusion trade-off, deflection coupling, clamp rationale); CLAUDE.md ADR list line updated.
+
+**Status:** Code-complete. `hybrid_search` now resolves `get_hybrid_fusion_alpha()` (the `HYBRID_FUSION_ALPHA` env knob, `auto` default / fixed-float pin, validated like `get_rrf_k()`) and fuses with `weights=(alpha, 1 - alpha)`; the deflection pipeline inherits it unchanged. ADR-0010 documents the asymmetric-fusion trade-off, the deflection coupling and its four guards, and the load-bearing [0.3, 0.7] clamp; AGENTS.md/CLAUDE.md ADR list updated; `HYBRID_FUSION_ALPHA` added to `backend/.env.example`. New `backend/test_us116_alpha_wiring.py` (7 groups) pins env parsing, the fixed-float tilt, the `0.5`-reproduces-legacy escape hatch, and the auto identifier-lifts / prose-is-legacy behavior; `test_escalation_gate` (8), `test_deflection_pipeline` (5), `test_alpha_fusion` (10), and `test_cosine_surface` (6) all still pass. Remaining: the DB-backed eval-evidence AC (hybrid ≥ vector per category; adversarial MRR > 0.503) is produced by the branch's `retrieval-eval` run / a local-Supabase runner and reported in the PR body.
 
 **Validation Test:**
 
