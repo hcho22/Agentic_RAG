@@ -18,14 +18,14 @@ Every buyer authors exactly one primitive per question:
 
 ```yaml
 - id: q01
-  category: single_chunk          # single_chunk | multi_hop | adversarial | paraphrase
+  category: single_chunk          # single_chunk | multi_hop | adversarial | paraphrase | lexical
   question: What's the standard shipping window for domestic orders?
   gold_anchors:
     - Standard shipping is 3–5 business days within the contiguous US
 ```
 
 - **`question`** - the natural-language query passed to retrieval.
-- **`category`** - one of `single_chunk`, `multi_hop`, `adversarial`, `paraphrase`; drives the per-category aggregate only, not scoring.
+- **`category`** - one of `single_chunk`, `multi_hop`, `adversarial`, `paraphrase`, `lexical`; drives the per-category aggregate only, not scoring.
 - **`gold_anchors`** - one or more **content anchors** (§2): the answer-bearing spans that a *correct* retrieval must surface for this question.
 
 That is the whole base layer.

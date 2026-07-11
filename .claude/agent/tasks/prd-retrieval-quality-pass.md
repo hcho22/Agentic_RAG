@@ -34,13 +34,13 @@ It deliberately borrows nothing that touches trust boundaries.
 
 **Acceptance Criteria:**
 
-- [ ] New corpus doc `db_seed/corpus/api-error-reference.md` containing identifier-dense content: error codes (e.g. `ERR-4102`), config keys (e.g. `WEBHOOK_RETRY_MAX`), and quotable literal phrases, written in the style of the existing corpus docs.
-- [ ] Approximately 10 new questions (q51 onward) in `evals/retrieval/retrieval_gold.yaml` with `category: lexical`, whose phrasing targets exact-token matching (the query contains the identifier or quoted phrase verbatim).
-- [ ] Gold anchors quoted verbatim from the new doc per `docs/golden-set-authoring.md`, with every chunk containing each answer anchored (completeness contract, since E4 no-access populations derive from gold).
-- [ ] Reference answers for the new questions added to `evals/retrieval/generation_gold.yaml`.
-- [ ] `"lexical"` appended to `CATEGORY_ORDER` in `evals/retrieval/runner.py` (fail-closed list at ~line 129) and in the duplicate list in `evals/retrieval/ci/diff_results.py` (~line 36).
-- [ ] Headline question count in the runner summary is computed from `len(per_question)` rather than hardcoded "50".
-- [ ] `python -m evals.retrieval.test_us108_layered_golden_set` and `python -m evals.retrieval.test_content_anchors` pass.
+- [x] New corpus doc `db_seed/corpus/api-error-reference.md` containing identifier-dense content: error codes (e.g. `ERR-4102`), config keys (e.g. `WEBHOOK_RETRY_MAX`), and quotable literal phrases, written in the style of the existing corpus docs.
+- [x] Approximately 10 new questions (q51 onward) in `evals/retrieval/retrieval_gold.yaml` with `category: lexical`, whose phrasing targets exact-token matching (the query contains the identifier or quoted phrase verbatim).
+- [x] Gold anchors quoted verbatim from the new doc per `docs/golden-set-authoring.md`, with every chunk containing each answer anchored (completeness contract, since E4 no-access populations derive from gold).
+- [x] Reference answers for the new questions added to `evals/retrieval/generation_gold.yaml`.
+- [x] `"lexical"` appended to `CATEGORY_ORDER` in `evals/retrieval/runner.py` (fail-closed list at ~line 129) and in the duplicate list in `evals/retrieval/ci/diff_results.py` (~line 36).
+- [x] Headline question count in the runner summary is computed from `len(per_question)` rather than hardcoded "50".
+- [x] `python -m evals.retrieval.test_us108_layered_golden_set` and `python -m evals.retrieval.test_content_anchors` pass.
 
 **Validation Test:**
 

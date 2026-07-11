@@ -289,3 +289,55 @@ answers:
 
   q50: |
     Gift cards — including digital gift vouchers — are not refundable.
+
+  # US-113: lexical category (q51-q60), grounded in api-error-reference.md.
+  q51: |
+    ERR-4102 is a rate-limit error: it's returned when the caller exceeds the
+    per-minute request quota. The response carries a Retry-After header with
+    the seconds until the quota window resets; it is not an auth failure.
+
+  q52: |
+    ERR-4103 is returned when the request body exceeds the 2 MB payload
+    ceiling. The caller must split the batch into smaller requests — the
+    platform does not truncate or partially accept an oversized payload.
+
+  q53: |
+    ERR-4210 is returned when an idempotency key is reused with a different
+    request body than the original call. Replaying the exact same body instead
+    returns the original cached response.
+
+  q54: |
+    After 20 consecutive delivery failures (ERR-4290, endpoint unreachable),
+    the webhook endpoint is automatically disabled and the integrator is
+    notified by email.
+
+  q55: |
+    ERR-5001 is a transient server-side error, returned when a downstream
+    fulfillment service does not respond within the request deadline. The
+    caller should retry with exponential backoff.
+
+  q56: |
+    WEBHOOK_RETRY_MAX sets the number of webhook delivery retries before an
+    event is moved to the dead-letter queue. The default is 6 and the maximum
+    accepted value is 10.
+
+  q57: |
+    WEBHOOK_SIGNING_SECRET_ROTATION_DAYS controls how often the signing secret
+    is rotated. The default is 90 days; setting it to 0 disables automatic
+    rotation.
+
+  q58: |
+    RATE_LIMIT_BURST sets how many requests may exceed the steady-state
+    per-minute quota in a short burst. The default burst allowance is 20
+    requests above the sustained rate.
+
+  q59: |
+    The idempotency key is supplied in the X-Acme-Idempotency-Key request
+    header. It's case-sensitive; a missing header on a POST or PUT is accepted
+    but forfeits replay protection.
+
+  q60: |
+    On a signature mismatch the receiver should reject the delivery, and the
+    platform logs the error body "signature verification failed" against that
+    endpoint. Such a rejection does not count toward the ERR-4290 disable
+    threshold.

@@ -49,9 +49,9 @@ Terms that have a precise meaning in this codebase. Resolved during design sessi
 
 ## Permissions eval design (Module 11)
 
-- **Suite shape**: 50 golden questions × 3 viewer setups = 150 runs per eval mode. The three viewer setups are *Full-access*, *Partial-access*, and *No-access*; each is a deterministic function of the question's gold chunks (defined in the YAML, not hand-picked per question).
+- **Suite shape**: 60 golden questions × 3 viewer setups = 180 runs per eval mode. The three viewer setups are *Full-access*, *Partial-access*, and *No-access*; each is a deterministic function of the question's gold chunks (defined in the YAML, not hand-picked per question).
 - **Three independent claims, three tables**: Security (no-access viewer should retrieve zero gold under both modes), Recall trade-off (partial-access viewer is where post-filter recall collapses and pre-filter recovers — the headline number), Non-regression (full-access viewer matches the unfiltered Module-10 baseline within tolerance).
-- **Selectivity policy**: For the 14-chunk *correctness eval*, partial-access = "gold chunks + N random others" with N fixed. For the 10k-chunk *scale benchmark*, partial-access = "gold chunks + k% of filler" for k ∈ {50, 10, 1}.
+- **Selectivity policy**: For the 16-chunk *correctness eval*, partial-access = "gold chunks + N random others" with N fixed. For the 10k-chunk *scale benchmark*, partial-access = "gold chunks + k% of filler" for k ∈ {50, 10, 1}.
 
 ## Frontend share UX (Module 11)
 
@@ -85,7 +85,7 @@ Terms that have a precise meaning in this codebase. Resolved during design sessi
 - **No feature flag.** Module 11 is a correctness migration, not a tool-availability gate. Owner-OR-ACL falls back to owner-only when `chunk_acl` is empty, so existing single-user behavior is preserved without a flag. Convention in this repo is that flags gate *tool availability* (e.g., `crm_tool_enabled`), not data-path behavior.
 - **No backfill.** Empty `chunk_acl` rows for existing chunks + the additive predicate = owner-only behavior, identical to today.
 - **Three migrations**: `principal_membership`, `chunk_acl`, `match_chunks` replacement. The load-bearing perf index is `chunk_acl(principal_id, chunk_id)` (principal-leading so the EXISTS subquery is index-served).
-- **CI split**: per-PR runs the **correctness eval** (50 × 3 viewer setups = 150 runs). The **scale benchmark** (10k Wikipedia filler + `ef_search` sweep) runs **nightly + manual `workflow_dispatch`**, never per-PR. Nightly workflow must fail loudly (notification) on threshold breach, since nobody reads nightly artifacts unless something pages them.
+- **CI split**: per-PR runs the **correctness eval** (60 × 3 viewer setups = 180 runs). The **scale benchmark** (10k Wikipedia filler + `ef_search` sweep) runs **nightly + manual `workflow_dispatch`**, never per-PR. Nightly workflow must fail loudly (notification) on threshold breach, since nobody reads nightly artifacts unless something pages them.
 
 ## HNSW + selective-filter mitigation (Module 11)
 
@@ -94,12 +94,12 @@ Terms that have a precise meaning in this codebase. Resolved during design sessi
 
 ## Evals (Module 10 + Module 11)
 
-- **Correctness eval** — the existing 50-question golden set against the 7-doc / 14-chunk corpus in `db_seed/corpus/`. Demonstrates *correctness* dynamics (pre-filter vs post-filter recall under sparse permissions). Stays in PR CI.
+- **Correctness eval** — the existing 60-question golden set against the 8-doc / 16-chunk corpus in `db_seed/corpus/`. Demonstrates *correctness* dynamics (pre-filter vs post-filter recall under sparse permissions). Stays in PR CI.
 - **Scale benchmark** — a separate synthetic harness on ~10k Wikipedia-derived chunks. Demonstrates *HNSW × selective-filter* dynamics (`ef_search` tuning, IVFFlat comparison). Runs out of PR CI — nightly or manual `workflow_dispatch`. The 10k size is chosen as ~10× pgvector's default `ef_search`=40; below that, the HNSW walk is essentially exhaustive and the phenomenon is invisible.
-- **Filler corpus** — the Wikipedia-derived chunks exist to populate the HNSW neighborhood, NOT to be answered about. Golden questions remain anchored to the original 7 docs. The writeup must be explicit that filler chunks are never gold.
+- **Filler corpus** — the Wikipedia-derived chunks exist to populate the HNSW neighborhood, NOT to be answered about. Golden questions remain anchored to the original 8 docs. The writeup must be explicit that filler chunks are never gold.
 - **RAGAS metric** — one of the four canonical RAG-evaluation scores (`faithfulness`, `answer_relevancy`, `context_precision`, `context_recall`) on a **0–1** scale, computed by the `ragas` library with `gpt-4o-mini` as judge. Distinct from the custom Claude-judge scores (`faithfulness`, `helpfulness`) on a **1–5** Likert scale — same English word "faithfulness", two different numbers, so always state the scale. RAGAS ships *alongside* the Claude judge, never as a replacement.
 - **Same-family bias** — the RAGAS judge (`gpt-4o-mini`) shares a model family with the answer generator (also `gpt-4o-mini`), so it can be systematically lenient toward outputs that "reason like it does." Accepted deliberately: `gpt-4o-mini` is cheap enough to score four metrics weekly, and judge independence is preserved by the *cross-family* Claude judge, which stays the headline signal.
 - **Cell** — a (viewer × filter) tuple, e.g. `full_access:pre_filter`. The retrieval runner sweeps six; RAGAS scores only the two `pre_filter` cells (`full_access`, `partial_access`) — the other four are degenerate or already covered by the security / recall trade-off tables.
-- **Effective coverage** — per (RAGAS metric × cell), the fraction of questions that produced a **non-NaN** score (`non-NaN / total`). Distinct from "tried": a metric can be attempted on all 50 questions yet have 0.92 coverage because the judge refused or the contexts were empty on 4 of them. The headline `mean_strict` divides by *total* (NaN→0), never by the non-NaN count, so degraded coverage cannot hide behind a shrinking denominator.
+- **Effective coverage** — per (RAGAS metric × cell), the fraction of questions that produced a **non-NaN** score (`non-NaN / total`). Distinct from "tried": a metric can be attempted on all 60 questions yet have 0.93 coverage because the judge refused or the contexts were empty on 4 of them. The headline `mean_strict` divides by *total* (NaN→0), never by the non-NaN count, so degraded coverage cannot hide behind a shrinking denominator.
 - **Cross-family corroboration** — the alert rule: a RAGAS score drop escalates to a **red** regression only when the independent cross-family Claude judge shows the same drop in the same [[Cell]]. An uncorroborated single-judge drop stays **yellow**. Two independent observations agreeing is a far stronger signal than one — the rule suppresses single-judge false alarms.
 - **single-judge-red** — the finding tag for a Context Precision / Context Recall regression. Those two metrics have no Claude-judge equivalent to corroborate against, so a drop fires red on the RAGAS judge alone — flagged `single-judge-red` so a reader knows it rests on one judge, and given a 2-week auto-close window (vs 1 week for cross-family-corroborated reds) because there is no second judge to clear it sooner.

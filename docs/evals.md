@@ -12,15 +12,15 @@ Module 10 is the infrastructure that lets future modules ship with real numbers 
 
 ### 2.1 Corpus
 
-The eval runs against a fixed text corpus of 7 markdown documents committed to the repo under `db_seed/corpus/`. The documents describe Acme Co's customer-facing policies — refund policy, shipping FAQ, warranty terms, loyalty program, customer-service SOP, returns process, product catalog. The topics are interlocking on purpose: the loyalty program references the refund policy's goodwill exception, the warranty terms reference the loyalty tier benefits, the returns process distinguishes itself from refund flow, etc. Multi-hop questions that span 2+ chunks are answerable from the corpus rather than requiring contrived combinations.
+The eval runs against a fixed text corpus of 8 markdown documents committed to the repo under `db_seed/corpus/`. The documents describe Acme Co's customer-facing policies and developer-integration reference — refund policy, shipping FAQ, warranty terms, loyalty program, customer-service SOP, returns process, product catalog, and an API & integration error reference (error codes, config keys, header names - the identifier-dense doc the `lexical` questions target, US-113). The topics are interlocking on purpose: the loyalty program references the refund policy's goodwill exception, the warranty terms reference the loyalty tier benefits, the returns process distinguishes itself from refund flow, etc. Multi-hop questions that span 2+ chunks are answerable from the corpus rather than requiring contrived combinations.
 
 `db_seed/corpus_seed.py` is the ingestion path. It calls the same `backend.chunking.chunk_text` and `backend.embeddings.embed_texts` the production ingestion pipeline uses, so the eval exercises the real code paths a PR would change. The seeder is idempotent: re-running it produces byte-identical `(stable_id, content)` rows, where `stable_id = f"{filename_slug}:{chunk_index}"`. Byte-identical rows keep the eval reproducible across CI cold starts; the golden set itself no longer references chunks by name but anchors on answer-bearing content that the runner resolves to the current `stable_id`s at eval time (§2.2), so a re-chunk needs no re-labeling.
 
-Default chunking is 500 tokens with 50-token overlap (`CHUNK_SIZE_TOKENS` / `CHUNK_OVERLAP_TOKENS`). At those defaults, the 7 documents produce 14 total chunks. The corpus is intentionally small; the eval's job is to differentiate retrieval modes, not to demonstrate scale.
+Default chunking is 500 tokens with 50-token overlap (`CHUNK_SIZE_TOKENS` / `CHUNK_OVERLAP_TOKENS`). At those defaults, the 8 documents produce 16 total chunks. The corpus is intentionally small; the eval's job is to differentiate retrieval modes, not to demonstrate scale.
 
 ### 2.2 Golden set
 
-`evals/retrieval/retrieval_gold.yaml` holds 50 hand-curated questions across four categories, distribution fixed by the PRD:
+`evals/retrieval/retrieval_gold.yaml` holds 60 hand-curated questions across five categories, distribution fixed by the PRD:
 
 | Category | n | What it stresses |
 |---|---|---|
@@ -28,6 +28,7 @@ Default chunking is 500 tokens with 50-token overlap (`CHUNK_SIZE_TOKENS` / `CHU
 | `multi_hop` | 15 | Answer requires combining 2+ chunks. Differentiates hybrid (higher aggregate recall) from single-strategy modes. |
 | `adversarial` | 10 | The lexically obvious chunk is the *wrong* answer; the right answer is in a semantically closer but less keyword-y chunk. Differentiates vector from keyword. |
 | `paraphrase` | 5 | Question uses synonyms or out-of-vocabulary terms not in the corpus. Stresses embedding quality at the margin. |
+| `lexical` | 10 | Exact-token queries - error codes, config keys, header names, quoted literal phrases - that appear in the query verbatim. Instruments the keyword (lexical) leg so the US-114 OR-fallback and US-116 adaptive-fusion changes are measurable (US-113). |
 
 Each question has fields `id`, `category`, `question`, `gold_anchors` (one or more gold labels), and an optional `notes` field carrying authoring rationale.
 
@@ -125,8 +126,8 @@ Replacing the corpus and authoring a new golden set are the **same step** (US-10
 
 ### 2.7 The kit ships green out of the box (US-111)
 
-Day-zero, a fresh `seed → eval` on the **shipped** artifacts alone - the default 7-doc / 14-chunk e-commerce corpus (`db_seed/corpus/`), its content-anchored golden set (`evals/retrieval/retrieval_gold.yaml`, §2.2), and the default gate (`evals/gate/gate.yaml`, §"Buyer-authored gate declaration") - reproduces the **1.000 E4 no-leak security table** with **zero buyer authoring**.
-There is nothing to write before the first eval can run: the 50 golden anchors are quoted from the shipped docs so they all resolve (`python -m evals.retrieval.test_content_anchors`), and the default `gate.yaml` reproduces today's gate constants byte-for-byte (`python -m evals.gate.test_gate_bindings`).
+Day-zero, a fresh `seed → eval` on the **shipped** artifacts alone - the default 8-doc / 16-chunk e-commerce corpus (`db_seed/corpus/`), its content-anchored golden set (`evals/retrieval/retrieval_gold.yaml`, §2.2), and the default gate (`evals/gate/gate.yaml`, §"Buyer-authored gate declaration") - reproduces the **1.000 E4 no-leak security table** with **zero buyer authoring**.
+There is nothing to write before the first eval can run: the 60 golden anchors are quoted from the shipped docs so they all resolve (`python -m evals.retrieval.test_content_anchors`), and the default `gate.yaml` reproduces today's gate constants byte-for-byte (`python -m evals.gate.test_gate_bindings`).
 
 A dead or drifted demo corpus embarrasses the quickstart (the P3 build-in-public demo), so the kit's **own** CI keeps the promise honest.
 `.github/workflows/ship-green.yml` runs the clean `python -m db_seed.corpus_seed` → `python -m evals.retrieval.runner --viewers all` on every change to the green-determining surface **and on `main`**, then hard-asserts the `security_no_access` table is `1.000` across every `no_access` cell (reusing the same pinned `evals/gate/security.py` invariant the runner asserts internally, with a `e4_structurally_blind` guard that refuses a vacuous pass).
@@ -202,11 +203,11 @@ The point of staging this rather than waiting for an organic regression is to ke
 
 The eval is useful, but it is small and biased in ways worth naming explicitly.
 
-**The golden set is 50 questions.** That's enough to differentiate the three retrieval modes on aggregate, but per-category cells (10 adversarial, 5 paraphrase) have low statistical power. A 0.1 swing in `recall@5` on the adversarial subset could be one question changing outcome, not a real signal. Treat per-category numbers as directional, not precise.
+**The golden set is 60 questions.** That's enough to differentiate the three retrieval modes on aggregate, but per-category cells (10 adversarial, 5 paraphrase, 10 lexical) have low statistical power. A 0.1 swing in `recall@5` on the adversarial subset could be one question changing outcome, not a real signal. Treat per-category numbers as directional, not precise.
 
 **LLM-drafted questions may inflate scores.** The questions were drafted by an LLM (Claude Opus) and human-edited. Both the embedding model and the question author are LLMs, and there's a known correlation in how LLMs phrase semantically-similar text. The likely effect is that vector recall is slightly higher than it would be if questions were written from scratch by a domain expert. The 10 adversarial questions are an explicit mitigation — they're constructed so the lexically-obvious chunk is *not* the answer — but they don't fully eliminate the correlation.
 
-**The seeded corpus may not generalise.** The eval runs against 7 markdown documents in a CRM domain. Retrieval-quality numbers measured here say nothing about how the same retrieval stack would perform on, say, a 10,000-document corpus of legal contracts, scientific papers, or source code. Modules 11+ that swap vector stores or change chunking should be evaluated on whatever corpus the change is supposed to help — not just this one.
+**The seeded corpus may not generalise.** The eval runs against 8 markdown documents in a CRM domain. Retrieval-quality numbers measured here say nothing about how the same retrieval stack would perform on, say, a 10,000-document corpus of legal contracts, scientific papers, or source code. Modules 11+ that swap vector stores or change chunking should be evaluated on whatever corpus the change is supposed to help — not just this one.
 
 **Retrieval-only metrics don't capture generation quality.** A retrieval mode that returns the wrong chunks can still produce a "helpful enough" answer when the model papers over the gaps with its parametric knowledge. Conversely, a mode that returns the right chunks doesn't guarantee a faithful answer. The runner's optional `--include-generation` path (US-036) adds faithfulness + helpfulness scoring via a different-family LLM judge (Claude scoring `gpt-4o-mini`'s answers), which catches some of this — but the judge itself has biases (lenient scoring on plausible-sounding text, position bias, etc.) and 1–5 integer scoring throws away resolution. The combined retrieval + generation eval is more informative than either alone, but neither is a substitute for human review on disputed cases.
 

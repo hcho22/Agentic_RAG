@@ -32,7 +32,7 @@ Each corpus is owned by its **own sentinel user** so all three coexist in one da
 
 **Role:** the small, fast, relatable corpus that makes the security and escalation claims legible.
 
-Seven markdown documents / fourteen chunks in `db_seed/corpus/` (refund policy, returns process, shipping FAQ, warranty terms, loyalty program, product catalog, customer-service SOP).
+Eight markdown documents / sixteen chunks in `db_seed/corpus/` (refund policy, returns process, shipping FAQ, warranty terms, loyalty program, product catalog, customer-service SOP, API & integration error reference).
 Small enough to read end to end, relatable enough that a buyer immediately understands "this viewer should not see the enterprise refund exception."
 
 This is the corpus the kit **ships green** against (US-111): a clean `seed → eval` reproduces the `1.000` no-leak security table on the first run with no buyer authoring, and the kit's own CI keeps it green.
@@ -40,7 +40,7 @@ Its golden set (`evals/retrieval/retrieval_gold.yaml` + `evals/retrieval/escalat
 
 Imitate this corpus when your face is a **permission-aware knowledge assistant or the support widget**: it demonstrates the E4 leak matrix (derived for free from the gold labels) and, for support buyers, the E7 escalation populations (`no_context` / `answerable_faithful` / `should_escalate`).
 
-**When you swap it out:** every anchor in the shipped golden set was quoted from these seven documents, so the first eval against your corpus fails loud on those spans.
+**When you swap it out:** every anchor in the shipped golden set was quoted from these eight documents, so the first eval against your corpus fails loud on those spans.
 That failure is your prompt to author a new golden set on your own docs - see `docs/golden-set-authoring.md` (US-109) and the layered format (US-108).
 
 ---

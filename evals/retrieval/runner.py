@@ -1,6 +1,6 @@
 """US-033: retrieval eval runner.
 
-Sweeps the 50-question golden set in `retrieval_gold.yaml` across the three
+Sweeps the 60-question golden set in `retrieval_gold.yaml` across the three
 retrieval modes — vector, keyword, hybrid — using the real
 `backend/retrieval.py` functions (so a future PR that breaks retrieval
 breaks the eval). Computes recall@{1,3,5,10} (per-chunk partial credit),
@@ -126,7 +126,7 @@ DEFAULT_SUMMARY = Path(__file__).resolve().parent / "summary.md"
 MODES = ("vector", "keyword", "hybrid")
 TOP_K = 10  # Retrieve 10; metrics at k ∈ {1,3,5,10} are computed from this list.
 RECALL_KS = (1, 3, 5, 10)
-CATEGORY_ORDER = ("single_chunk", "multi_hop", "adversarial", "paraphrase")
+CATEGORY_ORDER = ("single_chunk", "multi_hop", "adversarial", "paraphrase", "lexical")
 
 # US-042: viewer parameterization. The runner replays each question under
 # three permission setups and two filter strategies so the eval can prove:
@@ -1066,6 +1066,7 @@ def aggregate(
     aggregates_out: dict[str, Any] = {
         "by_mode": by_mode_mean,
         "by_mode_category": by_mode_category_mean,
+        "n_questions": len(per_question),
     }
     aggregates_out.update(_aggregate_viewer_filter(per_question, modes))
     return aggregates_out
@@ -1233,11 +1234,12 @@ def render_summary(
     """
     by_mode = aggregates["by_mode"]
     has_generation = any("faithfulness" in by_mode[m] for m in modes)
+    n_questions = aggregates.get("n_questions")
 
     lines: list[str] = [
         "<!-- BEGIN EVAL_SUMMARY -->",
         "",
-        "### Headline (mean across 50 questions)",
+        f"### Headline (mean across {n_questions} questions)",
         "",
         "| Mode | recall@5 | MRR | nDCG@5 |",
         "|---|---|---|---|",
@@ -1451,7 +1453,7 @@ async def amain() -> int:
         help=(
             "US-042: viewer setups to run. `all` (default) walks the three "
             "permission setups defined in the YAML's viewer_construction "
-            "block — 50 questions × 3 viewers per mode. `full` reproduces "
+            "block — 60 questions × 3 viewers per mode. `full` reproduces "
             "the pre-Module-11 single-viewer behaviour."
         ),
     )

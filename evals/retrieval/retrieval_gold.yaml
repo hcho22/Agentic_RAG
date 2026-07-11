@@ -1,7 +1,12 @@
 # US-033 / US-107: golden set for the retrieval eval.
 #
-# 50 questions across four categories, distributed per the PRD: 20 single_chunk,
-# 15 multi_hop, 10 adversarial, 5 paraphrase.
+# 60 questions across five categories, distributed per the PRD: 20 single_chunk,
+# 15 multi_hop, 10 adversarial, 5 paraphrase, 10 lexical.
+# The lexical category (US-113, q51-q60) is the exact-token instrument: error
+# codes, config keys, header names, and quoted literal phrases anchored verbatim
+# from db_seed/corpus/api-error-reference.md, phrased so the identifier appears
+# in the query verbatim. It makes the lexical (keyword) leg observable so the
+# US-114 OR-fallback and US-116 adaptive-fusion changes are measurable.
 #
 # US-107 — CONTENT ANCHORS (this is the load-bearing change):
 #   Each gold label is authored as an **answer-bearing content anchor** — a
@@ -26,7 +31,7 @@
 #
 # Field semantics:
 #   id            — qNN, sequential, never reused
-#   category      — single_chunk | multi_hop | adversarial | paraphrase
+#   category      — single_chunk | multi_hop | adversarial | paraphrase | lexical
 #   question      — the natural-language query passed to retrieval
 #   gold_anchors  — list of one or more content anchors. Each is either a bare
 #                   string (an answer-bearing span, resolved unscoped) or a
@@ -497,3 +502,99 @@ questions:
       Out-of-vocab: "digital gift vouchers" → corpus uses "gift cards";
       "cash-back" → corpus uses "refundable". Answer: gift cards are not
       refundable.
+
+  # ── lexical (10) ──────────────────────────────────────────────────────
+  # US-113: exact-token questions over the identifier-dense
+  # api-error-reference.md corpus doc. Each question contains the error code,
+  # config key, header name, or quoted literal phrase verbatim, so the lexical
+  # (keyword) leg is the one that should carry these — the before-instrument
+  # for the US-114 OR-fallback and US-116 adaptive-fusion work. Anchors are
+  # quoted verbatim from api-error-reference.md.
+  - id: q51
+    category: lexical
+    question: What does error code ERR-4102 mean?
+    gold_anchors:
+      - "`ERR-4102` is returned when the caller exceeds the per-minute request quota"
+    notes: |
+      Exact-token: query contains the error code `ERR-4102` verbatim. Answer:
+      per-minute request-quota (rate-limit) exceeded.
+
+  - id: q52
+    category: lexical
+    question: When is ERR-4103 returned?
+    gold_anchors:
+      - "`ERR-4103` is returned when the request body exceeds the 2 MB payload ceiling"
+    notes: |
+      Exact-token: `ERR-4103`. Answer: request body over the 2 MB payload
+      ceiling.
+
+  - id: q53
+    category: lexical
+    question: What triggers ERR-4210?
+    gold_anchors:
+      - "`ERR-4210` is returned when an idempotency key is reused with a different request body"
+    notes: |
+      Exact-token: `ERR-4210`. Answer: reusing an idempotency key with a
+      different request body.
+
+  - id: q54
+    category: lexical
+    question: What happens when ERR-4290 keeps occurring for a webhook endpoint?
+    gold_anchors:
+      - After 20 consecutive delivery failures the endpoint is automatically disabled
+    notes: |
+      Exact-token: `ERR-4290`. Answer: after 20 consecutive delivery failures
+      the endpoint is auto-disabled.
+
+  - id: q55
+    category: lexical
+    question: Is ERR-5001 a client error or a transient server error?
+    gold_anchors:
+      - "This is a transient server-side error and the caller should retry with exponential backoff"
+    notes: |
+      Exact-token: `ERR-5001`. Answer: transient server-side error; retry with
+      backoff.
+
+  - id: q56
+    category: lexical
+    question: What is the default value of WEBHOOK_RETRY_MAX?
+    gold_anchors:
+      - "`WEBHOOK_RETRY_MAX` sets the number of delivery retries before a webhook event is moved to the dead-letter queue. The default is 6 and the maximum accepted value is 10"
+    notes: |
+      Exact-token config key: `WEBHOOK_RETRY_MAX`. Answer: default 6, max 10.
+
+  - id: q57
+    category: lexical
+    question: How often does WEBHOOK_SIGNING_SECRET_ROTATION_DAYS rotate the secret by default?
+    gold_anchors:
+      - "`WEBHOOK_SIGNING_SECRET_ROTATION_DAYS` sets how often the signing secret is rotated. The default is 90 days"
+    notes: |
+      Exact-token config key: `WEBHOOK_SIGNING_SECRET_ROTATION_DAYS`. Answer:
+      90 days by default.
+
+  - id: q58
+    category: lexical
+    question: What does RATE_LIMIT_BURST control and what is its default?
+    gold_anchors:
+      - "`RATE_LIMIT_BURST` sets the number of requests allowed to exceed the steady-state per-minute quota in a short burst. The default burst allowance is 20 requests above the sustained rate"
+    notes: |
+      Exact-token config key: `RATE_LIMIT_BURST`. Answer: burst allowance over
+      the sustained rate; default 20.
+
+  - id: q59
+    category: lexical
+    question: Which request header carries the idempotency key, the X-Acme-Idempotency-Key header?
+    gold_anchors:
+      - "The idempotency key is supplied by the caller in the `X-Acme-Idempotency-Key` request header"
+    notes: |
+      Exact-token header name: `X-Acme-Idempotency-Key`. Answer: it is the
+      request header that carries the idempotency key.
+
+  - id: q60
+    category: lexical
+    question: What error body is logged when signature verification failed?
+    gold_anchors:
+      - 'the platform logs the error body `"signature verification failed"` against that endpoint'
+    notes: |
+      Quoted literal phrase: "signature verification failed". Answer: that exact
+      error-body string is logged against the endpoint on a signature mismatch.

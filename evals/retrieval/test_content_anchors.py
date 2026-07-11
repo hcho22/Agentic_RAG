@@ -242,10 +242,10 @@ def _load_shipped_questions() -> list[dict]:
 def test_shipped_golden_set_resolves_at_default_seed() -> None:
     """Step 1: seed at 500/50; every anchor resolves; q07 straddles to two."""
     contents = _corpus_chunk_contents(500, 50)
-    assert len(contents) == 14, f"expected 14 chunks at 500/50, got {len(contents)}"
+    assert len(contents) == 16, f"expected 16 chunks at 500/50, got {len(contents)}"
     resolver = ContentAnchorResolver(contents)
     questions = _load_shipped_questions()
-    assert len(questions) == 50
+    assert len(questions) == 60
 
     by_id: dict[str, list[str]] = {}
     for q in questions:
@@ -259,8 +259,8 @@ def test_shipped_golden_set_resolves_at_default_seed() -> None:
     # A representative single-chunk anchor resolves to exactly one.
     assert by_id["q02"] == ["warranty-terms:0"], by_id["q02"]
     print(
-        f"ok: all 50 shipped anchors resolve at 500/50 (q07 straddles -> "
-        f"{by_id['q07']})"
+        f"ok: all {len(questions)} shipped anchors resolve at 500/50 (q07 "
+        f"straddles -> {by_id['q07']})"
     )
 
 

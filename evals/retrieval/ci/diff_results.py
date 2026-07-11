@@ -33,7 +33,7 @@ HEADLINE_METRICS = (
     ("ndcg_at_5", "nDCG@5"),
 )
 
-CATEGORY_ORDER = ("single_chunk", "multi_hop", "adversarial", "paraphrase")
+CATEGORY_ORDER = ("single_chunk", "multi_hop", "adversarial", "paraphrase", "lexical")
 
 # Treat anything within ±0.0005 as flat — under the rounding floor used by
 # the runner's `round(..., 4)` aggregator, so the noise band matches.
