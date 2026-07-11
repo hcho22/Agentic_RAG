@@ -1,6 +1,6 @@
 # PRD: Retrieval-Quality Pass (Lexical Leg Revival + Adaptive Fusion)
 
-Status: in progress. US-113 (lexical golden-set instrumentation) and US-114 (keyword_search OR-fallback) landed; US-115 through US-118 not started.
+Status: in progress. US-113 (lexical golden-set instrumentation), US-114 (keyword_search OR-fallback), and US-115 (deterministic-alpha fusion seam, pure/unwired) landed; US-116 through US-118 not started.
 Origin: comparison of Agentic_RAG against RakuenSoftware/aimee (2026-07-10), scoped via grilling session.
 Predecessor numbering: continues after US-112 (Phase-2 PRD, `.claude/agent/tasks/prd-phase2-implementation.md`).
 
@@ -83,12 +83,14 @@ It deliberately borrows nothing that touches trust boundaries.
 
 **Acceptance Criteria:**
 
-- [ ] Pure module-level function `predict_alpha(query: str) -> float` in `backend/retrieval.py`: no I/O, deterministic, features are quoted-phrase presence, identifier-shaped token count (snake_case, UPPER_SNAKE, code-like digit-symbol mixes such as `CAT-1234`), digit density, and token count; returns the vector-leg weight clamped to [0.3, 0.7]; neutral prose queries return exactly 0.5.
-- [ ] `_rrf_fuse` gains an optional `weights` parameter where each ranking contributes `2 * w_i / (k + rank)`; with `weights=None` or `(0.5, 0.5)` the scores are byte-identical to today's `1 / (k + rank)`.
-- [ ] `cosine_similarity` pass-through in `_rrf_fuse` is untouched (US-046: the escalation gate thresholds on raw cosine; fusion weights must never alter per-row cosine values).
-- [ ] Nothing calls `predict_alpha` yet; `hybrid_search` behavior is bit-for-bit unchanged in this story.
-- [ ] New self-running test `backend/test_alpha_fusion.py` (pattern of `test_cosine_surface.py`) covering: determinism and purity, empty query, all-identifier query, quoted-phrase query, clamp bounds, legacy-equivalence of `weights=(0.5, 0.5)`, and cosine preservation under unequal weights.
-- [ ] `python -m backend.test_cosine_surface` extended for the new kwarg default and passes.
+- [x] Pure module-level function `predict_alpha(query: str) -> float` in `backend/retrieval.py`: no I/O, deterministic, features are quoted-phrase presence, identifier-shaped token count (snake_case, UPPER_SNAKE, code-like digit-symbol mixes such as `CAT-1234`), digit density, and token count; returns the vector-leg weight clamped to [0.3, 0.7]; neutral prose queries return exactly 0.5.
+- [x] `_rrf_fuse` gains an optional `weights` parameter where each ranking contributes `2 * w_i / (k + rank)`; with `weights=None` or `(0.5, 0.5)` the scores are byte-identical to today's `1 / (k + rank)`.
+- [x] `cosine_similarity` pass-through in `_rrf_fuse` is untouched (US-046: the escalation gate thresholds on raw cosine; fusion weights must never alter per-row cosine values).
+- [x] Nothing calls `predict_alpha` yet; `hybrid_search` behavior is bit-for-bit unchanged in this story.
+- [x] New self-running test `backend/test_alpha_fusion.py` (pattern of `test_cosine_surface.py`) covering: determinism and purity, empty query, all-identifier query, quoted-phrase query, clamp bounds, legacy-equivalence of `weights=(0.5, 0.5)`, and cosine preservation under unequal weights.
+- [x] `python -m backend.test_cosine_surface` extended for the new kwarg default and passes.
+
+**Status:** Done. `predict_alpha` + `_rrf_fuse(weights=...)` landed as a pure, unwired seam in `backend/retrieval.py`; `backend/test_alpha_fusion.py` (10 groups) and the extended `backend/test_cosine_surface.py` (6 groups) both pass. Seam is provably inert: `hybrid_search` still fuses with `weights=None`, `predict_alpha` has no call-site, and the byte-identical legacy-equivalence tests guarantee eval metrics cannot shift, so the DB-backed diff in step 3 is a formality (no live path reads the new code).
 
 **Validation Test:**
 

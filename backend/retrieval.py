@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from datetime import date
 from typing import Any, Literal
 
@@ -61,6 +62,16 @@ DEFAULT_RRF_K = 60
 # strategy ranks low but the other ranks well — too narrow and hybrid
 # degenerates to "whichever side ranked first".
 HYBRID_POOL_MULTIPLIER = 4
+
+# US-115: bounds for the deterministic per-query fusion weight `predict_alpha`
+# returns (the vector-leg weight). The clamp is deliberately narrow: keyword-only
+# rows carry `cosine_similarity = None`, so a keyword-heavy top-k would shrink the
+# escalation gate's cosine list (US-046/US-047) and could flip an escalation
+# decision. Neutral prose maps to the midpoint; identifier-dense queries slide
+# toward the lower bound (lexical leg up), never past it.
+ALPHA_MIN = 0.3
+ALPHA_MAX = 0.7
+ALPHA_NEUTRAL = 0.5
 
 RetrievalMode = Literal["hybrid", "vector", "keyword"]
 
@@ -389,10 +400,101 @@ async def keyword_only_search(
     )
 
 
+# US-115: features for `predict_alpha`. A token is "identifier-shaped" when it
+# looks like something a user would expect to match a chunk *verbatim* rather
+# than semantically — the cases the OR-fallback lexical leg (US-114) is best at:
+#   * snake_case / UPPER_SNAKE constants   (WEBHOOK_RETRY_MAX, retry_max)
+#   * code-like digit+symbol mixes         (CAT-1234, ERR-4102, v2.1, 5xx)
+#   * intra-token camelCase                (getUserById)
+# These are matched on tokens with surrounding sentence/quote punctuation
+# stripped, but with internal separators (`_`, `-`, `.`, `:`, `/`) preserved.
+_TOKEN_SPLIT_RE = re.compile(r"\s+")
+_EDGE_PUNCT = "\"'“”‘’.,;:?!()[]{}"
+_QUOTED_PHRASE_RE = re.compile(r"[\"“][^\"”]+[\"”]")
+_HAS_LETTER_RE = re.compile(r"[A-Za-z]")
+_HAS_DIGIT_RE = re.compile(r"[0-9]")
+_CAMEL_RE = re.compile(r"[a-z][A-Z]")
+
+
+def _is_identifier_token(tok: str) -> bool:
+    """True when `tok` (edge-punctuation already stripped) looks like a literal
+    identifier a user would expect to match verbatim, not paraphrased."""
+    if not tok:
+        return False
+    has_letter = bool(_HAS_LETTER_RE.search(tok))
+    has_digit = bool(_HAS_DIGIT_RE.search(tok))
+    # snake_case / UPPER_SNAKE (an internal underscore is a strong signal).
+    if "_" in tok:
+        return True
+    # code-like digit+symbol mixes: a digit next to a structural separator, or a
+    # letter+digit blend (v2, ERR4102, 5xx). Bare integers ("2024") are left out
+    # on purpose — they read as prose numbers, and digit_density already accounts
+    # for them in aggregate.
+    if has_digit and any(sep in tok for sep in ("-", ".", ":", "/")):
+        return True
+    if has_letter and has_digit:
+        return True
+    # intra-token camelCase (getUserById).
+    if _CAMEL_RE.search(tok):
+        return True
+    return False
+
+
+def predict_alpha(query: str) -> float:
+    """Deterministic per-query vector-leg weight in [ALPHA_MIN, ALPHA_MAX].
+
+    A pure feature function (no I/O, no model call — ADR-0003's "deterministic
+    control flow, never a model decision"), mirroring aimee's dynamic alpha. It
+    reads four cheap features off the raw query — quoted-phrase presence,
+    identifier-shaped token count, digit density, and token count — and returns
+    the weight the *vector* leg should carry in weighted RRF (the keyword leg
+    gets `1 - alpha`).
+
+    Neutral prose carries no lexical signal and returns exactly `ALPHA_NEUTRAL`
+    (0.5) — equal weight, i.e. legacy behavior. As the query gets more
+    identifier-dense the weight slides down toward `ALPHA_MIN` (0.3), tilting
+    fusion toward the lexical leg where exact-token lookups live. It never rises
+    above 0.5 today; the symmetric upper clamp `ALPHA_MAX` is a defensive bound.
+
+    The clamp is load-bearing, not cosmetic: keyword-only rows carry no cosine,
+    so an unclamped keyword-heavy top-k could starve the escalation gate's cosine
+    list (US-046). This story only *defines* the function — nothing calls it yet
+    (US-116 wires it), so `hybrid_search` behavior is unchanged.
+    """
+    raw_tokens = [t for t in _TOKEN_SPLIT_RE.split(query.strip()) if t]
+    n_tokens = len(raw_tokens)
+    if n_tokens == 0:
+        return ALPHA_NEUTRAL
+
+    tokens = [t.strip(_EDGE_PUNCT) for t in raw_tokens]
+    n_identifiers = sum(1 for t in tokens if _is_identifier_token(t))
+    identifier_ratio = n_identifiers / n_tokens
+
+    non_space = "".join(query.split())
+    digit_density = (
+        sum(1 for c in non_space if c.isdigit()) / len(non_space) if non_space else 0.0
+    )
+    has_quoted_phrase = bool(_QUOTED_PHRASE_RE.search(query))
+
+    # Combine into a lexical-preference score in [0, 1]; 0 == neutral prose. Each
+    # term is a lexical cue, weighted by how strongly it implies verbatim intent.
+    lexical_score = (
+        0.60 * identifier_ratio
+        + 0.30 * min(1.0, digit_density / 0.15)
+        + (0.40 if has_quoted_phrase else 0.0)
+    )
+    lexical_score = min(1.0, lexical_score)
+
+    # Slide the vector weight down from the neutral midpoint as lexical cues grow.
+    alpha = ALPHA_NEUTRAL - (ALPHA_NEUTRAL - ALPHA_MIN) * lexical_score
+    return min(ALPHA_MAX, max(ALPHA_MIN, alpha))
+
+
 def _rrf_fuse(
     rankings: list[list[SearchDocumentsResult]],
     top_k: int,
     k: int,
+    weights: tuple[float, ...] | None = None,
 ) -> list[SearchDocumentsResult]:
     """Reciprocal Rank Fusion over multiple rankings of SearchDocumentsResult.
 
@@ -401,7 +503,19 @@ def _rrf_fuse(
     this is the deduplication path required by US-021. The returned list
     carries the fused score in `similarity`, sorted descending. Ties broken
     by chunk id for deterministic ordering across runs.
+
+    US-115: an optional per-ranking `weights` tilts the fusion. Ranking `i`
+    contributes `2 * w_i / (k + r)`, so equal weights `(0.5, 0.5)` reproduce the
+    unweighted `1 / (k + r)` byte-for-byte (2 * 0.5 == 1.0 exactly), and
+    `weights=None` takes the legacy expression verbatim. Weights are a fusion-
+    ranking artifact only — they never touch per-row `cosine_similarity`, which
+    the escalation gate reads raw (US-046). `weights` length must match
+    `rankings`.
     """
+    if weights is not None and len(weights) != len(rankings):
+        raise ValueError(
+            f"weights length {len(weights)} must match rankings length {len(rankings)}"
+        )
     scores: dict[str, float] = {}
     by_id: dict[str, SearchDocumentsResult] = {}
     # US-046: the fused row overwrites `similarity` with the RRF score, which
@@ -410,9 +524,16 @@ def _rrf_fuse(
     # its cosine wins; a chunk that surfaces only in the keyword ranking has no
     # cosine and stays None.
     cosine_by_id: dict[str, float | None] = {}
-    for ranked in rankings:
+    for idx, ranked in enumerate(rankings):
         for rank, item in enumerate(ranked, start=1):
-            scores[item.id] = scores.get(item.id, 0.0) + 1.0 / (k + rank)
+            # weights=None preserves the exact legacy expression; equal weights
+            # (0.5, 0.5) collapse to the same value since 2 * 0.5 == 1.0.
+            contrib = (
+                1.0 / (k + rank)
+                if weights is None
+                else 2.0 * weights[idx] / (k + rank)
+            )
+            scores[item.id] = scores.get(item.id, 0.0) + contrib
             # First-seen wins for the row payload — both rankings carry the
             # same content/filename/etc for a given chunk id, so this is
             # really just picking one to surface. Vector ranking is iterated

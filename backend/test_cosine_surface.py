@@ -259,6 +259,36 @@ def test_rrf_fuse_unit_is_pure() -> None:
     print("ok: _rrf_fuse preserves the vector cosine deterministically (pure path)")
 
 
+def test_rrf_fuse_default_weights_unchanged() -> None:
+    """US-115: `_rrf_fuse` grew an optional `weights` kwarg. Its default (absent /
+    None) must leave the cosine-surface path byte-identical to before — the same
+    scores AND the same preserved cosines — so this US-046 pin still holds. An
+    explicit equal-weight `(0.5, 0.5)` collapses to the same values (2*0.5==1)."""
+    vector = [
+        SearchDocumentsResult(**_row("A", 0.62), cosine_similarity=0.62),
+        SearchDocumentsResult(**_row("B", 0.41), cosine_similarity=0.41),
+    ]
+    keyword = [
+        SearchDocumentsResult(**_row("B", 5.0, keyword=True)),
+        SearchDocumentsResult(**_row("C", 3.0, keyword=True)),
+    ]
+
+    def sig(rows: list[SearchDocumentsResult]) -> list[tuple[str, float, float | None]]:
+        return [(r.id, r.similarity, r.cosine_similarity) for r in rows]
+
+    default = _rrf_fuse([vector, keyword], top_k=10, k=60)
+    none_kw = _rrf_fuse([vector, keyword], top_k=10, k=60, weights=None)
+    equal = _rrf_fuse([vector, keyword], top_k=10, k=60, weights=(0.5, 0.5))
+    _check(sig(default) == sig(none_kw), "explicit weights=None diverged from the default call")
+    _check(sig(default) == sig(equal), "weights=(0.5, 0.5) diverged from the default 1/(k+r) path")
+    # Cosine surface still intact under the default kwarg.
+    by_id = {r.id: r for r in default}
+    _check(by_id["A"].cosine_similarity == 0.62, "A cosine lost with the new kwarg default")
+    _check(by_id["B"].cosine_similarity == 0.41, "B vector cosine lost with the new kwarg default")
+    _check(by_id["C"].cosine_similarity is None, "C (keyword-only) should stay cosine None")
+    print("ok: _rrf_fuse default/None/equal-weight paths are byte-identical (US-115 seam inert)")
+
+
 def main() -> int:
     tests = [
         test_field_defaults_none,
@@ -266,6 +296,7 @@ def main() -> int:
         test_keyword_search_cosine_is_none,
         test_hybrid_fusion_preserves_vector_cosine,
         test_rrf_fuse_unit_is_pure,
+        test_rrf_fuse_default_weights_unchanged,
     ]
     for t in tests:
         t()
