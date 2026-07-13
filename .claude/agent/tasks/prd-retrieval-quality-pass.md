@@ -1,6 +1,6 @@
 # PRD: Retrieval-Quality Pass (Lexical Leg Revival + Adaptive Fusion)
 
-Status: in progress. US-113 (lexical golden-set instrumentation), US-114 (keyword_search OR-fallback), US-115 (deterministic-alpha fusion seam, pure/unwired), and US-116 (adaptive alpha wired into hybrid_search) landed; US-117 through US-118 not started.
+Status: in progress. US-113 (lexical golden-set instrumentation), US-114 (keyword_search OR-fallback), US-115 (deterministic-alpha fusion seam, pure/unwired), US-116 (adaptive alpha wired into hybrid_search), and US-117 (reranker bake-off, eval-only) landed; US-118 not started.
 Origin: comparison of Agentic_RAG against RakuenSoftware/aimee (2026-07-10), scoped via grilling session.
 Predecessor numbering: continues after US-112 (Phase-2 PRD, `.claude/agent/tasks/prd-phase2-implementation.md`).
 
@@ -134,12 +134,20 @@ It deliberately borrows nothing that touches trust boundaries.
 
 **Acceptance Criteria:**
 
-- [ ] `evals/retrieval/runner.py` gains `--reranker {none,llm,cohere,voyage}` (default `none`): retrieve `max(RERANK_INPUT_K, TOP_K)` candidates, then apply `build_reranker(...)` via the same path `backend/main.py::_retrieve_for_agent` uses, trimming to TOP_K; the chosen reranker is recorded in the results JSON.
-- [ ] `--reranker none` produces output identical to a no-flag run (NullReranker pass-through sanity).
-- [ ] Bake-off executed manually: hybrid mode, full viewer, one run per available backend (llm always; cohere/voyage if API keys present) plus the none control.
-- [ ] Results doc `docs/reranker-bakeoff.md`: per-backend adversarial and lexical MRR/nDCG@5 table, latency observations, and a recommendation; `RERANKER` default remains `none`.
-- [ ] The reranker-sweep TODO in `.github/workflows/retrieval-eval-nightly.yml` (lines ~78-91) is either resolved by adding a nightly hybrid+llm reranker row or explicitly updated to reference the bake-off doc.
-- [ ] No change to `backend/escalation.py` or any widget-path code.
+- [x] `evals/retrieval/runner.py` gains `--reranker {none,llm,cohere,voyage}` (default `none`): retrieve `max(RERANK_INPUT_K, TOP_K)` candidates, then apply `build_reranker(...)` via the same path `backend/main.py::_retrieve_for_agent` uses, trimming to TOP_K; the chosen reranker is recorded in the results JSON.
+- [x] `--reranker none` produces output identical to a no-flag run (NullReranker pass-through sanity).
+- [x] Bake-off executed manually: hybrid mode, full viewer, one run per available backend (llm always; cohere/voyage if API keys present) plus the none control.
+- [x] Results doc `docs/reranker-bakeoff.md`: per-backend adversarial and lexical MRR/nDCG@5 table, latency observations, and a recommendation; `RERANKER` default remains `none`.
+- [x] The reranker-sweep TODO in `.github/workflows/retrieval-eval-nightly.yml` (lines ~78-91) is either resolved by adding a nightly hybrid+llm reranker row or explicitly updated to reference the bake-off doc.
+- [x] No change to `backend/escalation.py` or any widget-path code.
+
+**Status:** Done.
+`--reranker` landed in `evals/retrieval/runner.py`, threaded as an optional trailing kwarg through `run_eval`/`run_query` so every existing caller (including the two `e7_runner` tripwire calls) keeps default pass-through behavior; the chosen backend is recorded in the results JSON under `"reranker"`.
+`--reranker none` verified byte-identical (modulo timestamps) to a no-flag run.
+Bake-off run on hybrid mode / full viewer: `none` control + `llm` measured, source JSONs committed under `docs/reranker-bakeoff/` so every number is traceable; `cohere`/`voyage` skipped (no `COHERE_API_KEY`/`VOYAGE_API_KEY` locally), with the completion commands recorded in the doc.
+`docs/reranker-bakeoff.md` holds the per-category MRR/nDCG@5 table (llm wins adversarial +0.052 MRR; lexical already saturated by US-116; multi_hop regresses slightly), the ~1.2s-median-per-query latency observations, and the keep-`RERANKER=none` recommendation.
+The nightly reranker-sweep TODO is resolved: `retrieval-eval-nightly.yml` now publishes a `hybrid+llm` run to `docs/nightly/<date>-rerank-llm.json` beside the baseline, in an isolated post-publish `continue-on-error` step.
+No change to `backend/escalation.py` or any widget/frontend path.
 
 **Validation Test:**
 

@@ -102,7 +102,7 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 | `OPENAI_PLANNER_MODEL` | Query planner | `OPENAI_MODEL` |
 | `OPENAI_SQL_MODEL` | Text-to-SQL generation | `OPENAI_MODEL` |
 | `OPENAI_SUBAGENT_MODEL` | Document subagent | `OPENAI_MODEL` |
-| `OPENAI_RERANK_MODEL` | `llm` reranker (only when `RERANKER=llm`) | `OPENAI_MODEL` |
+| `OPENAI_RERANK_MODEL` | `llm` reranker (only when `RERANKER=llm`, or the eval runner's `--reranker llm`) | `OPENAI_MODEL` |
 | `EMBEDDER_MODEL` | Embedder | `EMBEDDING_MODEL` → `text-embedding-3-small` |
 | `JUDGE_MODEL` | Runtime faithfulness gate (US-048) | `gpt-4o-mini` (does **not** chain to `OPENAI_MODEL`) |
 | `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (OpenAI proper, no `base_url`) / `completions` (Azure or `openai` + `base_url`) |

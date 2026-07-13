@@ -68,6 +68,18 @@ from retrieval import (  # noqa: E402
     search_documents,
 )
 
+# US-117: reranker bake-off. The runner reuses the SAME reranker path
+# `backend/main.py::_retrieve_for_agent` runs in production — build the reranker
+# from the CLI choice, pull a wider candidate pool (`RERANK_INPUT_K`), then trim
+# to TOP_K — so the measured deltas describe the real agent pipeline, not a
+# runner-only reimplementation. Eval-only: no default changes, no widget path.
+from reranking import (  # noqa: E402
+    Reranker,
+    build_reranker,
+    get_rerank_input_k,
+    rerank_with_timing,
+)
+
 from .content_anchors import (  # noqa: E402
     ContentAnchorResolver,
     fetch_chunk_contents,
@@ -569,35 +581,56 @@ async def run_query(
     supabase_headers: dict[str, str],
     question: str,
     top_k: int = TOP_K,
+    reranker: Reranker | None = None,
 ) -> list[SearchDocumentsResult]:
+    """Retrieve `top_k` chunks for one query, optionally reranked.
+
+    US-117: when a non-null `reranker` is supplied this mirrors
+    `backend/main.py::_retrieve_for_agent` — pull a wider candidate pool
+    (`max(RERANK_INPUT_K, top_k)`), rerank, then trim to `top_k`. With
+    `reranker` None or the NullReranker (`--reranker none`) the pool stays at
+    `top_k` and the results are returned untouched, so a `none`/no-flag run is a
+    byte-for-byte pass-through of the pre-US-117 behaviour.
+    """
+    is_passthrough = reranker is None or reranker.name == "none"
+    pool_k = top_k if is_passthrough else max(get_rerank_input_k(), top_k)
+
     if mode == "vector":
-        return await search_documents(
+        candidates = await search_documents(
             openai_client=openai_client,
             http=http,
             supabase_url=supabase_url,
             supabase_headers=supabase_headers,
             query=question,
-            top_k=top_k,
+            top_k=pool_k,
         )
-    if mode == "keyword":
-        return await keyword_only_search(
+    elif mode == "keyword":
+        candidates = await keyword_only_search(
             openai_client=openai_client,
             http=http,
             supabase_url=supabase_url,
             supabase_headers=supabase_headers,
             query=question,
-            top_k=top_k,
+            top_k=pool_k,
         )
-    if mode == "hybrid":
-        return await hybrid_search(
+    elif mode == "hybrid":
+        candidates = await hybrid_search(
             openai_client=openai_client,
             http=http,
             supabase_url=supabase_url,
             supabase_headers=supabase_headers,
             query=question,
-            top_k=top_k,
+            top_k=pool_k,
         )
-    raise ValueError(f"unknown mode: {mode!r}")
+    else:
+        raise ValueError(f"unknown mode: {mode!r}")
+
+    if is_passthrough:
+        return candidates
+    # Reranker failures are non-fatal (rerank_with_timing falls back to the
+    # input order) so a flaky vendor never crashes the bake-off run.
+    assert reranker is not None
+    return await rerank_with_timing(reranker, question, candidates, top_k)
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +816,7 @@ async def run_eval(
     generation_gold: dict[str, str] | None = None,
     anthropic_client: Any | None = None,
     include_ragas: bool = False,
+    reranker: Reranker | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run retrieval per (question × mode × viewer × filter_strategy).
 
@@ -870,7 +904,8 @@ async def run_eval(
             # post-filter ranking across all viewers — fetch it once per
             # mode and re-project per viewer rather than calling N times.
             owner_results = await run_query(
-                mode, openai_client, http, supabase_url, owner_headers, question
+                mode, openai_client, http, supabase_url, owner_headers, question,
+                reranker=reranker,
             )
 
             mode_by_viewer: dict[str, dict[str, Any]] = {}
@@ -896,6 +931,7 @@ async def run_eval(
                         supabase_url,
                         viewer_headers[viewer],
                         question,
+                        reranker=reranker,
                     )
                 pre_ids, pre_corpus_chunks, pre_unknown = _project_to_corpus(
                     pre_results, stable_id_map, None
@@ -1480,6 +1516,19 @@ async def amain() -> int:
             "fails the run (exit 1) — this is a pinned security invariant."
         ),
     )
+    parser.add_argument(
+        "--reranker",
+        choices=["none", "llm", "cohere", "voyage"],
+        default="none",
+        help=(
+            "US-117: rerank the retrieved candidates before scoring, using the "
+            "same path production runs (`backend/main.py::_retrieve_for_agent`). "
+            "`none` (default) is a true pass-through — output is identical to a "
+            "no-flag run. `llm` needs OPENAI_API_KEY; `cohere`/`voyage` need "
+            "COHERE_API_KEY / VOYAGE_API_KEY. Eval-only; changes no default and "
+            "never touches the widget deflection path."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -1621,6 +1670,15 @@ async def amain() -> int:
     db_conn = await asyncpg.connect(database_url) if needs_db else None
     try:
         async with httpx.AsyncClient(timeout=30.0) as http:
+            # US-117: build the reranker from the same factory + clients the
+            # backend uses. `none` yields a NullReranker (pass-through);
+            # cohere/voyage raise here if their API key is missing, surfacing a
+            # misconfiguration before any retrieval runs.
+            reranker = build_reranker(
+                args.reranker, http=http, openai_client=openai_client
+            )
+            if reranker.name != "none":
+                log.info("US-117 reranker enabled: %s", reranker.name)
             per_question, ragas_rows = await run_eval(
                 questions,
                 modes,
@@ -1636,6 +1694,7 @@ async def amain() -> int:
                 generation_gold=generation_gold,
                 anthropic_client=anthropic_client,
                 include_ragas=args.include_ragas,
+                reranker=reranker,
             )
     finally:
         if db_conn is not None:
@@ -1754,6 +1813,9 @@ async def amain() -> int:
         "generation_included": bool(args.include_generation),
         "generation_model": GENERATION_MODEL if args.include_generation else None,
         "judge_model": JUDGE_MODEL if args.include_generation else None,
+        # US-117: the reranker applied on top of retrieval this run. `none`
+        # (the default) means a pass-through — retrieval order is scored as-is.
+        "reranker": args.reranker,
         "per_question": per_question,
         "aggregates": aggregates,
     }

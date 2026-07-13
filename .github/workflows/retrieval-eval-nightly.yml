@@ -74,21 +74,9 @@ jobs:
           CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
           DATABASE_URL: ${{ env.DB_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # Reranker secrets are accepted here so they're available when
-          # the runner gains reranker support; they're unused until then.
-          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
-          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
         run: |
           python -m db_seed.corpus_seed
           python -m evals.retrieval.runner --out /tmp/nightly.json
-          # TODO (US-035 follow-up): extend runner to sweep reranker modes
-          # — hybrid+cohere / hybrid+voyage / hybrid+llm — and merge those
-          # rows into /tmp/nightly.json before publishing. Requires a
-          # runner CLI flag (e.g. --rerankers cohere,voyage,llm) and the
-          # rerank-on-top-of-hybrid path that production already uses in
-          # backend/main.py:_retrieve_for_agent. Today's nightly publishes
-          # the same three modes the PR workflow runs; reranker comparison
-          # is the next contained piece of work.
 
       - name: Publish to docs/nightly/
         run: |
@@ -103,5 +91,40 @@ jobs:
             echo "no changes to commit — nightly is a no-op against current main"
           else
             git commit -m "chore(evals): nightly retrieval eval ${DATE}"
+            git push
+          fi
+
+      - name: Reranker observability (hybrid + llm)
+        # US-117: nightly reranker observability. Reruns the canonical hybrid
+        # path with the `llm` reranker on top (the same
+        # backend/main.py:_retrieve_for_agent path production uses), published
+        # beside the baseline so the reranker delta is trackable over time.
+        # Isolated AFTER the baseline publish with continue-on-error so an
+        # OpenAI/infra failure across its ~60 extra serial calls only skips the
+        # reranker artifact and NEVER blocks the critical-path baseline publish.
+        # cohere/voyage are run manually in the full bake-off — methodology +
+        # recommendation in docs/reranker-bakeoff.md.
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ env.API_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
+          DATABASE_URL: ${{ env.DB_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          DATE=$(date -u +"%Y-%m-%d")
+          mkdir -p docs/nightly
+          # Its own --summary avoids clobbering the baseline summary.md.
+          python -m evals.retrieval.runner \
+            --mode hybrid --viewers full --reranker llm \
+            --out "docs/nightly/${DATE}-rerank-llm.json" \
+            --summary /tmp/nightly-rerank-llm.md
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add docs/nightly
+          if git diff --cached --quiet; then
+            echo "no reranker changes to commit — no-op against current main"
+          else
+            git commit -m "chore(evals): nightly reranker observability ${DATE}"
             git push
           fi
