@@ -1,29 +1,32 @@
 <!-- BEGIN EVAL_SUMMARY -->
 
-### Headline (mean across 50 questions)
+### Headline (mean across 60 questions)
 
 | Mode | recall@5 | MRR | nDCG@5 |
 |---|---|---|---|
-| vector | 0.860 | 0.772 | 0.779 |
-| keyword | 0.110 | 0.120 | 0.112 |
-| hybrid | 0.860 | 0.759 | 0.769 |
+| vector | 0.875 | 0.813 | 0.811 |
+| keyword | 0.917 | 0.834 | 0.830 |
+| hybrid | 0.950 | 0.858 | 0.872 |
 
 ### Per-category breakdown
 
 | Mode | Category | recall@5 | MRR |
 |---|---|---|---|
-| vector | single_chunk | 0.900 | 0.825 |
+| vector | single_chunk | 0.900 | 0.850 |
 | vector | multi_hop | 0.933 | 0.850 |
-| vector | adversarial | 0.600 | 0.437 |
+| vector | adversarial | 0.700 | 0.503 |
 | vector | paraphrase | 1.000 | 1.000 |
-| keyword | single_chunk | 0.250 | 0.250 |
-| keyword | multi_hop | 0.033 | 0.067 |
-| keyword | adversarial | 0.000 | 0.000 |
-| keyword | paraphrase | 0.000 | 0.000 |
-| hybrid | single_chunk | 0.900 | 0.825 |
-| hybrid | multi_hop | 0.933 | 0.850 |
-| hybrid | adversarial | 0.600 | 0.370 |
-| hybrid | paraphrase | 1.000 | 1.000 |
+| vector | lexical | 0.850 | 0.900 |
+| keyword | single_chunk | 0.950 | 0.908 |
+| keyword | multi_hop | 0.933 | 0.900 |
+| keyword | adversarial | 0.800 | 0.617 |
+| keyword | paraphrase | 0.800 | 0.445 |
+| keyword | lexical | 1.000 | 1.000 |
+| hybrid | single_chunk | 0.950 | 0.870 |
+| hybrid | multi_hop | 1.000 | 0.933 |
+| hybrid | adversarial | 0.800 | 0.623 |
+| hybrid | paraphrase | 1.000 | 0.767 |
+| hybrid | lexical | 1.000 | 1.000 |
 
 ### RAGAS comparison
 
@@ -45,28 +48,31 @@ _(RAGAS not run on this snapshot — pass --include-ragas to enable)_
 
 | Mode | Category | Pre | Post | Δ (pre−post) |
 |---|---|---|---|---|
-| vector | overall | 0.900 | 0.900 | +0.000 |
+| vector | overall | 0.892 | 0.892 | +0.000 |
 | vector | single_chunk | 0.900 | 0.900 | +0.000 |
 | vector | multi_hop | 1.000 | 1.000 | +0.000 |
 | vector | adversarial | 0.700 | 0.700 | +0.000 |
 | vector | paraphrase | 1.000 | 1.000 | +0.000 |
-| keyword | overall | 0.110 | 0.110 | +0.000 |
-| keyword | single_chunk | 0.250 | 0.250 | +0.000 |
-| keyword | multi_hop | 0.033 | 0.033 | +0.000 |
-| keyword | adversarial | 0.000 | 0.000 | +0.000 |
-| keyword | paraphrase | 0.000 | 0.000 | +0.000 |
-| hybrid | overall | 0.900 | 0.900 | +0.000 |
-| hybrid | single_chunk | 0.900 | 0.900 | +0.000 |
+| vector | lexical | 0.850 | 0.850 | +0.000 |
+| keyword | overall | 0.983 | 0.983 | +0.000 |
+| keyword | single_chunk | 1.000 | 1.000 | +0.000 |
+| keyword | multi_hop | 1.000 | 1.000 | +0.000 |
+| keyword | adversarial | 0.900 | 0.900 | +0.000 |
+| keyword | paraphrase | 1.000 | 1.000 | +0.000 |
+| keyword | lexical | 1.000 | 1.000 | +0.000 |
+| hybrid | overall | 0.983 | 0.983 | +0.000 |
+| hybrid | single_chunk | 1.000 | 1.000 | +0.000 |
 | hybrid | multi_hop | 1.000 | 1.000 | +0.000 |
-| hybrid | adversarial | 0.700 | 0.700 | +0.000 |
+| hybrid | adversarial | 0.900 | 0.900 | +0.000 |
 | hybrid | paraphrase | 1.000 | 1.000 | +0.000 |
+| hybrid | lexical | 1.000 | 1.000 | +0.000 |
 
-### Non-regression (US-042) — full_access recall@5 vs Module-10 baseline
+### Non-regression (US-042) — full_access recall@5 vs pinned baseline
 
-| Mode | Actual | Baseline | Δ | Within ±0.005? |
+| Mode | Actual | Baseline | Δ | Δ ≥ −0.005? |
 |---|---|---|---|---|
-| vector | 0.860 | 0.670 | +0.190 | ✗ |
-| keyword | 0.110 | 0.110 | +0.000 | ✓ |
-| hybrid | 0.860 | 0.670 | +0.190 | ✗ |
+| vector | 0.875 | 0.875 | +0.000 | ✓ |
+| keyword | 0.917 | 0.917 | -0.000 | ✓ |
+| hybrid | 0.950 | 0.950 | +0.000 | ✓ |
 
 <!-- END EVAL_SUMMARY -->

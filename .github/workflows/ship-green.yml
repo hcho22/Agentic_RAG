@@ -90,7 +90,11 @@ jobs:
         run: |
           # Brings up pgvector + PostgREST + auth and applies supabase/migrations/
           # — the schema + RLS boundary the E4 no_access table is asserted against.
-          supabase start
+          # Exclude inbucket: the E4 retrieval sweep never sends email, so its only
+          # effect here is a flaky port bind (54324 "address already in use") that
+          # can fail the whole stack start. Dropping it makes the boot deterministic
+          # without touching anything the no-leak table depends on.
+          supabase start -x inbucket
           # Surface the running stack's real coordinates so the eval authenticates
           # against THIS instance rather than baked-in local-dev fallbacks (the
           # 403-on-first-query drift the CLI pin also guards). ANON_KEY + JWT_SECRET

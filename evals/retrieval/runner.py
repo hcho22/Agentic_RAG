@@ -179,20 +179,30 @@ DEFAULT_WORKSPACE_ID = uuid.UUID("00000000-0000-0000-0000-0000000000d0")
 # Local-dev default; production / CI overrides via SUPABASE_JWT_SECRET.
 LOCAL_JWT_SECRET = "super-secret-jwt-token-with-at-least-32-characters-long"
 
-# Non-regression baseline (full_access × pre_filter recall@5). Frozen at the
-# numbers produced by full_access × pre_filter on a clean US-042 run with
-# the .env-default SEARCH_SIMILARITY_THRESHOLD=0.4 (the threshold CI uses).
-# The pre-Module-11 summary.md (vector 0.860 / hybrid 0.860) was generated
-# under SEARCH_SIMILARITY_THRESHOLD=0.3 — different threshold, different
-# numbers, not a regression — so those values would falsely flag drift on
-# every PR. Rebaselining at 0.4 keeps the test apples-to-apples with the
-# environment the eval actually runs in. Bump these numbers when the
-# corpus, chunker, threshold, or embedding model legitimately shifts and
-# the new baseline is the agreed-upon truth going forward.
-MODULE_10_BASELINE_RECALL_AT_5: dict[str, float] = {
-    "vector": 0.670,
-    "keyword": 0.110,
-    "hybrid": 0.670,
+# Non-regression baseline (full_access × pre_filter recall@5). The check is
+# one-sided: it flags only a drop below baseline beyond NON_REGRESSION_TOLERANCE
+# (delta < −tolerance ⇒ ✗); improvements always show ✓. It is a regression
+# tripwire, not a two-sided drift alarm — a corpus/retrieval improvement must
+# never render red and train readers to ignore the cell (US-118).
+#
+# Provenance: re-pinned 2026-07-12 to the post-US-116 levels — the first run
+# where the lexical leg (US-114 OR-fallback) and adaptive-alpha fusion (US-116)
+# had both landed. Source snapshot: a clean `--viewers all --include-e6` run of
+# the 60-question golden set against local Supabase at the code-default
+# SEARCH_SIMILARITY_THRESHOLD=0.3 (backend/retrieval.py
+# DEFAULT_SIMILARITY_THRESHOLD — also what CI uses, since no workflow sets
+# SEARCH_SIMILARITY_THRESHOLD and the runner does not load backend/.env),
+# full_access × pre_filter recall@5 per mode. The prior pin (vector/hybrid 0.670,
+# keyword 0.110) predated the lexical-leg revival and left every mode's cell
+# permanently red at +0.19 to +0.81 above baseline.
+#
+# Bump these numbers when the corpus, chunker, threshold, or embedding model
+# legitimately shifts and the new baseline is the agreed-upon truth going
+# forward.
+NON_REGRESSION_BASELINE_RECALL_AT_5: dict[str, float] = {
+    "vector": 0.875,
+    "keyword": 0.917,
+    "hybrid": 0.950,
 }
 NON_REGRESSION_TOLERANCE = 0.005
 
@@ -1127,9 +1137,10 @@ def _aggregate_viewer_filter(
       * `recall_tradeoff`      — per mode × category, partial_access
                                  recall@5 pre-filter vs post-filter.
       * `non_regression`       — per mode, full_access × pre-filter
-                                 recall@5 vs MODULE_10_BASELINE_RECALL_AT_5,
+                                 recall@5 vs NON_REGRESSION_BASELINE_RECALL_AT_5,
                                  plus a `delta` and a `within_tolerance`
-                                 boolean (|delta| ≤ NON_REGRESSION_TOLERANCE).
+                                 boolean (one-sided: delta ≥ −NON_REGRESSION_TOLERANCE,
+                                 so improvements pass and only drops flag).
     """
     keys = ("recall_at_5", "mrr", "ndcg_at_5")
 
@@ -1223,7 +1234,7 @@ def _aggregate_viewer_filter(
             if full_pre is None:
                 continue
             actual = float(full_pre["recall_at_5"])
-            baseline = MODULE_10_BASELINE_RECALL_AT_5.get(mode)
+            baseline = NON_REGRESSION_BASELINE_RECALL_AT_5.get(mode)
             if baseline is None:
                 continue
             delta = round(actual - baseline, 4)
@@ -1232,7 +1243,10 @@ def _aggregate_viewer_filter(
                 "baseline_recall_at_5": baseline,
                 "delta": delta,
                 "tolerance": NON_REGRESSION_TOLERANCE,
-                "within_tolerance": abs(delta) <= NON_REGRESSION_TOLERANCE,
+                # One-sided (US-118): flag only regressions past tolerance;
+                # improvements (delta ≥ 0) always pass. A permanently-red cell
+                # on an *improved* metric trains readers to ignore the check.
+                "within_tolerance": delta >= -NON_REGRESSION_TOLERANCE,
             }
 
     return {
@@ -1408,9 +1422,9 @@ def render_summary(
     if non_reg:
         lines += [
             "",
-            "### Non-regression (US-042) — full_access recall@5 vs Module-10 baseline",
+            "### Non-regression (US-042) — full_access recall@5 vs pinned baseline",
             "",
-            "| Mode | Actual | Baseline | Δ | Within ±0.005? |",
+            "| Mode | Actual | Baseline | Δ | Δ ≥ −0.005? |",
             "|---|---|---|---|---|",
         ]
         for mode in modes:

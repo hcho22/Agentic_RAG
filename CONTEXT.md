@@ -50,7 +50,7 @@ Terms that have a precise meaning in this codebase. Resolved during design sessi
 ## Permissions eval design (Module 11)
 
 - **Suite shape**: 60 golden questions × 3 viewer setups = 180 runs per eval mode. The three viewer setups are *Full-access*, *Partial-access*, and *No-access*; each is a deterministic function of the question's gold chunks (defined in the YAML, not hand-picked per question).
-- **Three independent claims, three tables**: Security (no-access viewer should retrieve zero gold under both modes), Recall trade-off (partial-access viewer is where post-filter recall collapses and pre-filter recovers — the headline number), Non-regression (full-access viewer matches the unfiltered Module-10 baseline within tolerance).
+- **Three independent claims, three tables**: Security (no-access viewer should retrieve zero gold under both modes), Recall trade-off (partial-access viewer is where post-filter recall collapses and pre-filter recovers — the headline number), Non-regression (full-access viewer recall@5 vs a pinned baseline, re-pinned to post-US-116 levels; the check is **one-sided** — only a drop past tolerance flags ✗, improvements always pass, so an improved metric never trains readers to ignore a permanently-red cell).
 - **Selectivity policy**: For the 16-chunk *correctness eval*, partial-access = "gold chunks + N random others" with N fixed. For the 10k-chunk *scale benchmark*, partial-access = "gold chunks + k% of filler" for k ∈ {50, 10, 1}.
 
 ## Frontend share UX (Module 11)
