@@ -1,10 +1,11 @@
-# Agentic RAG
+# Purvia
 
-A production-shaped Retrieval-Augmented Generation app where **per-document
-sharing is a first-class part of the retrieval predicate, not a post-hoc
-filter**. Multi-user from day one — every chunk carries an ACL, every
-retrieval call runs under the viewer's JWT, every tool-call attribution
-in the chat UI surfaces *why* the viewer can see a chunk.
+**Purvia is a permissions-aware knowledge platform.** A production-shaped
+Retrieval-Augmented Generation system where **per-document sharing is a
+first-class part of the retrieval predicate, not a post-hoc filter**.
+Multi-user from day one — every chunk carries an ACL, every retrieval call
+runs under the viewer's JWT, every tool-call attribution in the chat UI
+surfaces *why* the viewer can see a chunk.
 
 Raw OpenAI SDK + Pydantic (no LLM frameworks), FastAPI backend,
 React/Vite/Tailwind frontend, Supabase (Postgres + pgvector + Auth +
@@ -105,6 +106,7 @@ explanation — the kind of context a code review won't recover:
 | [`docs/demo-corpora.md`](docs/demo-corpora.md) | The three demo corpora as **role-specific worked examples**, not interchangeable defaults - e-commerce (default, permissions + escalation), Wikipedia 10k (scale-benchmark **filler only, never gold**), CRM (text-to-SQL optional module, X1) - and the honest framing that swapping in your own corpus makes the example anchors **fail loud**, so "replace the corpus" and "author a new golden set" are the same step. |
 | [`docs/structured-rag.md`](docs/structured-rag.md) | The semantic-layer-aware text-to-SQL compiler, allowlisted schemas, the read-only role boundary. |
 | [`docs/ingestion-parser-adapters.md`](docs/ingestion-parser-adapters.md) | Write your own `DocumentParser` — the load-bearing markdown-string contract, the edits to add one (subclass + `PARSER` validation + `build_parser`), `PARSER` selection, proving the round-trip, and Unstructured.io as the canonical buyer-written adapter. |
+| [`docs/adr/0011-product-name.md`](docs/adr/0011-product-name.md) | The product-name decision - why **Purvia** (coined from *purview*, "the scope of what one is authorized to see and know") names the permissions-aware platform, why the earlier candidate "Deflio" was rejected as mis-scoped to the support-deflection wedge, and why the technical namespace (`agentic-rag`/`ar`) is deliberately left unchanged. |
 
 The eval tables in `docs/permissions-aware-rag.md` are auto-embedded
 from the runner-generated `summary.md` files via marker comments:

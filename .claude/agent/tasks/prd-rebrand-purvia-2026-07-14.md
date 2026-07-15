@@ -70,12 +70,14 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 
 **Description:** As anyone landing on the repo's front page, I want it to present "Purvia" as a permissions-aware knowledge platform so the positioning is clear.
 
+**Status:** ✅ Done (2026-07-15, commit `8f039d1`, PR #90) - README-only: H1, tagline reposition (factual, existing retrieval-predicate framing preserved), ADR-0011 docs-index row. The linked ADR file itself lands with US-005; the link is intentionally ahead of it per the story split.
+
 **Acceptance Criteria:**
 
-- [ ] `README.md:1` - `# Agentic RAG` → `# Purvia`
-- [ ] Tagline rewritten to position Purvia as a permissions-aware knowledge platform (per-document sharing as a first-class part of the retrieval predicate). Keep it factual; do not overclaim.
-- [ ] The `## Documentation` index gains an entry for the new ADR (`docs/adr/0011-product-name.md`).
-- [ ] Internal/technical references that are intentionally retained (e.g. instructions that reference the `agentic-rag` slug, Fly app name) are left unchanged and NOT mass-replaced.
+- [x] `README.md:1` - `# Agentic RAG` → `# Purvia`
+- [x] Tagline rewritten to position Purvia as a permissions-aware knowledge platform (per-document sharing as a first-class part of the retrieval predicate). Keep it factual; do not overclaim.
+- [x] The `## Documentation` index gains an entry for the new ADR (`docs/adr/0011-product-name.md`).
+- [x] Internal/technical references that are intentionally retained (e.g. instructions that reference the `agentic-rag` slug, Fly app name) are left unchanged and NOT mass-replaced.
 
 **Validation Test:**
 
