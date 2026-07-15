@@ -23,14 +23,16 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 
 **Description:** As a prospective customer visiting the app, I want to see the product's real name "Purvia" so the brand is consistent and market-ready.
 
+**Status:** ✅ Done (2026-07-15, commit `2e71b4b`, PR #88) - three one-line display-string edits; typecheck+build green; browser-verified (tab title, header, login tagline).
+
 **Acceptance Criteria:**
 
-- [ ] `frontend/index.html:6` - `<title>Agentic RAG</title>` → `<title>Purvia</title>`
-- [ ] `frontend/src/components/AppHeader.tsx:42` - header `<h1>` text `Agentic RAG` → `Purvia`
-- [ ] `frontend/src/pages/LoginPage.tsx:57` - "Access your Agentic RAG workspace." → "Access your Purvia workspace."
-- [ ] No other logic or styling changed in these files
-- [ ] `npm run typecheck && npm run build` passes
-- [ ] Verify in browser using dev-browser skill
+- [x] `frontend/index.html:6` - `<title>Agentic RAG</title>` → `<title>Purvia</title>`
+- [x] `frontend/src/components/AppHeader.tsx:42` - header `<h1>` text `Agentic RAG` → `Purvia`
+- [x] `frontend/src/pages/LoginPage.tsx:57` - "Access your Agentic RAG workspace." → "Access your Purvia workspace."
+- [x] No other logic or styling changed in these files
+- [x] `npm run typecheck && npm run build` passes
+- [x] Verify in browser using dev-browser skill
 
 **Validation Test:**
 

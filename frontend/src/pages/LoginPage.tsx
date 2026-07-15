@@ -54,7 +54,7 @@ export function LoginPage() {
           <h1 className="text-xl font-semibold">
             {mode === 'signin' ? 'Sign in' : 'Create an account'}
           </h1>
-          <p className="text-sm text-neutral-400">Access your Agentic RAG workspace.</p>
+          <p className="text-sm text-neutral-400">Access your Purvia workspace.</p>
         </div>
 
         <form className="space-y-4" onSubmit={handleSubmit}>

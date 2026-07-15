@@ -39,7 +39,7 @@ export function AppHeader() {
   return (
     <header className="flex items-center justify-between border-b border-neutral-800 px-6 py-3">
       <div className="flex items-center gap-6">
-        <h1 className="text-lg font-semibold">Agentic RAG</h1>
+        <h1 className="text-lg font-semibold">Purvia</h1>
         <nav className="flex items-center gap-1">
           {navItems.map((item) => (
             <NavLink
