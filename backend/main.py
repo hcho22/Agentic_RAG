@@ -1,4 +1,4 @@
-"""FastAPI backend for the Agentic RAG app.
+"""FastAPI backend for the Purvia app.
 
 US-004 scope:
   * POST /api/chat streams an OpenAI Responses API reply (with optional
@@ -810,7 +810,7 @@ class _WidgetCORSMiddleware(_ScopedCORSMiddleware):
         return _WIDGET_ORIGIN_SNAPSHOT.allows(origin)
 
 
-app = FastAPI(title="Agentic RAG backend")
+app = FastAPI(title="Purvia backend")
 # Two complementary, path-scoped CORS postures (US-074). Order is immaterial — the
 # predicates partition every request to exactly one — but the authenticated posture
 # is listed first to mirror the historical single-middleware config it replaces.

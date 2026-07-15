@@ -48,12 +48,14 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 
 **Description:** As a developer or integrator viewing the API docs, I want the service identified as "Purvia" for brand consistency.
 
+**Status:** ✅ Done (2026-07-15, commit `5c13875`, PR #89) - two one-line display-string edits (FastAPI title + module docstring); import-verified (`app.title` reads "Purvia backend"); logger name intentionally unchanged.
+
 **Acceptance Criteria:**
 
-- [ ] `backend/main.py:813` - `FastAPI(title="Agentic RAG backend")` → `FastAPI(title="Purvia backend")`
-- [ ] `backend/main.py:1` module docstring "FastAPI backend for the Agentic RAG app." → "...for the Purvia app."
-- [ ] No route, handler, logic, or logger-name change (logger stays `agentic_rag.backend` - see Non-Goals)
-- [ ] Backend imports/starts without error
+- [x] `backend/main.py:813` - `FastAPI(title="Agentic RAG backend")` → `FastAPI(title="Purvia backend")`
+- [x] `backend/main.py:1` module docstring "FastAPI backend for the Agentic RAG app." → "...for the Purvia app."
+- [x] No route, handler, logic, or logger-name change (logger stays `agentic_rag.backend` - see Non-Goals)
+- [x] Backend imports/starts without error
 
 **Validation Test:**
 
