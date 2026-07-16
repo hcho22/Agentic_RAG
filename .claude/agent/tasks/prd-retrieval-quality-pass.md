@@ -1,7 +1,7 @@
 # PRD: Retrieval-Quality Pass (Lexical Leg Revival + Adaptive Fusion)
 
 Status: complete. US-113 (lexical golden-set instrumentation), US-114 (keyword_search OR-fallback), US-115 (deterministic-alpha fusion seam, pure/unwired), US-116 (adaptive alpha wired into hybrid_search), US-117 (reranker bake-off, eval-only), and US-118 (re-pin non-regression baseline, one-sided tolerance) all landed.
-Origin: comparison of Agentic_RAG against RakuenSoftware/aimee (2026-07-10), scoped via grilling session.
+Origin: comparison of Agentic_RAG (the repo since renamed to `hcho22/Purvia`, US-007) against RakuenSoftware/aimee (2026-07-10), scoped via grilling session.
 Predecessor numbering: continues after US-112 (Phase-2 PRD, `.claude/agent/tasks/prd-phase2-implementation.md`).
 
 ## 1. Introduction / Overview

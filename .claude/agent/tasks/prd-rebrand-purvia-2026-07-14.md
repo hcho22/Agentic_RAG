@@ -16,6 +16,7 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 - Capture the naming decision (and the rejection of "Deflio") in a committed ADR.
 - Introduce **zero** behavior, logic, RLS, or contract changes - this is a pure branding/display change.
 - Prove the white-label boundary still holds: the embedded widget continues to show the buyer's brand, not "Purvia."
+- Rename the GitHub repository to `Purvia`, keeping the technical slug `agentic-rag`/`ar` and the local clone path unchanged (US-007).
 
 ## User Stories
 
@@ -157,6 +158,33 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 - **Expected Result:** Build and test pass; grep hits are all deliberate technical references; the main app reads "Purvia"; the widget shows "FitSnack Support" (buyer brand), proving white-label isolation is intact.
 - **Failure Indicator:** Build/test fails, an unexpected vendor-facing "Agentic RAG" string remains, or the widget shows "Purvia" (white-label leak).
 
+### US-007: Rename the GitHub repository to "Purvia"
+
+**Description:** As the team going to market, I want the GitHub repository named `Purvia` (not the working-title `Agentic_RAG`) so the canonical home of the code matches the brand - while the load-bearing technical slug `agentic-rag`/`ar` stays untouched and the local clone path is left as-is.
+
+This promotes what was previously a Non-Goal / Open Question into a real deliverable. Scope is deliberately **GitHub-only**: the rename is a repository-name change plus a git-remote update, not a rename of the internal technical namespace (which stays `agentic-rag`/`ar` per the Non-Goals) and not a rename of the local clone directory. GitHub auto-creates a redirect from the old URL, so existing clones, remotes, and historical links keep working; the blast radius is doc-only (no CI, badge, `package.json`, or build coupling references the mixed-case repo name).
+
+**Status:** ✅ Done (2026-07-15) - repo renamed `hcho22/Agentic_RAG` → `hcho22/Purvia`; local `origin` re-pointed and `git fetch origin` clean; old URL returns `301 → hcho22/Purvia`; the 2 historical PR URLs in `docs/evals.md` updated. Technical slug `agentic-rag`/`ar`, local clone path, and CI/deploy identifiers all left untouched.
+
+**Acceptance Criteria:**
+
+- [x] Rename the GitHub repo `hcho22/Agentic_RAG` → `hcho22/Purvia` (`gh repo rename Purvia`, or Settings → Repository name). GitHub auto-creates a redirect from the old URL.
+- [x] Update the local `origin` remote: `git remote set-url origin https://github.com/hcho22/Purvia.git`; `git fetch origin` succeeds. (Worktrees share the repo's remote config, so one update covers them all.)
+- [x] Cosmetic: update the 2 historical PR URLs in `docs/evals.md` (~line 184) from the `hcho22/Agentic_RAG` slug to `hcho22/Purvia` (optional - GitHub redirects keep the old links working).
+- [x] Explicitly NOT changed: the technical slug `agentic-rag`/`ar` (Fly app `agentic-rag-backend`, Supabase `project_id`, LangSmith project, logger `agentic_rag.backend`, `ar-support:*` localStorage, the `wk_pk_` prefix); the local clone directory `/Users/hcho/Developer/Agentic_RAG`; and the 4 clone-path lines in `docs/manual-test-plan-support-widget.md` (they reference the unchanged local path).
+- [x] No CI/deploy change: `.github/workflows/*` reference the repo by GitHub context (not by name), so CI stays green; Fly/Supabase/LangSmith deploys are unaffected.
+
+**Validation Test:**
+
+- **Setup:** `gh` CLI authenticated with admin rights on the repo.
+- **Steps:**
+  1. Run `gh repo rename Purvia`.
+  2. Visit `https://github.com/hcho22/Agentic_RAG` and confirm it redirects to `https://github.com/hcho22/Purvia`.
+  3. `git remote set-url origin https://github.com/hcho22/Purvia.git`; run `git remote -v` and `git fetch origin`.
+  4. Confirm the latest CI run (or a trivial PR) is still green.
+- **Expected Result:** The repo is `hcho22/Purvia`; the old URL redirects; the local remote points at the new URL and fetches; CI is green; the `agentic-rag`/`ar` technical slug and the local clone path are unchanged.
+- **Failure Indicator:** The old URL 404s (no redirect), remote fetch fails, CI breaks, or any technical-slug / Fly / Supabase identifier got renamed.
+
 ## Functional Requirements
 
 - FR-1: The browser tab title, app header, and login tagline must display "Purvia" (US-001).
@@ -165,13 +193,14 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 - FR-4: `CONTEXT.md` must be retitled to "Purvia — Context glossary" and must define "Purvia" as a glossary term naming the platform and its two surfaces (US-004).
 - FR-5: A committed ADR `docs/adr/0011-product-name.md` must record the Purvia decision, the Deflio rejection, and the trade-offs, in the existing ADR format (US-005).
 - FR-6: The change must introduce no behavior, logic, RLS, contract, or deploy-identifier changes; the white-labeled widget must remain buyer-branded (US-006).
+- FR-7: The GitHub repository must be renamed `hcho22/Agentic_RAG` → `hcho22/Purvia`, with the old URL redirecting and both the technical slug `agentic-rag`/`ar` and the local clone path left unchanged (US-007).
 
 ## Non-Goals (Out of Scope)
 
 - **Technical namespace rename** - all of the following stay exactly as `agentic-rag`/`ar` (brand-neutral, and renaming risks live customer tokens, buyer embed contracts, and deploy/observability continuity): `ar-support:*` localStorage prefixes, `window.SupportWidget`/`SupportWidgetSettings` and the `supportwidget:unread` event, the `ar-support-widget@1` postMessage channel, `frontend/package.json` name `agentic-rag-frontend`, logger `agentic_rag.backend`, Supabase `project_id = "agentic-rag"`, Fly app `agentic-rag-backend`, LangSmith project `agentic-rag`, the `wk_pk_` widget-key prefix.
 - **Widget/bot generic defaults** - `DEFAULT_TITLE='Support'`, `DEFAULT_GREETING='Hi! How can we help?'` (`frontend/src/widget/WidgetApp.tsx:29-30`), and bot `display_name='Support Bot'` (`backend/support_bot.py:199`) are generic white-label placeholders, not vendor brand - leave as-is.
 - **Demo/example names** - `Acme`, `FitSnack` are corpus/example fixtures, not the product brand - do not touch.
-- **Repository / GitHub / clone-path rename** (`Agentic_RAG`) - out of scope for now.
+- **Local clone-path rename** - the GitHub repo name is now rebranded to `Purvia` (US-007), but the local working directory `/Users/hcho/Developer/Agentic_RAG` stays as-is. Renaming the local path would break worktrees, the no-mistakes config, and absolute-path tooling for no remote benefit.
 - **Domain registration and trademark filing** - non-engineering pre-launch actions; tracked in Open Questions, not implemented here.
 - **Logo / wordmark asset** - the header is currently pure text; no logo asset exists and none is created in this PRD.
 - **Any product behavior, retrieval, permissions, or escalation change.**
@@ -201,5 +230,5 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 - **Register `purvia.ai` now** - the `.ai` land-grab is active (multiple fusion-field `.ai` domains were registered within 2026 during our search). This should happen before any public branding.
 - **Paid USPTO trademark clearance in Class 9 + 42** before branding spend - our search was directional; the consumer "Purvia" AI face-swap app is a different class but should be formally cleared.
 - **Acquire `purvia.com`?** - currently parked (registered 2012); decide whether to pursue purchase or stay `.ai`-only.
-- **Repo/GitHub rename timing** - if/when to rename `Agentic_RAG` and the technical slugs is a separate, later, higher-risk effort (deploy hostnames, Supabase ref, observability history) - not part of this PRD.
+- **Technical-slug rename timing** - the GitHub repo rename is now US-007; renaming the deeper `agentic-rag`/`ar` technical slugs (Fly app hostname, Supabase project ref, LangSmith/observability history) remains a separate, later, higher-risk effort - still not part of this PRD.
 - **Wordmark/logo** - do we want a designed wordmark for the header, or is the text treatment sufficient for launch?
