@@ -1,6 +1,10 @@
-# Agentic RAG — Context glossary
+# Purvia — Context glossary
 
 Terms that have a precise meaning in this codebase. Resolved during design sessions; update inline as decisions are made.
+
+## Product
+
+- **Purvia** — the product/platform: a **permissions-aware knowledge platform** where per-document sharing is a first-class part of the retrieval predicate, not a post-hoc filter. The name is coined from *purview* ("the scope of what one is authorized to see and know"), which names the actual differentiator. "Agentic RAG" was only the working/repo name; the technical namespace (`agentic-rag`/`ar`) deliberately stays unchanged (ADR-0011). Two surfaces live under Purvia: the **owner-only knowledge-assistant** (`threads`/`messages`, `auth.uid() = user_id`) and the **white-labeled support widget** (`conversations`/support bot, workspace-membership RLS). The widget renders the *buyer's* brand, never "Purvia" — the vendor name never leaks across the white-label boundary.
 
 ## Permissions / access control (Module 11, in design)
 

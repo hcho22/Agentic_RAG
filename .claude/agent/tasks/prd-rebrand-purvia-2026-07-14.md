@@ -92,12 +92,14 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 
 **Description:** As a contributor, I want the product name defined in the project's ubiquitous-language glossary so the term is canonical and unambiguous.
 
+**Status:** ✅ Done (2026-07-15, commit `6aac3ca`) - H1 retitled (em dash preserved to match the file's house style); new `## Product` section with the bold-term **Purvia** entry naming both surfaces; no existing glossary terms touched.
+
 **Acceptance Criteria:**
 
-- [ ] `CONTEXT.md:1` - `# Agentic RAG — Context glossary` → `# Purvia — Context glossary`
-- [ ] A glossary entry defines **Purvia** = the product/platform (a permissions-aware knowledge platform), and notes its two surfaces both live under it: the owner-only knowledge-assistant (`threads`/`messages`) and the white-labeled support widget (`conversations`/support bot).
-- [ ] The entry follows the existing bold-term definition style used elsewhere in `CONTEXT.md`.
-- [ ] No existing glossary terms are altered.
+- [x] `CONTEXT.md:1` - `# Agentic RAG — Context glossary` → `# Purvia — Context glossary`
+- [x] A glossary entry defines **Purvia** = the product/platform (a permissions-aware knowledge platform), and notes its two surfaces both live under it: the owner-only knowledge-assistant (`threads`/`messages`) and the white-labeled support widget (`conversations`/support bot).
+- [x] The entry follows the existing bold-term definition style used elsewhere in `CONTEXT.md`.
+- [x] No existing glossary terms are altered.
 
 **Validation Test:**
 
@@ -112,12 +114,14 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 
 **Description:** As a future maintainer, I want the naming decision recorded so no one re-litigates it or wonders why the product is "Purvia" and not "Deflio."
 
+**Status:** ✅ Done (2026-07-15, commit `6aac3ca`) - ADR-0011 authored in the house format (Status/Date/On bullets, Context/Decision/Consequences/Alternatives, matching 0010); records Purvia, the Deflio rejection, `.ai`-only, the unchanged technical namespace, and the pending USPTO clearance. The README index already linked it (US-003).
+
 **Acceptance Criteria:**
 
-- [ ] New file `docs/adr/0011-product-name.md`, matching the existing ADR format: `# ADR 0011: <title>`, then `- **Status:** Accepted`, `- **Date:** 2026-07-14`, an optional `- **On:**` dependency bullet, then `## Context` and further sections.
-- [ ] Content records: the product was effectively unnamed ("Agentic RAG" = working title); "Deflio" was considered and **rejected** as mis-scoped to the support-deflection wedge (a single white-labeled module) when the product is a platform; the semantic direction chosen was the "need-to-know / purview" fusion; "Purvia" was selected; `.ai`-only was accepted given `.com` saturation.
-- [ ] Consequences note: the technical namespace deliberately stays `agentic-rag`/`ar`; the white-labeled widget is unaffected; a paid USPTO Class 9/42 trademark clearance is still pending.
-- [ ] Referenced from the README `## Documentation` index (see US-003).
+- [x] New file `docs/adr/0011-product-name.md`, matching the existing ADR format: `# ADR 0011: <title>`, then `- **Status:** Accepted`, `- **Date:** 2026-07-14`, an optional `- **On:**` dependency bullet, then `## Context` and further sections.
+- [x] Content records: the product was effectively unnamed ("Agentic RAG" = working title); "Deflio" was considered and **rejected** as mis-scoped to the support-deflection wedge (a single white-labeled module) when the product is a platform; the semantic direction chosen was the "need-to-know / purview" fusion; "Purvia" was selected; `.ai`-only was accepted given `.com` saturation.
+- [x] Consequences note: the technical namespace deliberately stays `agentic-rag`/`ar`; the white-labeled widget is unaffected; a paid USPTO Class 9/42 trademark clearance is still pending.
+- [x] Referenced from the README `## Documentation` index (see US-003).
 
 **Validation Test:**
 
@@ -132,13 +136,15 @@ This is a deliberately **tight, display-only rename plus a naming ADR**. The ent
 
 **Description:** As the team, we need to confirm the rebrand is complete on vendor surfaces AND that it did not bleed into the white-labeled widget or change any behavior.
 
+**Status:** ✅ Done (2026-07-15, commit `6aac3ca`) - typecheck+build green; `python -m backend.test_supabase_jwt` green (12 assertions); grep leaves only the intentional historical reference inside the new CONTEXT.md glossary entry; the compiled widget bundle contains zero "Purvia" and the demo widget renders the buyer's `data-title` ("FitSnack Support"), browser-verified alongside tab title "Purvia" and Swagger "Purvia backend". Also updated the vendor-brand header comment in `frontend/public/widget.js` (comment-only, zero behavior) so the grep gate stays clean.
+
 **Acceptance Criteria:**
 
-- [ ] `cd frontend && npm run typecheck && npm run build` passes.
-- [ ] A backend unit-layer story test runs green (e.g. `python -m backend.test_supabase_jwt`) - confirming no logic moved.
-- [ ] `grep -rn "Agentic RAG" frontend/ backend/ README.md CONTEXT.md` returns only intentionally-retained internal/technical references (no stray vendor-facing display strings).
-- [ ] The embedded support widget still renders the buyer's brand (e.g. demo `data-title="FitSnack Support"`), NOT "Purvia."
-- [ ] Verify in browser using dev-browser skill.
+- [x] `cd frontend && npm run typecheck && npm run build` passes.
+- [x] A backend unit-layer story test runs green (e.g. `python -m backend.test_supabase_jwt`) - confirming no logic moved.
+- [x] `grep -rn "Agentic RAG" frontend/ backend/ README.md CONTEXT.md` returns only intentionally-retained internal/technical references (no stray vendor-facing display strings).
+- [x] The embedded support widget still renders the buyer's brand (e.g. demo `data-title="FitSnack Support"`), NOT "Purvia."
+- [x] Verify in browser using dev-browser skill.
 
 **Validation Test:**
 

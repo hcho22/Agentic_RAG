@@ -1,5 +1,5 @@
 /*
- * Agentic RAG — support widget loader (US-083).
+ * Purvia - support widget loader (US-083).
  *
  * A buyer embeds this ONE tiny, dependency-free script on their page:
  *
