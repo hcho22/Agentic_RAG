@@ -51,6 +51,22 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Clear the checked-out summary from an earlier run
+        # `evals/permissions_scale/summary.md` is git-tracked, so checkout puts
+        # a committed artifact of an EARLIER, healthier run on disk before this
+        # job has measured anything. The publish step below is `if: always()`
+        # and keys on that file EXISTING rather than on it being fresh, so any
+        # job that dies before the runner rewrites it - `supabase start`, `pip
+        # install`, the seed step, or the 30-minute `timeout-minutes` kill, none
+        # of which the runner's own failure guard can reach - would commit the
+        # stale all-1.000 table as today's nightly. Healthy numbers for a run
+        # that measured nothing are strictly harder to spot than a bad number.
+        # Removing it makes the existence guard mean what it reads as: publish
+        # only what this run produced, otherwise publish nothing for this date.
+        # This closes a pre-existing hole, not one the degenerate-run guard
+        # introduced.
+        run: rm -f evals/permissions_scale/summary.md
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:

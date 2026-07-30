@@ -82,6 +82,21 @@ LOCAL_JWT_SECRET = "super-secret-jwt-token-with-at-least-32-characters-long"
 # at different ef_search values.
 SCALE_BENCHMARK_THRESHOLD = 0.0
 
+# Cap on how much of an arbitrary exception's text is interpolated into the
+# PUBLISHED failure notice. `summary.md` is copied into
+# `docs/permissions-scale-nightly/<DATE>.md` and committed to a public repo, and
+# GitHub Actions secret masking applies to log OUTPUT, not to files a step
+# writes and commits - so this artifact is a weaker boundary than a log line
+# (AGENTS.md invariant 3: secrets are server-side only, never a response body or
+# log line). Realistic messages here are benign (httpx includes the URL but not
+# headers; the OpenAI SDK redacts the key), but the text is arbitrary and
+# unbounded, and an unbounded copy of an unknown string is not a boundary at all.
+# Bounding the length is the honest mitigation: it is predictable and it does not
+# claim a sanitisation we do not perform. We deliberately do NOT pattern-match or
+# scrub, which would advertise a guarantee the regexes could not keep. The full
+# untruncated text still goes to the run log, which IS masked.
+MAX_PUBLISHED_EXCEPTION_CHARS = 400
+
 
 def load_config(path: Path) -> dict[str, Any]:
     with path.open() as f:
@@ -217,29 +232,36 @@ def _assert_cell_has_signal(
     degeneracy is knowable, and before gold exists at all - so a caller that
     never reaches `recall_at_k` cannot route around the guard.
 
-    Two distinct no-signal cases, kept distinct in the message because they have
-    different causes: the gold cell returned no rows at all (the viewer is blind
-    - missing chunk_acl grants, or missing workspace_membership), versus a cell
-    returned rows that all fell outside the wikipedia corpus (a stale/foreign
-    stable_id map, so the top-k we would score is not the top-k the viewer got).
+    ONE rule, uniformly applied: the GOLD cell (`ef_search_for_gold`) must yield
+    a non-empty MAPPED set; a non-gold cell may yield anything at all, including
+    nothing. Gold is built from that one cell, so an empty mapped set there means
+    gold is empty and the entire sweep is unscoreable. In a non-gold cell the
+    same shape carries real signal: the viewer retrieved rows whose top-k simply
+    contains none of gold, and recall@5 = 0.0 is the arithmetically correct,
+    legitimately measured answer - a low-ef graph walk finding no gold candidate
+    inside a sparse ACL set is the very phenomenon this eval exists to observe,
+    and must be reported rather than abort the sweep. Scoping both refusals the
+    same way is what keeps the rule statable in one sentence; the earlier split
+    (zero rows tolerated in a non-gold cell, but unmappable rows fatal there)
+    aborted on strictly MORE signal than it let through.
 
-    The zero-rows refusal is scoped to the GOLD cell (`ef_search_for_gold`)
-    deliberately. Gold is built from that one cell, so gold going dark is what
-    makes the metric unscoreable; a NON-gold cell coming back empty is instead a
-    measured HNSW recall collapse - a low-ef graph walk finding no visible
-    candidate inside a sparse ACL set - which is the very phenomenon this eval
-    exists to observe, and must score a real 0.000 rather than abort the sweep.
     This still closes the incident class the guard was written for: a
     permissions/membership bug blinds EVERY cell including gold, so gold refuses
     and the run fails loudly. Note this is forward-compatibility only today -
     match_chunks' `distinct on (c.id) ... order by c.id` subquery prevents HNSW
     ordering, so the scan is exact and `ef_search` is currently inert, making
     the two behaviours identical on the present schema.
+
+    The two gold-cell causes stay distinct in the message because they call for
+    different fixes: no rows at all means the viewer is blind (missing chunk_acl
+    grants, or missing workspace_membership), whereas rows that all fall outside
+    the wikipedia corpus mean a stale/foreign stable_id map, so the top-k we
+    would score is not the top-k the viewer got.
     """
     where = f"viewer={viewer_name} question={qid} ef_search={ef}"
+    if not is_gold_cell:
+        return
     if n_returned == 0:
-        if not is_gold_cell:
-            return
         raise DegenerateRunError(
             f"match_chunks returned 0 rows for the gold cell {where} - the "
             f"viewer can see nothing, so there is no signal to score. Check that "
@@ -251,10 +273,11 @@ def _assert_cell_has_signal(
         )
     if not mapped_stable_ids:
         raise DegenerateRunError(
-            f"match_chunks returned {n_returned} rows for {where} but none mapped "
-            f"to a wikipedia stable_id - the chunk_id→stable_id map is stale or "
-            f"the viewer is retrieving a foreign corpus. Nothing to score; "
-            f"reseed with `python -m db_seed.wikipedia_seed`."
+            f"match_chunks returned {n_returned} rows for the gold cell {where} "
+            f"but none mapped to a wikipedia stable_id - the chunk_id→stable_id "
+            f"map is stale or the viewer is retrieving a foreign corpus, so gold "
+            f"is empty. Nothing to score; reseed with "
+            f"`python -m db_seed.wikipedia_seed`."
         )
 
 
@@ -515,13 +538,26 @@ def render_failed_summary(exc: BaseException, started_at: str) -> str:
     failure on the eval path lands here. The exception type is included
     alongside the message because, unlike a `DegenerateRunError`, an arbitrary
     exception's text is not guaranteed to say what kind of failure it was.
+
+    The type is carried in full - it is always safe and it is the single most
+    useful triage signal - but the MESSAGE is truncated to
+    `MAX_PUBLISHED_EXCEPTION_CHARS`, because unlike the run log this notice gets
+    committed to a public repository where Actions secret masking does not
+    reach. See that constant for the full rationale.
     """
+    message = str(exc)
+    if len(message) > MAX_PUBLISHED_EXCEPTION_CHARS:
+        message = (
+            message[:MAX_PUBLISHED_EXCEPTION_CHARS]
+            + f" [... truncated at {MAX_PUBLISHED_EXCEPTION_CHARS} characters]"
+        )
     return _render_notice(
         "Permissions scale: RUN FAILED - no numbers published",
         "The run did not complete, so there is no recall@5 table. Any numbers "
-        "you were expecting here are absent, not measured; the traceback is in "
-        "the run log.",
-        f"{type(exc).__name__}: {exc}",
+        "you were expecting here are absent, not measured. The message below is "
+        "truncated for publication; the full text and traceback are in the "
+        "nightly job log.",
+        f"{type(exc).__name__}: {message}",
         started_at,
     )
 
@@ -578,18 +614,41 @@ async def amain() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    # The invariant this wrapper exists to hold: it must be impossible for this
+    # Preflight validation runs OUTSIDE the guarded region below, deliberately.
+    # A missing env var or a bad --config path is a mistake about how the run was
+    # INVOKED; nothing has been measured yet, so there is no stale-table hazard
+    # to close and no reason to touch `summary.md` - which is git-tracked and
+    # holds the last good table. Guarding these would mean a developer who simply
+    # forgot to export SUPABASE_URL silently dirties a tracked file and can commit
+    # the failure notice. The CI concern that might tempt someone to move this
+    # back inside (a job that dies before producing numbers still publishing the
+    # checked-out table) is covered upstream instead: the nightly deletes
+    # summary.md immediately after checkout.
+    env = _preflight_env()
+    cfg = load_config(args.config)
+    questions = load_questions(args.questions, list(cfg["question_ids"]))
+
+    # The invariant this guard exists to hold: it must be impossible for this
     # runner to terminate leaving a `summary.md` that describes an earlier,
     # healthier run. The nightly copies that file unconditionally (`if:
     # always()`, keyed on the file existing rather than on it being fresh), so
     # any exit that does not rewrite it republishes the previous run's numbers
-    # as today's result. Hence the whole eval path is guarded, not just the
-    # degenerate case: a refusal gets the friendlier notice and exit 1, and
+    # as today's result. Hence the whole MEASUREMENT path is guarded, not just
+    # the degenerate case: a refusal gets the friendlier notice and exit 1, and
     # every other failure gets the catch-all notice and its traceback re-raised
     # so the run log still shows what broke. No results JSON is written on
-    # either path.
+    # either path, because the JSON write happens only after `_measure` returns.
+    #
+    # The guard ends exactly where measurement does. Everything after it - the
+    # results JSON, the real summary, the prints, the recall floor - runs on a
+    # genuine, fully-measured table, and a fault there (e.g. a malformed
+    # `recall_floor` block in scale_gold.yaml raising KeyError/ValueError) must
+    # NOT overwrite that table with a "RUN FAILED" notice claiming the run
+    # measured nothing when it measured fine.
     try:
-        return await _run(args, started_at)
+        per_question, aggregates, elapsed_s, n_corpus_chunks = await _measure(
+            cfg, questions, env,
+        )
     except DegenerateRunError as exc:
         write_summary(args.summary, render_degenerate_summary(exc, started_at))
         log.error("permissions_scale: degenerate run, refusing to score - %s", exc)
@@ -599,9 +658,13 @@ async def amain() -> int:
         write_summary(args.summary, render_failed_summary(exc, started_at))
         raise
 
+    return _publish(
+        args, cfg, per_question, aggregates, elapsed_s, n_corpus_chunks, started_at,
+    )
 
-async def _run(args: argparse.Namespace, started_at: str) -> int:
-    """The eval proper. Every exit path out of here is guarded by `amain`."""
+
+def _preflight_env() -> dict[str, str]:
+    """Resolve and validate the env the eval needs. Raises before anything runs."""
     supabase_url = os.environ.get("SUPABASE_URL")
     if not supabase_url:
         raise RuntimeError("SUPABASE_URL is required")
@@ -620,11 +683,26 @@ async def _run(args: argparse.Namespace, started_at: str) -> int:
     )
     if not database_url:
         raise RuntimeError("CORPUS_SEED_DATABASE_URL or DATABASE_URL is required")
+    return {
+        "supabase_url": supabase_url,
+        "service_role_key": service_role_key,
+        "openai_api_key": openai_api_key,
+        "database_url": database_url,
+    }
 
-    cfg = load_config(args.config)
-    questions = load_questions(args.questions, list(cfg["question_ids"]))
 
-    stable_id_map = await fetch_wikipedia_stable_id_map(database_url)
+async def _measure(
+    cfg: dict[str, Any],
+    questions: list[dict[str, Any]],
+    env: dict[str, str],
+) -> tuple[list[dict[str, Any]], dict[str, Any], float, int]:
+    """The measurement phase, and exactly the region `amain` guards.
+
+    Ends the moment `aggregate` returns a table, so the guard covers everything
+    that can leave the run with no numbers and nothing that happens once numbers
+    exist. Returns (per_question, aggregates, elapsed_s, n_corpus_chunks).
+    """
+    stable_id_map = await fetch_wikipedia_stable_id_map(env["database_url"])
     if not stable_id_map:
         # An unseeded database is the canonical degenerate run: no corpus means
         # no cell can produce signal, so this is the same refusal as a blind
@@ -636,29 +714,48 @@ async def _run(args: argparse.Namespace, started_at: str) -> int:
     log.info("permissions_scale: %d wikipedia chunks loaded", len(stable_id_map))
 
     jwt_secret = os.environ.get("SUPABASE_JWT_SECRET") or LOCAL_JWT_SECRET
-    anon_key = os.environ.get("SUPABASE_ANON_KEY") or service_role_key
+    anon_key = os.environ.get("SUPABASE_ANON_KEY") or env["service_role_key"]
     viewer_headers: dict[str, dict[str, str]] = {}
     for viewer in cfg["viewers"]:
         token = mint_user_jwt(uuid.UUID(viewer["id"]), viewer["email"], jwt_secret)
         viewer_headers[viewer["name"]] = user_headers(token, anon_key)
 
-    openai_client = AsyncOpenAI(api_key=openai_api_key)
+    openai_client = AsyncOpenAI(api_key=env["openai_api_key"])
     started = time.perf_counter()
 
     async with httpx.AsyncClient(timeout=60.0) as http:
         per_question = await run_eval(
             questions, cfg, viewer_headers, stable_id_map,
-            openai_client, http, supabase_url,
+            openai_client, http, env["supabase_url"],
         )
     aggregates = aggregate(per_question, cfg)
 
     elapsed_s = round(time.perf_counter() - started, 2)
+    return per_question, aggregates, elapsed_s, len(stable_id_map)
 
+
+def _publish(
+    args: argparse.Namespace,
+    cfg: dict[str, Any],
+    per_question: list[dict[str, Any]],
+    aggregates: dict[str, Any],
+    elapsed_s: float,
+    n_corpus_chunks: int,
+    started_at: str,
+) -> int:
+    """Write the results JSON + the real summary table, then apply the floor.
+
+    Everything here runs on a genuine, fully-measured table and is therefore
+    deliberately OUTSIDE `amain`'s failure guard: a fault in this phase (most
+    plausibly a malformed `recall_floor` block) must surface as a crash with a
+    traceback, not silently replace real numbers with a "no numbers published"
+    notice.
+    """
     results = {
         "generated_at": started_at,
         "elapsed_s": elapsed_s,
         "n_questions": len(per_question),
-        "n_corpus_chunks": len(stable_id_map),
+        "n_corpus_chunks": n_corpus_chunks,
         "config": {
             "ef_search_values": list(cfg["ef_search_values"]),
             "ef_search_for_gold": cfg["ef_search_for_gold"],

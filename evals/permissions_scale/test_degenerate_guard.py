@@ -106,9 +106,10 @@ def _cell_guard_checks() -> None:
     # phenomenon this eval exists to observe - so it must pass through and be
     # scored as a real 0.000 rather than abort the sweep.
     _assert_cell_has_signal("viewer_1pct", "q21", 40, 0, [], is_gold_cell=False)
-    # Rows came back but none mapped into the wikipedia corpus - no signal in
-    # ANY cell (a corpus/map mismatch, not a collapse), and a distinct cause, so
-    # it must not be reported as the blind-viewer case.
+    # Rows came back in the GOLD cell but none mapped into the wikipedia corpus:
+    # gold is still empty, so the sweep is still unscoreable - but the cause is a
+    # corpus/map mismatch rather than a blind viewer, so it must not be reported
+    # as the blind-viewer case.
     _expect_raises(
         lambda: _assert_cell_has_signal(
             "viewer_50pct", "q35", 500, 5, [], is_gold_cell=True,
@@ -117,20 +118,17 @@ def _cell_guard_checks() -> None:
                       "stable_id"],
         what="_assert_cell_has_signal(gold cell, rows returned, none mapped)",
     )
-    _expect_raises(
-        lambda: _assert_cell_has_signal(
-            "viewer_50pct", "q35", 40, 5, [], is_gold_cell=False,
-        ),
-        must_mention=["viewer=viewer_50pct", "question=q35", "ef_search=40",
-                      "stable_id"],
-        what="_assert_cell_has_signal(non-gold cell, rows returned, none mapped)",
-    )
+    # The same shape in a NON-gold cell carries real signal: the viewer retrieved
+    # rows whose top-k simply contains none of gold, and recall@5 = 0.0 is the
+    # arithmetically correct measured answer. Aborting here would kill the sweep
+    # over strictly MORE signal than the empty non-gold cell above, which passes.
+    _assert_cell_has_signal("viewer_50pct", "q35", 40, 5, [], is_gold_cell=False)
     # A healthy cell passes through silently.
     _assert_cell_has_signal(
         "viewer_1pct", "q21", 40, 5, ["wikipedia-0000:0001"], is_gold_cell=False,
     )
-    print("  _assert_cell_has_signal: blind gold cell and unmappable rows raise; "
-          "an empty non-gold cell passes through")
+    print("  _assert_cell_has_signal: only the gold cell must yield a non-empty "
+          "mapped set; a non-gold cell may yield anything")
 
 
 def _aggregate_checks() -> None:
@@ -193,8 +191,25 @@ def _degenerate_summary_checks() -> None:
     assert "<!-- END EVAL_SUMMARY -->" in failed, failed
     assert "RuntimeError: 401 Client Error for match_chunks" in failed, failed
     assert "| Viewer |" not in failed, failed
+
+    # This notice is copied into docs/permissions-scale-nightly/<DATE>.md and
+    # COMMITTED to a public repo, and Actions secret masking covers log output,
+    # not files a step writes - a weaker boundary than a log line (AGENTS.md
+    # invariant 3). So an arbitrary exception's text is bounded before it is
+    # published: the type survives in full, the message is capped, and the
+    # truncation is stated rather than silent.
+    long_message = "x" * (runner.MAX_PUBLISHED_EXCEPTION_CHARS * 3)
+    bounded = runner.render_failed_summary(
+        RuntimeError(long_message), "2026-07-30T00:00:00+00:00",
+    )
+    assert "RuntimeError:" in bounded, bounded
+    assert long_message not in bounded, "the full message must not be published"
+    assert "truncated" in bounded, bounded
+    assert "job log" in bounded, bounded
+    assert "x" * runner.MAX_PUBLISHED_EXCEPTION_CHARS in bounded, bounded
+    assert "x" * (runner.MAX_PUBLISHED_EXCEPTION_CHARS + 1) not in bounded, bounded
     print("  render_degenerate_summary / render_failed_summary: overwrite the "
-          "table, keep the markers")
+          "table, keep the markers, bound the published exception text")
 
 
 _FAKE_ENV = {
@@ -290,6 +305,112 @@ async def _no_stale_summary_checks() -> None:
                 os.environ[key] = value
 
 
+async def _guard_boundary_checks() -> None:
+    """The failure guard must cover the measurement phase and nothing else.
+
+    Both edges matter, and both were real defects:
+
+    * BEFORE it - env/config preflight. A local run with nothing exported is a
+      mistake about how the run was invoked, not a measurement that failed. If
+      the guard covered it, forgetting to export SUPABASE_URL would rewrite the
+      git-tracked summary.md holding the last good table and a developer could
+      commit the notice.
+    * AFTER it - publishing. Once aggregate() has returned a table, the run
+      genuinely measured something. A fault past that point (a malformed
+      recall_floor block is the live source: KeyError on a missing key,
+      ValueError on a non-numeric threshold) must crash with a traceback, NOT
+      replace real numbers with "RUN FAILED - no numbers published".
+    """
+    original_argv = sys.argv
+    original_fetch = runner.fetch_wikipedia_stable_id_map
+    original_embed = runner.embed_texts
+    original_call = runner.call_match_chunks
+    original_env = {k: os.environ.get(k) for k in _FAKE_ENV}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            summary_path = Path(tmp) / "summary.md"
+            out_path = Path(tmp) / "scale.json"
+
+            # Preflight: no env exported at all.
+            for key in _FAKE_ENV:
+                os.environ.pop(key, None)
+            summary_path.write_text(_HEALTHY_TABLE, encoding="utf-8")
+            sys.argv = [
+                "runner", "--summary", str(summary_path), "--out", str(out_path),
+            ]
+            try:
+                await amain()
+            except RuntimeError as e:
+                assert "SUPABASE_URL is required" in str(e), str(e)
+            else:
+                raise AssertionError("a missing env var must still abort the run")
+            assert summary_path.read_text(encoding="utf-8") == _HEALTHY_TABLE, (
+                "preflight validation must not touch the git-tracked summary"
+            )
+            assert not out_path.exists()
+
+            # Publishing: a fully-measured sweep, then a malformed recall_floor.
+            os.environ.update(_FAKE_ENV)
+            config_path = Path(tmp) / "scale_gold.yaml"
+            config_path.write_text(
+                "corpus:\n"
+                "  total_chunks: 10000\n"
+                "viewers:\n"
+                "  - id: 00000000-0000-0000-0000-000000000100\n"
+                "    name: viewer_1pct\n"
+                "    visible_chunks: 100\n"
+                "    email: scale-1pct@local.test\n"
+                "question_ids: [q21]\n"
+                "ef_search_values: [40, 500]\n"
+                "ef_search_for_gold: 500\n"
+                "top_k: 5\n"
+                # min_recall_at_5 deliberately absent - a config typo, which
+                # check_recall_floor turns into a KeyError.
+                "recall_floor:\n"
+                "  ef_search: 40\n"
+                "  viewer_name: viewer_1pct\n",
+                encoding="utf-8",
+            )
+            rows = [{"id": f"id-{i}"} for i in range(5)]
+
+            async def _map(_url: str) -> dict[str, str]:
+                return {f"id-{i}": f"wikipedia-0000:{i:04d}" for i in range(5)}
+
+            runner.fetch_wikipedia_stable_id_map = _map
+            runner.embed_texts = _stub_embed
+            runner.call_match_chunks = _make_stub_match_chunks(rows)
+            summary_path.write_text(_HEALTHY_TABLE, encoding="utf-8")
+            sys.argv = [
+                "runner", "--summary", str(summary_path), "--out", str(out_path),
+                "--config", str(config_path),
+            ]
+            try:
+                await amain()
+            except KeyError as e:
+                assert "min_recall_at_5" in str(e), str(e)
+            else:
+                raise AssertionError("a malformed recall_floor must not be swallowed")
+            written = summary_path.read_text(encoding="utf-8")
+            assert "RUN FAILED" not in written, (
+                "a fault after aggregate() must not destroy a fully-measured "
+                f"table: {written}"
+            )
+            assert "| Viewer |" in written and "1.000" in written, written
+            assert out_path.exists(), "the measured results JSON must survive"
+        print("  amain: preflight leaves the tracked summary alone; a publish-phase "
+              "fault leaves the measured table intact")
+    finally:
+        runner.fetch_wikipedia_stable_id_map = original_fetch
+        runner.embed_texts = original_embed
+        runner.call_match_chunks = original_call
+        sys.argv = original_argv
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _stub_embed(_client, texts):
     async def _run():
         return [[0.1] * 4 for _ in texts]
@@ -354,6 +475,25 @@ async def _run_eval_checks() -> None:
             "40": 0.0, "500": 1.0,
         }, collapsed_agg
 
+        # Same narrowing, one step further out: the low-ef cell returns rows,
+        # they just all fall outside the wikipedia stable_id map. Gold is intact,
+        # so this is a scoreable miss and must land as a real 0.000 rather than
+        # abort a sweep that measured fine.
+        async def _stub_unmapped_low_ef(_c, _h, _u, _hd, _lit, match_count, ef_search):
+            if ef_search == 500:
+                return gold_only[:match_count]
+            return [{"id": "foreign-corpus-row"}][:match_count]
+
+        runner.call_match_chunks = _stub_unmapped_low_ef
+        unmapped = await run_eval(
+            QUESTIONS, CFG, {"viewer_1pct": {}}, gold_only_map,
+            object(), object(), "http://x",
+        )
+        unmapped_cells = unmapped[0]["by_viewer"]["viewer_1pct"]
+        assert unmapped_cells["40"]["n_returned"] == 1, unmapped_cells["40"]
+        assert unmapped_cells["40"]["top_stable_ids"] == [], unmapped_cells["40"]
+        assert unmapped_cells["40"]["recall_at_5"] == 0.0, unmapped_cells["40"]
+
         # Positive control: with real rows, run_eval scores normally and the
         # guard stays out of the way. ef=40 returns a partly different top-5
         # than the ef=500 gold cell, so recall lands strictly between 0 and 1.
@@ -376,8 +516,8 @@ async def _run_eval_checks() -> None:
         assert cells["40"]["recall_at_5"] == 0.4, cells["40"]
         agg = aggregate(per_question, CFG)
         assert agg["recall_at_5_by_viewer_ef"]["viewer_1pct"]["40"] == 0.4
-        print("  run_eval: a blind gold cell raises; an empty low-ef cell scores "
-              "0.000; a real sweep still scores")
+        print("  run_eval: a blind gold cell raises; an empty or unmappable "
+              "low-ef cell scores 0.000; a real sweep still scores")
     finally:
         runner.embed_texts = original_embed
         runner.call_match_chunks = original_call
@@ -391,6 +531,7 @@ async def main() -> None:
     _degenerate_summary_checks()
     await _run_eval_checks()
     await _no_stale_summary_checks()
+    await _guard_boundary_checks()
     print("all degenerate-run guard checks passed")
 
 
