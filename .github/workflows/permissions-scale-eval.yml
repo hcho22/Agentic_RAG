@@ -132,9 +132,22 @@ jobs:
           # The runner has a second, semantically different non-zero exit:
           # it REFUSES a run that produced no signal (blind gold cell,
           # unseeded corpus) and writes a DEGENERATE RUN notice in place
-          # of the table. When triaging a red nightly, check the published
-          # <DATE>.md first: a missing <DATE>.json means the run was
-          # refused for lack of signal, not that recall regressed.
+          # of the table.
+          #
+          # Triaging a red nightly: the discriminator is the NOTICE HEADING
+          # in the published <DATE>.md, not the presence or absence of
+          # <DATE>.json. Three cases:
+          #   - "DEGENERATE RUN"  the run measured nothing and the harness
+          #     refused to score it; the notice names the viewer, question
+          #     and ef_search that went dark. Not a recall regression.
+          #   - "RUN FAILED"      the measurement phase crashed on something
+          #     else (viewer JWT rejected, embedder outage, DB gone). Also
+          #     not a recall regression.
+          #   - a real recall@5 table  the run measured fine, so a red job
+          #     is the --enforce-floor alarm: recall genuinely regressed.
+          # A job that dies BEFORE the runner (Supabase start, pip install,
+          # seed, timeout kill) publishes neither file, so no <DATE>.md at
+          # all points at the step log rather than at the eval.
           # --summary: write to a scratch path, NOT the git-tracked
           # evals/permissions_scale/summary.md default. The publish step
           # copies from here, so what gets committed as today's nightly is
@@ -157,8 +170,16 @@ jobs:
           mkdir -p docs/permissions-scale-nightly
           # The run may not have produced /tmp/scale.json if seed failed
           # — guard the copy so the publish step itself doesn't crash.
+          # When it is absent, DELETE any same-date .json rather than leaving
+          # it: this workflow has `workflow_dispatch`, so a re-dispatch after a
+          # successful cron run would otherwise leave the morning's healthy
+          # <DATE>.json sitting beside the afternoon's DEGENERATE <DATE>.md -
+          # two artifacts for one date that contradict each other. The
+          # published pair must always come from the same run.
           if [ -f /tmp/scale.json ]; then
             cp /tmp/scale.json "docs/permissions-scale-nightly/${DATE}.json"
+          else
+            rm -f "docs/permissions-scale-nightly/${DATE}.json"
           fi
           # Both sources are scratch paths this run wrote, never the
           # git-tracked in-repo summary. So "the file exists" and "this run

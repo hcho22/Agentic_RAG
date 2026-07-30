@@ -368,6 +368,28 @@ async def run_eval(
                 # Refuse the cell here - the earliest point the degeneracy is
                 # knowable, and before gold exists - so no caller can reach the
                 # scoring chain with a no-signal cell.
+                #
+                # DECIDED: this raises from inside the per-(question × viewer ×
+                # ef) loop, so the FIRST blind gold cell aborts the WHOLE sweep,
+                # including viewers that would have measured fine. That is the
+                # intended tradeoff, not an oversight:
+                #   (i)  it is the fail-closed side of AGENTS.md invariant 4, and
+                #        metric integrity is exactly the class where a miss
+                #        misleads - a table carrying two healthy rows next to one
+                #        refusal invites being read as "mostly fine" while a
+                #        tenant-visibility regression is live;
+                #   (ii) triage is not blocked by the abort, because the refusal
+                #        message already names the viewer, question and ef_search;
+                #   (iii) the recall_floor check is lost with the sweep, but that
+                #        check is a regression alarm on a MEASURED number, and
+                #        once any gold cell is blind there is no measured number
+                #        to alarm on - a floor evaluated over a partly-refused
+                #        sweep would be a weaker signal, not a stronger one.
+                # If preserving the other viewers' numbers ever becomes worth it,
+                # the shape is: collect per-viewer refusals and raise AFTER the
+                # sweep instead of during it, and teach render_summary to emit an
+                # explicit REFUSED row, so a partial table can never be mistaken
+                # for a complete one.
                 _assert_cell_has_signal(
                     vname, qid, int(ef), len(rows), top_stable_ids,
                     is_gold_cell=int(ef) == ef_gold,
@@ -601,7 +623,14 @@ def _write_failure_notice(path: Path, text: str) -> None:
 
     The two branches differ on purpose; do not collapse them.
 
-    * An EXPLICIT `--summary <path>` means a caller wants the notice as an
+    The rule keys off the resolved TARGET, not off whether `--summary` was passed
+    explicitly, because it is the target that decides whether writing can dirty a
+    tracked file. An explicitness-based rule would let a caller who passes
+    `--summary evals/permissions_scale/summary.md` reintroduce exactly the footgun
+    described below, so do not "fix" this into a sentinel default that can tell
+    the two apart.
+
+    * A target OTHER than the in-repo default means the notice is wanted as an
       artifact. The nightly is that caller: it points the runner at a scratch
       path and its publish step copies whatever is there into
       `docs/permissions-scale-nightly/<DATE>.md`, so the notice is how a refused
