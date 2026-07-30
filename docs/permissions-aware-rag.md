@@ -375,6 +375,20 @@ corpus. Recall is computed against the viewer's own top-5 at the
 highest `ef_search` (=500), so the ef_search=500 column is 1.000 by
 construction; the curve at 40 / 80 / 200 is what the table reports.
 
+> **The embedded table below was last genuinely measured on 2026-05-31.**
+> It is auto-embedded from `evals/permissions_scale/summary.md`, and that
+> file went stale and then wrong without this section changing: from
+> 2026-06-01 the runner died before rewriting it and the nightly
+> republished it verbatim for 18 days (18 snapshots carrying an identical
+> `47.93s wall` and no results JSON), then from 2026-06-19 to 2026-07-30 a
+> missing `workspace_membership` row for the eval viewers made every cell a
+> real, measured 0.000 for 42 days. Both holes are closed - the seeder
+> joins its viewers to the workspace, and a failed run now overwrites this
+> table with a named refusal notice instead of leaving the previous one
+> standing. The live per-night output is in
+> [`permissions-scale-nightly/`](permissions-scale-nightly/); read that,
+> not this snapshot, until a green post-fix nightly refreshes it.
+
 <!-- BEGIN EVAL_SUMMARY:permissions_scale -->
 
 ### Permissions scale: recall@5 vs ef_search × selectivity

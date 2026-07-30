@@ -40,6 +40,22 @@ could in principle leak via timing or payload size).
 (15 multi-hop queries against a synthetic Wikipedia 10k-chunk corpus,
 gold = top-5 at the most exhaustive sweep):
 
+> **Last genuinely measured 2026-05-31.** This table is hard-coded, not
+> generated, and it did not track the nightly through two consecutive
+> outages of this benchmark. From 2026-06-01 the runner died before
+> rewriting its summary and the nightly republished the checked-in table
+> verbatim for 18 days; from 2026-06-19 to 2026-07-30 the eval viewers had
+> no `workspace_membership` row, so the tenant-isolation clause hid the
+> whole corpus from them and every cell was a real, measured **0.000** for
+> 42 days. The floor alarm fired the whole time - the nightly was red every
+> one of those nights - but this page kept showing the numbers below
+> regardless, which is the failure that mattered. The seeding defect and
+> the publish-a-zero path are both fixed (see the paragraph after the
+> table); the live output is
+> [`docs/permissions-scale-nightly/`](docs/permissions-scale-nightly/) and
+> that, not this table, is the number to trust until a green post-fix
+> nightly replaces it.
+
 | Viewer | Visible chunks | Selectivity | ef_search=40 | ef_search=80 | ef_search=200 | ef_search=500 (gold) |
 |---|---|---|---|---|---|---|
 | viewer_50pct | 5,000 | 50.0% | 1.000 | 1.000 | 1.000 | 1.000 |
