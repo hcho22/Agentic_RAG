@@ -647,9 +647,9 @@ def _write_failure_notice(path: Path, text: str) -> None:
 
     This used to write unconditionally, to stop the nightly republishing the
     checked-out table when a run aborted without rewriting it. That reason is
-    gone: the workflow now deletes the checked-out summary after checkout AND
-    publishes from its own `--summary` path, so the tracked file no longer needs
-    defending by the runner. The notice is an artifact concern only - the caller
+    gone: the workflow publishes from its own `--summary` scratch path and never
+    reads the in-repo one, so the tracked file no longer needs defending by the
+    runner. The notice is an artifact concern only - the caller
     keeps its non-zero exit either way, and the reason is logged at ERROR either
     way, so skipping the write never softens a failure.
     """
@@ -718,8 +718,9 @@ async def amain() -> int:
     # forgot to export SUPABASE_URL silently dirties a tracked file and can commit
     # the failure notice. The CI concern that might tempt someone to move this
     # back inside (a job that dies before producing numbers still publishing the
-    # checked-out table) is covered upstream instead: the nightly deletes
-    # summary.md immediately after checkout.
+    # checked-out table) is covered upstream instead: the nightly points
+    # `--summary` at a scratch path and publishes only what this run wrote
+    # there, so the in-repo table can never become today's nightly.
     env = _preflight_env()
     cfg = load_config(args.config)
     questions = load_questions(args.questions, list(cfg["question_ids"]))
