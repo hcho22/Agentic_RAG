@@ -563,4 +563,11 @@ that is how the nightly publishes it (§5b). The refusal itself is
 pinned by `python -m evals.permissions_scale.test_degenerate_guard`,
 which runs fully offline - no database, no secrets, no network -
 deliberately, so it cannot pass merely because the local database
-happens to be unseeded.
+happens to be unseeded. Since it is offline it needs no Supabase
+stack in CI either, so it runs per-PR in the `eval-harness-guards`
+job of `.github/workflows/retrieval-eval.yml` on any change under
+`evals/permissions_scale/**`, alongside the retrieval harness's
+sibling guard (`evals.retrieval.test_empty_gold_guard`, the
+authored-gold half of the same invariant). Both run unconditionally
+with no `|| true`: a guard that can go quiet is the failure mode it
+exists to catch.

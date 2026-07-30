@@ -52,6 +52,8 @@ Per question × mode, the runner computes:
 - **`MRR`** (Mean Reciprocal Rank): `1 / rank` of the first correct chunk in top-10; 0 if none of the top-10 are gold. Measures how *high* the first correct answer sits in the ranking — a mode that returns the right chunk at rank 1 scores 1.0; rank 5 scores 0.2.
 - **`nDCG@5`** with binary relevance and `log2(i+1)` position discount. Like recall@5 but weighted so a correct chunk at rank 1 contributes more than a correct chunk at rank 5. IDCG normalises against the ideal ranking (all gold chunks at the top, capped at 5). The metric that best captures "are the right chunks not just present, but ranked above the noise."
 
+All three divide by `|gold_stable_ids|`, so all three are **undefined** - not zero - when a question's resolved gold set is empty. They raise `EmptyGoldError` in that case rather than reporting a number, which is what keeps a genuine `0.000` (gold existed, retrieval missed it) readable as the real measurement it is. See §5, "An empty gold set refuses the run".
+
 Aggregates: mean per mode, mean per (mode × category).
 
 ### 2.4 What the metrics do **not** measure
@@ -102,6 +104,14 @@ python -m evals.retrieval.runner --include-e6
 # VOYAGE_API_KEY. Eval-only: the production RERANKER default stays `none`.
 # Measured results + recommendation: docs/reranker-bakeoff.md.
 python -m evals.retrieval.runner --mode hybrid --reranker llm
+
+# Eval-harness guards (US-107 / invariant 12). Fully offline - no Supabase, no
+# secrets, no network - so they run anywhere and are the two modules the per-PR
+# `eval-harness-guards` job executes. They pin the rule that a harness which
+# measured nothing refuses to publish a number for it, while a genuine miss
+# still scores 0.000.
+python -m evals.retrieval.test_empty_gold_guard          # authored gold (E4/E6 scorers)
+python -m evals.permissions_scale.test_degenerate_guard  # derived gold (scale runner)
 ```
 
 The runner writes `evals/retrieval/results/<ISO-timestamp>.json` (full per-question detail + aggregates) and `evals/retrieval/summary.md` (two markdown tables ready to drop between the EVAL_SUMMARY markers in the next section).
@@ -179,6 +189,8 @@ These cell, threshold, and corroboration values are the kit defaults declared in
 
 **Determinism caveat.** OpenAI embeddings and LLM outputs are not strictly bit-deterministic across calls, and RAGAS adds its own judge LLM on top. RAGAS scores jitter by a few points across runs even on unchanged inputs — which is exactly why the gates compare against a rolling *median* with absolute thresholds wide enough to clear that jitter, rather than treating any week-to-week wobble as a regression.
 
+**A weekly run that publishes nothing is UNMEASURED, not green.** `retrieval-eval-ragas-weekly.yml` treats a missing snapshot as its own state - a deduped `ragas-weekly-harness-failure` issue plus a failed job, never a red gate finding - because the rolling-median gates above are only as current as the last run that actually produced a snapshot. Details: § 6, "A scheduled run has three outcomes, not two".
+
 ## 4. Example: detecting a regression
 
 To prove the CI workflow actually surfaces a meaningful retrieval regression — rather than just claim it does — a throwaway PR ([#14](https://github.com/hcho22/Purvia/pull/14), closed without merging) flipped `DEFAULT_CHUNK_SIZE` in `backend/chunking.py` from 500 to 100. Smaller chunks split answer spans across many chunks, dropping `recall@5` sharply. The workflow ran on PR head and on `main`, diffed the results, and posted [this comment](https://github.com/hcho22/Purvia/pull/14#issuecomment-4454219095):
@@ -223,7 +235,7 @@ The eval is useful, but it is small and biased in ways worth naming explicitly.
 
 **No human-rater inter-annotator agreement.** Gold-chunk assignments were made by a single author. A different author might pick different chunks for the same question (especially for multi-hop questions, where multiple chunks contain partial answers). We have no second-rater calibration to bound the noise floor.
 
-**An empty gold set refuses the run; a genuine miss still scores 0.000.** These are different facts and the harness no longer reports them as the same number. `recall_at_k` / `ndcg_at_5` / `mrr` used to `return 0.0` for an empty resolved gold set, so an authoring mistake arrived at the gate wearing the shape of a retrieval regression and dragged the gated E4/E6 means down with it. All three now raise `EmptyGoldError` (`evals/retrieval/content_anchors.py`, beside `ZeroResolveError`), and the refusal is planted at each depth where the degeneracy first becomes knowable: `resolve_gold_anchors` before any query is issued, `_metrics_block` naming the offending question / mode / viewer / filter, and each scorer. E6 gets the same treatment through a single pre-flight that resolves both gold projections (`b_gold_for` / `a_gold_for`) before a single live query, so no question can burn its queries ahead of a blind one - its instance was the sharper one, because E6's negative assertion *is* `recall@10 == 0.0` against Workspace B's gold, so an empty B-gold set used to score a PASS on a tenant-isolation invariant the run never exercised. What has not changed is the load-bearing distinction: gold that exists and was missed is a real measurement and still scores 0.000. Both halves are pinned offline (no DB, no secrets) by `python -m evals.retrieval.test_empty_gold_guard`. Content anchoring (§2.2) remains the first line of defence on the authoring path - `parse_gold_anchors` rejects a question with no anchors, and an anchor that resolves to nothing raises `ZeroResolveError`. This is the authored-gold half of invariant 12 in `AGENTS.md`; the sibling permissions-scale runner enforces the derived-gold half via `DegenerateRunError`.
+**An empty gold set refuses the run; a genuine miss still scores 0.000.** These are different facts and the harness no longer reports them as the same number. `recall_at_k` / `ndcg_at_5` / `mrr` used to `return 0.0` for an empty resolved gold set, so an authoring mistake arrived at the gate wearing the shape of a retrieval regression and dragged the gated E4/E6 means down with it. All three now raise `EmptyGoldError` (`evals/retrieval/content_anchors.py`, beside `ZeroResolveError`), and the refusal is planted at each depth where the degeneracy first becomes knowable: `resolve_gold_anchors` before any query is issued, `_metrics_block` naming the offending question / mode / viewer / filter, and each scorer. E6 gets the same treatment through a single pre-flight that resolves both gold projections (`b_gold_for` / `a_gold_for`) before a single live query, so no question can burn its queries ahead of a blind one - its instance was the sharper one, because E6's negative assertion *is* `recall@10 == 0.0` against Workspace B's gold, so an empty B-gold set used to score a PASS on a tenant-isolation invariant the run never exercised. What has not changed is the load-bearing distinction: gold that exists and was missed is a real measurement and still scores 0.000. Both halves are pinned offline (no DB, no secrets) by `python -m evals.retrieval.test_empty_gold_guard`, which - together with its permissions-scale sibling - runs per-PR in the `eval-harness-guards` job of `retrieval-eval.yml`, so the guard against a silently-green harness is itself enforced by CI rather than by a command in a markdown file. Content anchoring (§2.2) remains the first line of defence on the authoring path - `parse_gold_anchors` rejects a question with no anchors, and an anchor that resolves to nothing raises `ZeroResolveError`. This is the authored-gold half of invariant 12 in `AGENTS.md`; the sibling permissions-scale runner enforces the derived-gold half via `DegenerateRunError`.
 
 **The eval is anchored to specific model versions.** Embeddings come from `text-embedding-3-small`; OpenAI may evolve the model under the same name. The eval doesn't pin the embedding model's checksum or fingerprint, so a silent OpenAI model update could shift the numbers without any code change. The `generated_at` timestamp + the human reading the results is the current safeguard; a stricter pinning step is a defensible future addition.
 
@@ -274,6 +286,18 @@ The two guards partition the space cleanly — the positive control owns the emp
 Both the gated `false_resolve_rate` and the surfaced `mislabel_ratio` (additive in the P3 result JSON) use the **full presented population** (`n_questions`) as the denominator, INCLUDING mislabeled rows, never the exercised-only subset: that is the operating-metric meaning ("of all unanswerable questions presented, what fraction did we wrongly auto-resolve") and it keeps the sum-based consolidated rate from mixing per-population denominators.
 The dilution a heavily-mislabeled leg creates is therefore handled by the ratio guard, not by shrinking the denominator.
 This mirrors the P1a/P1b/non-disclosure blindness guards, so the safety ceiling can never be disarmed by a P3 population that drifts out from under it. The exit-code decision lives in `e7_pinned_invariants_failed` (a pure function over the scored legs, unit-tested directly).
+
+### A scheduled run has three outcomes, not two: green, red, and UNMEASURED
+
+Every guard above assumes the run got far enough to score something.
+The runner writes its JSON + markdown **before** it exits non-zero on a pinned invariant, so a snapshot is publishable for any failure *on the gate path* - but that is not a guarantee that a snapshot exists at all.
+Anything that kills the process before scoring (an invalid `ANTHROPIC_API_KEY`, a seed failure, an OOM, a job that dies before the runner step ever runs) produces none, and a run in that state has produced no verdict.
+Both weekly workflows (`escalation-eval-weekly.yml` and `retrieval-eval-ragas-weekly.yml`) therefore name that as its own state rather than folding it into either of the other two.
+A dedicated snapshot-check step runs first; on a miss it emits an `UNMEASURED` annotation, skips publish, files a deduped `e7-weekly-harness-failure` / `ragas-weekly-harness-failure` issue stating that nothing was evaluated this week, and fails the job.
+The "reflect runner exit code" step is gated on the snapshot as well as the exit code, so a harness crash can never be captioned "a pinned safety invariant fired" - describing the very thing that was *not* evaluated.
+On the next run that does produce a snapshot the harness-failure issue auto-closes; unlike the gate-finding auto-close that is **not** restricted to scheduled runs, because "did this run produce a snapshot" is a fact about that run alone rather than a verdict a partial re-run could misrepresent.
+Both workflows previously `exit 0`'d on a missing snapshot, which is why the E7 gate had never filed a single issue and the RAGAS weekly stopped publishing while both went red week after week.
+This is the CI half of invariant 12 in `AGENTS.md`: the path that should shout must never be the path that goes quiet.
 
 ### The two metric classes
 

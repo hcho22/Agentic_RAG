@@ -47,7 +47,7 @@ Do NOT collapse these into one table with a `kind` discriminator branching the p
 
 - Backend story tests are `python -m backend.test_usXXX_*` (plus `test_conversation_status_machine`, `test_supabase_jwt`, `test_au4_auth_attacks`). Each has a **unit layer that always runs** (no DB/secrets) and an **integration layer that skips cleanly** without a local Supabase. The full module list is in `docs/support-widget-internals.md`.
 - Cross-workspace zero-leak: `python -m backend.test_us066_conversations_rls` (needs local Supabase + `DATABASE_URL`). API-edge auth attacks: `python -m backend.test_au4_auth_attacks`.
-- Eval-harness guard tests run offline with no DB or secrets: `python -m evals.permissions_scale.test_degenerate_guard` and `python -m evals.retrieval.test_empty_gold_guard` (the two halves of invariant 12).
+- Eval-harness guard tests run offline with no DB or secrets: `python -m evals.permissions_scale.test_degenerate_guard` and `python -m evals.retrieval.test_empty_gold_guard` (the two halves of invariant 12; both are gated per-PR by the `eval-harness-guards` job in `.github/workflows/retrieval-eval.yml`).
 - Frontend gate is `npm run typecheck && npm run build` (multi-page; `tsc` is the lint gate - no ESLint config).
 - Manual browser QA for the deferred UI checks: `docs/manual-test-plan-support-widget.md`.
 

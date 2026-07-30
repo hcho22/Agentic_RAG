@@ -29,6 +29,14 @@ Design (why this shape):
   matches no current chunk raises `ZeroResolveError` naming the question id and
   the offending anchor text, and fails the run — never a silent `recall=0`.
 
+- **An EMPTY gold set is a hard error too, one layer down.** `EmptyGoldError`
+  (below) is this module's second refusal: it covers every other route by which
+  a question can reach a scorer with nothing to score against, and the E4/E6
+  scorers raise it instead of reporting `0.000` for a cell that measured
+  nothing. It lives here, beside `ZeroResolveError`, because both answer the
+  same question - "is this gold label actually scoreable?" - at different
+  depths. See AGENTS.md invariant 12.
+
 - **Optional stable-document scope.** An anchor may be `{text, doc}` where `doc`
   is a `filename_slug` (the stable document identity that survives re-chunking);
   resolution is then restricted to that document's chunks. The scope IS the

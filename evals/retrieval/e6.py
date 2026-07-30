@@ -31,6 +31,16 @@ The **positive control** then adds the *same* viewer to Workspace B and confirms
 B's gold *does* surface — proving the eval can detect access, so a zero is a real
 zero and not a false pass from an empty corpus or a structurally blind probe.
 
+The positive control is a whole-run property, so it only catches the case where
+*every* question is blind. A **per-question pre-flight** in `run_e6` closes the
+partial case, before any live query is issued: `b_gold_for` / `a_gold_for`
+resolve each question's gold on both sides and raise `EmptyGoldError` naming the
+question if either comes back empty. Without it a handful of questions whose gold
+never made it into the B copy would score `recall@10 == 0.0` - E6's PASS
+condition - inside an otherwise-healthy run, passing a tenant-isolation assertion
+those rows never exercised. The refusal fail-closes through the runner's existing
+deterministic-error path (the `❌ FAILED` hard-error block), never as a green run.
+
 Both filter strategies are recorded, mirroring E4:
 
 * **pre_filter** — query AS the cross-workspace viewer; the SQL membership
@@ -496,7 +506,10 @@ class E6Result:
     @property
     def positive_control_ok(self) -> bool:
         # The eval can see B's gold when access is legitimate — so a zero in the
-        # negative pass is meaningful, not a structurally blind false pass.
+        # negative pass is meaningful, not a structurally blind false pass. This
+        # is a whole-run property and so only catches the ALL-questions-blind
+        # case; the per-question half is `run_e6`'s `b_gold_for` / `a_gold_for`
+        # pre-flight, which refuses a single blind question outright.
         return any(v > 0.0 for v in self.positive_detected_fraction.values())
 
     @property
