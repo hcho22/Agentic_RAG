@@ -184,9 +184,82 @@ async def call_match_chunks(
     return r.json()
 
 
-def recall_at_k(gold_ids: set[str], retrieved_ids: list[str], k: int) -> float:
+class DegenerateRunError(RuntimeError):
+    """The run produced no signal, so there is nothing to score.
+
+    A recall metric can only distinguish "retrieved the wrong things" from
+    "retrieved nothing" if the no-signal case is refused rather than scored.
+    Gold here is not a fixture - it is the `ef_search_for_gold` cell of this
+    same sweep - so a viewer that can see nothing yields an empty gold set,
+    and every cell then scores a well-formed, entirely meaningless 0.000 that
+    is indistinguishable from a real measured regression. That is what the
+    nightly published every night from 2026-06-19 onward while the wikipedia
+    seed was leaving the viewers with no workspace_membership row.
+
+    Raising instead is what makes the failure diagnosable from the nightly log
+    alone, so every message names the viewer, the question id, and the
+    ef_search value that went dark.
+    """
+
+
+def _assert_cell_has_signal(
+    viewer_name: str,
+    qid: str,
+    ef: int,
+    n_returned: int,
+    mapped_stable_ids: list[str],
+) -> None:
+    """Refuse a retrieval cell that came back with nothing to score.
+
+    Called the moment each match_chunks response lands - the earliest point the
+    degeneracy is knowable, and before gold exists at all - so a caller that
+    never reaches `recall_at_k` cannot route around the guard.
+
+    Two distinct no-signal cases, kept distinct in the message because they have
+    different causes: the RPC returned no rows at all (the viewer is blind -
+    missing chunk_acl grants, or missing workspace_membership), versus it
+    returned rows that all fell outside the wikipedia corpus (a stale/foreign
+    stable_id map, so the top-k we would score is not the top-k the viewer got).
+    """
+    where = f"viewer={viewer_name} question={qid} ef_search={ef}"
+    if n_returned == 0:
+        raise DegenerateRunError(
+            f"match_chunks returned 0 rows for {where} - the viewer can see "
+            f"nothing, so there is no signal to score. Check that the viewer has "
+            f"chunk_acl grants AND a public.workspace_membership row for the "
+            f"wikipedia documents' workspace (the US-003 membership clause is "
+            f"AND-ed with the owner-OR-ACL predicate, so a missing membership row "
+            f"hides even explicitly granted chunks); reseed with "
+            f"`python -m db_seed.wikipedia_seed`."
+        )
+    if not mapped_stable_ids:
+        raise DegenerateRunError(
+            f"match_chunks returned {n_returned} rows for {where} but none mapped "
+            f"to a wikipedia stable_id - the chunk_id→stable_id map is stale or "
+            f"the viewer is retrieving a foreign corpus. Nothing to score; "
+            f"reseed with `python -m db_seed.wikipedia_seed`."
+        )
+
+
+def recall_at_k(
+    gold_ids: set[str],
+    retrieved_ids: list[str],
+    k: int,
+    *,
+    context: str = "",
+) -> float:
+    """recall@k against `gold_ids`. Raises rather than scoring an empty gold set.
+
+    The empty-gold branch used to `return 0.0`, which is the bug this guard
+    exists to close: it turned "we measured nothing" into a reportable number.
+    """
     if not gold_ids:
-        return 0.0
+        where = f" for {context}" if context else ""
+        raise DegenerateRunError(
+            f"empty gold set{where} - gold is the ef_search_for_gold cell of this "
+            f"same sweep, so an empty gold set means that cell returned nothing "
+            f"scoreable. Refusing to report 0.000 for a run that measured nothing."
+        )
     top_k = set(retrieved_ids[:k])
     return len(gold_ids & top_k) / len(gold_ids)
 
@@ -239,6 +312,10 @@ async def run_eval(
                 top_stable_ids = [
                     stable_id_map[r["id"]] for r in rows if r["id"] in stable_id_map
                 ]
+                # Refuse the cell here - the earliest point the degeneracy is
+                # knowable, and before gold exists - so no caller can reach the
+                # scoring chain with a no-signal cell.
+                _assert_cell_has_signal(vname, qid, int(ef), len(rows), top_stable_ids)
                 per_ef[str(ef)] = {
                     "top_stable_ids": top_stable_ids,
                     "n_returned": len(rows),
@@ -250,7 +327,10 @@ async def run_eval(
             gold_ids = set(per_ef[str(ef_gold)]["top_stable_ids"])
             for ef in ef_search_values:
                 per_ef[str(ef)]["recall_at_5"] = recall_at_k(
-                    gold_ids, per_ef[str(ef)]["top_stable_ids"], top_k
+                    gold_ids,
+                    per_ef[str(ef)]["top_stable_ids"],
+                    top_k,
+                    context=f"viewer={vname} question={qid} ef_search={ef}",
                 )
             per_viewer[vname] = per_ef
         per_question.append({
@@ -265,7 +345,16 @@ def aggregate(
     per_question: list[dict[str, Any]],
     cfg: dict[str, Any],
 ) -> dict[str, Any]:
-    """Mean recall@5 per (viewer × ef_search), shaped for the summary table."""
+    """Mean recall@5 per (viewer × ef_search), shaped for the summary table.
+
+    Raises `DegenerateRunError` on a (viewer × ef_search) pair that no question
+    contributed to. The old `if n > 0` skipped such a pair, leaving the cell to
+    render as `render_summary`'s dash placeholder and the recall floor to
+    report a vague "cell missing" - the
+    same class of quiet degradation as scoring an empty gold set. There is no
+    legitimate reason for a configured viewer to have zero measured questions,
+    so it is a failure, not a gap in the table.
+    """
     ef_values = [str(e) for e in cfg["ef_search_values"]]
     by_viewer_ef: dict[str, dict[str, float]] = {}
     for viewer in cfg["viewers"]:
@@ -280,8 +369,14 @@ def aggregate(
                     continue
                 total += float(cell["recall_at_5"])
                 n += 1
-            if n > 0:
-                by_viewer_ef[vname][ef] = round(total / n, 4)
+            if n == 0:
+                raise DegenerateRunError(
+                    f"no measured questions for viewer={vname} ef_search={ef} "
+                    f"across {len(per_question)} question(s) - nothing to "
+                    f"average. Refusing to render a summary table for a run "
+                    f"that measured nothing."
+                )
+            by_viewer_ef[vname][ef] = round(total / n, 4)
     return {"recall_at_5_by_viewer_ef": by_viewer_ef}
 
 

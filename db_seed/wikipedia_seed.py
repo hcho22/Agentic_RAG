@@ -24,6 +24,12 @@ Determinism stack:
   gives *exactly* K visible chunks per viewer, deterministic across
   runs, and statistically independent across viewers.
 
+Workspace: documents omit `workspace_id` and so land in the Default
+Workspace via the column DEFAULT (20260617120200). The owner and all three
+viewers are added to that workspace by `_ensure_workspace_membership` -
+without it the US-003 membership clause hides the whole corpus from every
+one of them and the scale eval silently measures nothing.
+
 Idempotency: identifies prior wikipedia-seeded rows by
 `documents.user_id = WIKIPEDIA_USER_ID AND metadata->>'wikipedia_seed' =
 'true'` and deletes them before re-inserting (chunks + chunk_acl cascade
@@ -67,7 +73,13 @@ from embeddings import embed_texts, get_embedding_model, to_pgvector  # noqa: E4
 # US-026/US-027: reuse the corpus seeder's single-row embedding_config upsert and
 # its embedder-ProviderConfig client builder so both embedding-producing seed
 # paths stamp the corpus identically and embed via the SAME configured provider.
-from db_seed.corpus_seed import build_embedder_client, stamp_embedding_config  # noqa: E402
+# US-002: DEFAULT_WORKSPACE_ID is imported rather than redeclared so the two
+# seeders cannot drift onto different workspaces.
+from db_seed.corpus_seed import (  # noqa: E402
+    DEFAULT_WORKSPACE_ID,
+    build_embedder_client,
+    stamp_embedding_config,
+)
 
 log = logging.getLogger("agentic_rag.db_seed.wikipedia")
 
@@ -250,6 +262,50 @@ async def _ensure_users(
     )
 
 
+async def _ensure_workspace_membership(
+    conn: asyncpg.Connection,
+    viewers: list[dict[str, Any]],
+) -> None:
+    """Add the wikipedia owner + every viewer to the Default Workspace (US-002).
+
+    Default Workspace is the right workspace because `_insert_document` below
+    omits `workspace_id`, so every wikipedia document lands there via the column
+    DEFAULT set by 20260617120200_default_workspace_backfill.sql - and it is
+    `d.workspace_id` that the membership clause resolves against.
+
+    Mirrors `db_seed.corpus_seed._ensure_workspace_membership` for this corpus,
+    and for the same reason: 20260617120200's auth.users backfill only captures
+    users that exist at MIGRATION time, but `_ensure_users` inserts these ones
+    *after* migrations run. Under the US-003 subtractive membership clause
+    (`exists (select 1 from workspace_membership wm where wm.workspace_id =
+    d.workspace_id and wm.user_id = auth.uid())` inside match_chunks), a
+    principal with no membership row sees NOTHING - not even chunks it owns, and
+    not even chunks explicitly granted to it in chunk_acl, because the clause is
+    AND-ed with the owner-OR-ACL predicate rather than OR-ed into it.
+
+    Without this the permissions-scale eval measures nothing: all three viewers
+    retrieve 0 rows at every ef_search, gold comes back empty, and every cell
+    scores a meaningless 0.000 (the nightly regression from 2026-06-19 onward).
+
+    The owner is included alongside the viewers. It is not what the eval reads -
+    the runner authenticates only as the three viewers - but the same clause
+    hides the owner's own 10k chunks from itself, which is the identical latent
+    trap and exactly what the corpus seeder's single membership row prevents.
+
+    Idempotent, so a repeat seed is a no-op.
+    """
+    rows = [(DEFAULT_WORKSPACE_ID, WIKIPEDIA_USER_ID)]
+    rows += [(DEFAULT_WORKSPACE_ID, uuid.UUID(v["id"])) for v in viewers]
+    await conn.executemany(
+        """
+        insert into public.workspace_membership (workspace_id, user_id, role)
+        values ($1, $2, 'member')
+        on conflict do nothing
+        """,
+        rows,
+    )
+
+
 async def _purge_existing(conn: asyncpg.Connection) -> int:
     """Delete prior wikipedia-seeded documents (chunks + chunk_acl cascade)."""
     result = await conn.execute(
@@ -401,6 +457,7 @@ async def seed(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
     produced_dim: int | None = None
     try:
         await _ensure_users(conn, viewers)
+        await _ensure_workspace_membership(conn, viewers)
         purged = await _purge_existing(conn)
         if purged:
             log.info("wikipedia_seed: purged %d previously-seeded documents", purged)
