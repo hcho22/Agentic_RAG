@@ -191,6 +191,11 @@ def _degenerate_summary_checks() -> None:
     assert "<!-- END EVAL_SUMMARY -->" in failed, failed
     assert "RuntimeError: 401 Client Error for match_chunks" in failed, failed
     assert "| Viewer |" not in failed, failed
+    # Nothing was dropped from that message - it is far under the cap, as
+    # realistic httpx/asyncpg text is - so the notice must NOT claim truncation
+    # or send a triager to the job log for text already complete in front of them.
+    assert "truncated" not in failed, failed
+    assert "job log" not in failed, failed
 
     # This notice is copied into docs/permissions-scale-nightly/<DATE>.md and
     # COMMITTED to a public repo, and Actions secret masking covers log output,
@@ -230,15 +235,17 @@ _HEALTHY_TABLE = (
 
 
 async def _no_stale_summary_checks() -> None:
-    """No exit path may leave behind a summary describing an earlier, healthier run.
+    """Given an explicit --summary, no exit path may leave an earlier run's table there.
 
-    The nightly's publish step is `if: always()` and keyed on `summary.md`
-    *existing* rather than on it being fresh, so a run that aborts without
-    rewriting it republishes the last good table as today's result - healthy
-    numbers for a run that measured nothing, which is strictly harder to spot
-    than the 0.000 this harness was fixed to stop emitting. Both failure classes
-    are exercised: the refusal (`DegenerateRunError`, exit 1) and the catch-all
-    (any other exception, re-raised).
+    This is the nightly's configuration: it points the runner at a scratch path
+    and its `if: always()` publish step copies whatever is there into
+    `docs/permissions-scale-nightly/<DATE>.md`. So a run that aborts without
+    rewriting that file would publish whatever it held - and, more importantly,
+    a run that measured nothing has to SAY so rather than leave a reader to
+    infer numbers. Both failure classes are exercised: the refusal
+    (`DegenerateRunError`, exit 1) and the catch-all (any other exception,
+    re-raised). The default-path counterpart, where the notice is deliberately
+    NOT written, is `_default_summary_never_dirtied_checks`.
 
     Offline: the only thing stubbed is the chunk_id→stable_id lookup, which is
     the first thing on the eval path to touch the database, so nothing here
@@ -296,6 +303,78 @@ async def _no_stale_summary_checks() -> None:
         print("  amain: neither a refusal nor a crash leaves the previous run's "
               "table publishable")
     finally:
+        runner.fetch_wikipedia_stable_id_map = original_fetch
+        sys.argv = original_argv
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+async def _default_summary_never_dirtied_checks() -> None:
+    """A failed run with NO explicit --summary must leave the tracked default alone.
+
+    The failure notice is an artifact for a caller that asked for one. The
+    nightly asks, via `--summary /tmp/scale-summary.md`, and publishes from
+    there. A bare local `python -m evals.permissions_scale.runner` does not:
+    its default target is the git-tracked `evals/permissions_scale/summary.md`
+    holding the last good table, nothing is keyed to that file on a failure, and
+    writing there only leaves a modified tracked file a developer can commit by
+    accident. The live footgun is running this before `db_seed.wikipedia_seed`,
+    getting DEGENERATE RUN into the committed baseline, then `git commit -a`
+    propagating it into docs/permissions-aware-rag.md.
+
+    Both failure classes are checked, and the exit behaviour is re-asserted here:
+    skipping the write is an artifact decision and must never soften the failure.
+    The tracked content is snapshotted and restored, so a regression in the code
+    under test fails the assertion instead of leaving the repo dirty.
+    """
+    tracked = runner.DEFAULT_SUMMARY
+    before = tracked.read_text(encoding="utf-8") if tracked.exists() else None
+    original_fetch = runner.fetch_wikipedia_stable_id_map
+    original_argv = sys.argv
+    original_env = {k: os.environ.get(k) for k in _FAKE_ENV}
+    os.environ.update(_FAKE_ENV)
+
+    def _current() -> str | None:
+        return tracked.read_text(encoding="utf-8") if tracked.exists() else None
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "scale.json"
+            # No --summary, so args.summary falls back to DEFAULT_SUMMARY.
+            sys.argv = ["runner", "--out", str(out_path)]
+
+            async def _empty_map(_url: str) -> dict[str, str]:
+                return {}
+
+            runner.fetch_wikipedia_stable_id_map = _empty_map
+            rc = await amain()
+            assert rc == 1, f"a refused run must still exit non-zero; got {rc}"
+            assert _current() == before, (
+                "a refused run must not rewrite the git-tracked default summary"
+            )
+
+            async def _boom(_url: str) -> dict[str, str]:
+                raise RuntimeError("connection refused")
+
+            runner.fetch_wikipedia_stable_id_map = _boom
+            try:
+                await amain()
+            except RuntimeError as e:
+                assert "connection refused" in str(e), str(e)
+            else:
+                raise AssertionError("a failed run must not be swallowed")
+            assert _current() == before, (
+                "a crashed run must not rewrite the git-tracked default summary"
+            )
+            assert not out_path.exists()
+        print("  amain: a failure with the default summary path leaves the "
+              "git-tracked table untouched, and still fails")
+    finally:
+        if before is not None and _current() != before:
+            tracked.write_text(before, encoding="utf-8")
         runner.fetch_wikipedia_stable_id_map = original_fetch
         sys.argv = original_argv
         for key, value in original_env.items():
@@ -531,6 +610,7 @@ async def main() -> None:
     _degenerate_summary_checks()
     await _run_eval_checks()
     await _no_stale_summary_checks()
+    await _default_summary_never_dirtied_checks()
     await _guard_boundary_checks()
     print("all degenerate-run guard checks passed")
 

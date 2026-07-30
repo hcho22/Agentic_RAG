@@ -214,6 +214,19 @@ class DegenerateRunError(RuntimeError):
     Raising instead is what makes the failure diagnosable from the nightly log
     alone, so every message names the viewer, the question id, and the
     ef_search value that went dark.
+
+    INVARIANT: a `DegenerateRunError` message must be authored here, from
+    config-derived values only - it must NEVER wrap an upstream exception's
+    text. `render_degenerate_summary` publishes this message VERBATIM and
+    unbounded (deliberately: the actionable "reseed with `python -m
+    db_seed.wikipedia_seed`" instruction sits past the 400-char cap that bounds
+    the arbitrary-exception notice), and that published file is committed to a
+    public repo where Actions secret masking does not reach - see
+    `MAX_PUBLISHED_EXCEPTION_CHARS` and AGENTS.md invariant 3. Self-authored
+    text is what makes publishing it verbatim safe, so a future change that
+    starts raising `DegenerateRunError(f"...{some_upstream_exc}")` is a
+    violation of this boundary, not an innocuous refactor: route arbitrary
+    exception text through the bounded `render_failed_summary` path instead.
     """
 
 
@@ -506,16 +519,21 @@ def _render_notice(
 def render_degenerate_summary(exc: DegenerateRunError, started_at: str) -> str:
     """The summary written IN PLACE OF the table when the run measured nothing.
 
-    `summary.md` is a git-tracked file that normally holds the last good table,
-    and the nightly's publish step is `if: always()` and keyed on the file
-    *existing* rather than on it being fresh. So a run that aborts without
-    rewriting this file publishes yesterday's healthy numbers as today's
-    nightly - strictly harder to spot than the 0.000 the guard replaced. The
-    notice therefore has to overwrite the table rather than merely be absent.
+    The nightly's publish step is `if: always()`, so the failure notice - not
+    silence - is what the published `<DATE>.md` should carry: "no numbers" has
+    to be stated, because an absent statement reads as an absent job rather than
+    as a refused measurement.
 
-    The `DegenerateRunError` message is carried verbatim so the published
-    nightly names the viewer, question id and ef_search that went dark, without
-    anyone needing the CI log.
+    The `DegenerateRunError` message is carried VERBATIM and unbounded so the
+    published nightly names the viewer, question id and ef_search that went
+    dark, plus the reseed command, without anyone needing the CI log. That
+    asymmetry with `render_failed_summary` (which caps the text at
+    `MAX_PUBLISHED_EXCEPTION_CHARS`) is deliberate and is safe for exactly one
+    reason: every `DegenerateRunError` message is authored inside this module
+    from config-derived values, never wrapped around an upstream exception. See
+    the invariant on `DegenerateRunError` - if that ever stops holding, this
+    function becomes an unbounded copy of an unknown string into a file
+    committed to a public repo.
     """
     return _render_notice(
         "Permissions scale: DEGENERATE RUN - no numbers published",
@@ -531,32 +549,43 @@ def render_degenerate_summary(exc: DegenerateRunError, started_at: str) -> str:
 def render_failed_summary(exc: BaseException, started_at: str) -> str:
     """The same notice, for a run that died of something other than degeneracy.
 
-    The stale-table hazard `render_degenerate_summary` addresses is not specific
-    to `DegenerateRunError`: an unseeded database, a viewer JWT the API rejects,
-    or an embedder outage all abort the run just as thoroughly, and the nightly
-    would publish the previous run's healthy table for any of them. So every
-    failure on the eval path lands here. The exception type is included
-    alongside the message because, unlike a `DegenerateRunError`, an arbitrary
-    exception's text is not guaranteed to say what kind of failure it was.
+    A `DegenerateRunError` is not the only way a run ends with no numbers: an
+    unseeded database, a viewer JWT the API rejects, or an embedder outage all
+    abort the run just as thoroughly. So every failure on the eval path lands
+    here. The exception type is included alongside the message because, unlike a
+    `DegenerateRunError`, an arbitrary exception's text is not guaranteed to say
+    what kind of failure it was.
 
     The type is carried in full - it is always safe and it is the single most
     useful triage signal - but the MESSAGE is truncated to
     `MAX_PUBLISHED_EXCEPTION_CHARS`, because unlike the run log this notice gets
     committed to a public repository where Actions secret masking does not
     reach. See that constant for the full rationale.
+
+    The "go read the job log" pointer is attached only when something was
+    actually dropped. Realistic httpx/asyncpg messages are well under the cap,
+    and sending a triager off to dig out the full text of a message that is
+    already complete in front of them is a false lead.
     """
     message = str(exc)
-    if len(message) > MAX_PUBLISHED_EXCEPTION_CHARS:
+    truncated = len(message) > MAX_PUBLISHED_EXCEPTION_CHARS
+    if truncated:
         message = (
             message[:MAX_PUBLISHED_EXCEPTION_CHARS]
             + f" [... truncated at {MAX_PUBLISHED_EXCEPTION_CHARS} characters]"
         )
+    explanation = (
+        "The run did not complete, so there is no recall@5 table. Any numbers "
+        "you were expecting here are absent, not measured."
+    )
+    if truncated:
+        explanation += (
+            " The message below is truncated for publication; the full text and "
+            "traceback are in the nightly job log."
+        )
     return _render_notice(
         "Permissions scale: RUN FAILED - no numbers published",
-        "The run did not complete, so there is no recall@5 table. Any numbers "
-        "you were expecting here are absent, not measured. The message below is "
-        "truncated for publication; the full text and traceback are in the "
-        "nightly job log.",
+        explanation,
         f"{type(exc).__name__}: {message}",
         started_at,
     )
@@ -565,6 +594,44 @@ def render_failed_summary(exc: BaseException, started_at: str) -> str:
 def write_summary(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _write_failure_notice(path: Path, text: str) -> None:
+    """Write a "no numbers published" notice - unless the target is the tracked default.
+
+    The two branches differ on purpose; do not collapse them.
+
+    * An EXPLICIT `--summary <path>` means a caller wants the notice as an
+      artifact. The nightly is that caller: it points the runner at a scratch
+      path and its publish step copies whatever is there into
+      `docs/permissions-scale-nightly/<DATE>.md`, so the notice is how a refused
+      or crashed run states "no numbers" instead of publishing silence. Write it.
+
+    * The DEFAULT path is `evals/permissions_scale/summary.md`, which is
+      git-tracked and holds the last good table. Nothing is keyed to it on a
+      failure, so writing there has exactly one effect: it leaves a modified
+      tracked file behind for a developer to commit by accident. That is a live
+      footgun - running this runner before `python -m db_seed.wikipedia_seed`
+      raises `DegenerateRunError`, and a later `git commit -a` would replace the
+      committed baseline table with a DEGENERATE RUN notice and propagate it into
+      `docs/permissions-aware-rag.md` via `docs/_embed_eval_summaries.py`. Skip it.
+
+    This used to write unconditionally, to stop the nightly republishing the
+    checked-out table when a run aborted without rewriting it. That reason is
+    gone: the workflow now deletes the checked-out summary after checkout AND
+    publishes from its own `--summary` path, so the tracked file no longer needs
+    defending by the runner. The notice is an artifact concern only - the caller
+    keeps its non-zero exit either way, and the reason is logged at ERROR either
+    way, so skipping the write never softens a failure.
+    """
+    if path.resolve() == DEFAULT_SUMMARY:
+        log.error(
+            "permissions_scale: leaving the git-tracked %s untouched; pass "
+            "--summary <path> to capture the failure notice as an artifact",
+            DEFAULT_SUMMARY.name,
+        )
+        return
+    write_summary(path, text)
 
 
 def check_recall_floor(
@@ -628,16 +695,18 @@ async def amain() -> int:
     cfg = load_config(args.config)
     questions = load_questions(args.questions, list(cfg["question_ids"]))
 
-    # The invariant this guard exists to hold: it must be impossible for this
-    # runner to terminate leaving a `summary.md` that describes an earlier,
-    # healthier run. The nightly copies that file unconditionally (`if:
-    # always()`, keyed on the file existing rather than on it being fresh), so
-    # any exit that does not rewrite it republishes the previous run's numbers
-    # as today's result. Hence the whole MEASUREMENT path is guarded, not just
-    # the degenerate case: a refusal gets the friendlier notice and exit 1, and
-    # every other failure gets the catch-all notice and its traceback re-raised
-    # so the run log still shows what broke. No results JSON is written on
-    # either path, because the JSON write happens only after `_measure` returns.
+    # The invariant this guard exists to hold: a run that produced no numbers
+    # must SAY so wherever it publishes, rather than let a reader infer numbers
+    # from a file that some earlier, healthier run wrote. The nightly copies its
+    # summary unconditionally (`if: always()`), so silence there would read as
+    # "the job didn't run" rather than "the run was refused". Hence the whole
+    # MEASUREMENT path is guarded, not just the degenerate case: a refusal gets
+    # the friendlier notice and exit 1, and every other failure gets the
+    # catch-all notice and its traceback re-raised so the run log still shows
+    # what broke. No results JSON is written on either path, because the JSON
+    # write happens only after `_measure` returns. `_write_failure_notice` is
+    # what decides where a notice may land - see it for why the in-repo default
+    # is deliberately left untouched on these paths.
     #
     # The guard ends exactly where measurement does. Everything after it - the
     # results JSON, the real summary, the prints, the recall floor - runs on a
@@ -650,12 +719,13 @@ async def amain() -> int:
             cfg, questions, env,
         )
     except DegenerateRunError as exc:
-        write_summary(args.summary, render_degenerate_summary(exc, started_at))
         log.error("permissions_scale: degenerate run, refusing to score - %s", exc)
+        _write_failure_notice(args.summary, render_degenerate_summary(exc, started_at))
         print(f"permissions_scale eval REFUSED: {exc}")
         return 1
     except Exception as exc:  # noqa: BLE001 - re-raised below
-        write_summary(args.summary, render_failed_summary(exc, started_at))
+        log.error("permissions_scale: run failed before producing numbers - %s", exc)
+        _write_failure_notice(args.summary, render_failed_summary(exc, started_at))
         raise
 
     return _publish(

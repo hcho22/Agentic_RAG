@@ -54,17 +54,20 @@ jobs:
       - name: Clear the checked-out summary from an earlier run
         # `evals/permissions_scale/summary.md` is git-tracked, so checkout puts
         # a committed artifact of an EARLIER, healthier run on disk before this
-        # job has measured anything. The publish step below is `if: always()`
-        # and keys on that file EXISTING rather than on it being fresh, so any
-        # job that dies before the runner rewrites it - `supabase start`, `pip
-        # install`, the seed step, or the 30-minute `timeout-minutes` kill, none
-        # of which the runner's own failure guard can reach - would commit the
-        # stale all-1.000 table as today's nightly. Healthy numbers for a run
-        # that measured nothing are strictly harder to spot than a bad number.
-        # Removing it makes the existence guard mean what it reads as: publish
-        # only what this run produced, otherwise publish nothing for this date.
-        # This closes a pre-existing hole, not one the degenerate-run guard
-        # introduced.
+        # job has measured anything. Publishing that as today's nightly would be
+        # healthy numbers for a run that measured nothing - strictly harder to
+        # spot than a bad number.
+        #
+        # Belt and braces: the publish step below no longer reads this path at
+        # all. The eval is invoked with `--summary /tmp/scale-summary.md` and the
+        # publish step copies from there, so a job that dies before the runner
+        # (`supabase start`, `pip install`, the seed step, or the 30-minute
+        # `timeout-minutes` kill, none of which the runner's own failure guard
+        # can reach) has no /tmp file and publishes nothing for that date BY
+        # CONSTRUCTION rather than by cleanup. This step stays because it costs
+        # nothing and keeps the workspace honest for any future step that reads
+        # the in-repo path. This closes a pre-existing hole, not one the
+        # degenerate-run guard introduced.
         run: rm -f evals/permissions_scale/summary.md
 
       - name: Set up Python 3.11
@@ -132,8 +135,14 @@ jobs:
           # of the table. When triaging a red nightly, check the published
           # <DATE>.md first: a missing <DATE>.json means the run was
           # refused for lack of signal, not that recall regressed.
+          # --summary: write to a scratch path, NOT the git-tracked
+          # evals/permissions_scale/summary.md default. The publish step
+          # copies from here, so what gets committed as today's nightly is
+          # by construction something THIS run wrote - and a job that dies
+          # before the runner leaves no file to publish at all.
           python -m evals.permissions_scale.runner \
             --out /tmp/scale.json \
+            --summary /tmp/scale-summary.md \
             --enforce-floor
 
       - name: Publish to docs/permissions-scale-nightly/
@@ -151,8 +160,12 @@ jobs:
           if [ -f /tmp/scale.json ]; then
             cp /tmp/scale.json "docs/permissions-scale-nightly/${DATE}.json"
           fi
-          if [ -f evals/permissions_scale/summary.md ]; then
-            cp evals/permissions_scale/summary.md \
+          # Both sources are scratch paths this run wrote, never the
+          # git-tracked in-repo summary. So "the file exists" and "this run
+          # produced it" are the same statement, and a job that died before
+          # the runner publishes nothing rather than a stale table.
+          if [ -f /tmp/scale-summary.md ]; then
+            cp /tmp/scale-summary.md \
                "docs/permissions-scale-nightly/${DATE}.md"
           fi
           git config user.name 'github-actions[bot]'
