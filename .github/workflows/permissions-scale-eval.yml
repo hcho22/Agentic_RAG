@@ -107,9 +107,15 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           # --enforce-floor: exit non-zero if the recall_floor cell in
-          # scale_gold.yaml drops below threshold. This is the only
-          # failure path; dataset-fetch / seed errors fall through the
-          # `set -e` shell default and also fail the job.
+          # scale_gold.yaml drops below threshold. Dataset-fetch / seed
+          # errors fall through the `set -e` shell default and also fail
+          # the job.
+          # The runner has a second, semantically different non-zero exit:
+          # it REFUSES a run that produced no signal (blind gold cell,
+          # unseeded corpus) and writes a DEGENERATE RUN notice in place
+          # of the table. When triaging a red nightly, check the published
+          # <DATE>.md first: a missing <DATE>.json means the run was
+          # refused for lack of signal, not that recall regressed.
           python -m evals.permissions_scale.runner \
             --out /tmp/scale.json \
             --enforce-floor

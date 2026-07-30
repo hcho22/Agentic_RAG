@@ -235,14 +235,26 @@ def viewer_visible_indices(
     return sorted(idx for _, idx in scored[:visible_count])
 
 
+def _seed_principals(viewers: list[dict[str, Any]]) -> list[tuple[uuid.UUID, str]]:
+    """Every principal this seeder creates: the owner, then the config viewers.
+
+    Single source of truth for both `_ensure_users` and
+    `_ensure_workspace_membership`, deliberately. The failure this seeder exists
+    to prevent is exactly "a principal exists in auth.users with no
+    workspace_membership row", so the two sets must be provably identical rather
+    than two lists that happen to agree until someone edits one of them.
+    """
+    principals: list[tuple[uuid.UUID, str]] = [(WIKIPEDIA_USER_ID, WIKIPEDIA_USER_EMAIL)]
+    principals += [(uuid.UUID(v["id"]), v["email"]) for v in viewers]
+    return principals
+
+
 async def _ensure_users(
     conn: asyncpg.Connection,
     viewers: list[dict[str, Any]],
 ) -> None:
     """Idempotently insert the wikipedia owner + viewer users into auth.users."""
-    rows: list[tuple[uuid.UUID, str]] = [(WIKIPEDIA_USER_ID, WIKIPEDIA_USER_EMAIL)]
-    for v in viewers:
-        rows.append((uuid.UUID(v["id"]), v["email"]))
+    rows = _seed_principals(viewers)
     await conn.executemany(
         """
         insert into auth.users (
@@ -296,11 +308,15 @@ async def _ensure_workspace_membership(
     the runner authenticates only as the three viewers - but the same clause
     hides the owner's own 10k chunks from itself, which is the identical latent
     trap and exactly what the corpus seeder's single membership row prevents.
+    The principal list comes from `_seed_principals`, the same helper
+    `_ensure_users` inserts from, so no principal can land in auth.users without
+    a membership row here.
 
     Idempotent, so a repeat seed is a no-op.
     """
-    rows = [(DEFAULT_WORKSPACE_ID, WIKIPEDIA_USER_ID)]
-    rows += [(DEFAULT_WORKSPACE_ID, uuid.UUID(v["id"])) for v in viewers]
+    rows = [
+        (DEFAULT_WORKSPACE_ID, user_id) for user_id, _email in _seed_principals(viewers)
+    ]
     await conn.executemany(
         """
         insert into public.workspace_membership (workspace_id, user_id, role)

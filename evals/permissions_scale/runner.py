@@ -451,6 +451,35 @@ def render_summary(
     return "\n".join(lines)
 
 
+def _render_notice(
+    heading: str,
+    explanation: str,
+    detail: str,
+    started_at: str,
+) -> str:
+    """Marker-wrapped "no numbers this run" summary body.
+
+    Keeps the same `<!-- BEGIN/END EVAL_SUMMARY -->` markers as the real table
+    because `docs/_embed_eval_summaries.py` keys off exactly that pair; dropping
+    them would break the embed into `docs/permissions-aware-rag.md` instead of
+    propagating the failure into it.
+    """
+    return "\n".join([
+        "<!-- BEGIN EVAL_SUMMARY -->",
+        "",
+        f"### {heading}",
+        "",
+        f"_Run started {started_at}. {explanation}_",
+        "",
+        "```",
+        detail,
+        "```",
+        "",
+        "<!-- END EVAL_SUMMARY -->",
+        "",
+    ])
+
+
 def render_degenerate_summary(exc: DegenerateRunError, started_at: str) -> str:
     """The summary written IN PLACE OF the table when the run measured nothing.
 
@@ -461,30 +490,45 @@ def render_degenerate_summary(exc: DegenerateRunError, started_at: str) -> str:
     nightly - strictly harder to spot than the 0.000 the guard replaced. The
     notice therefore has to overwrite the table rather than merely be absent.
 
-    It keeps the same `<!-- BEGIN/END EVAL_SUMMARY -->` markers because
-    `docs/_embed_eval_summaries.py` keys off exactly that pair; dropping them
-    would break the embed into `docs/permissions-aware-rag.md` instead of
-    propagating the failure into it. The `DegenerateRunError` message is carried
-    verbatim so the published nightly names the viewer, question id and
-    ef_search that went dark, without anyone needing the CI log.
+    The `DegenerateRunError` message is carried verbatim so the published
+    nightly names the viewer, question id and ef_search that went dark, without
+    anyone needing the CI log.
     """
-    return "\n".join([
-        "<!-- BEGIN EVAL_SUMMARY -->",
-        "",
-        "### Permissions scale: DEGENERATE RUN - no numbers published",
-        "",
-        f"_Run started {started_at}. The harness refused to score this run: it "
-        f"produced no signal, so there is no recall@5 table. The numbers below "
-        f"are absent, not zero - see the invariant in `AGENTS.md` on refusing to "
-        f"score a run that produced no signal._",
-        "",
-        "```",
+    return _render_notice(
+        "Permissions scale: DEGENERATE RUN - no numbers published",
+        "The harness refused to score this run: it produced no signal, so there "
+        "is no recall@5 table. The numbers below are absent, not zero - see the "
+        "invariant in `AGENTS.md` on refusing to score a run that produced no "
+        "signal.",
         str(exc),
-        "```",
-        "",
-        "<!-- END EVAL_SUMMARY -->",
-        "",
-    ])
+        started_at,
+    )
+
+
+def render_failed_summary(exc: BaseException, started_at: str) -> str:
+    """The same notice, for a run that died of something other than degeneracy.
+
+    The stale-table hazard `render_degenerate_summary` addresses is not specific
+    to `DegenerateRunError`: an unseeded database, a viewer JWT the API rejects,
+    or an embedder outage all abort the run just as thoroughly, and the nightly
+    would publish the previous run's healthy table for any of them. So every
+    failure on the eval path lands here. The exception type is included
+    alongside the message because, unlike a `DegenerateRunError`, an arbitrary
+    exception's text is not guaranteed to say what kind of failure it was.
+    """
+    return _render_notice(
+        "Permissions scale: RUN FAILED - no numbers published",
+        "The run did not complete, so there is no recall@5 table. Any numbers "
+        "you were expecting here are absent, not measured; the traceback is in "
+        "the run log.",
+        f"{type(exc).__name__}: {exc}",
+        started_at,
+    )
+
+
+def write_summary(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 def check_recall_floor(
@@ -532,7 +576,32 @@ async def amain() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
+    # The invariant this wrapper exists to hold: it must be impossible for this
+    # runner to terminate leaving a `summary.md` that describes an earlier,
+    # healthier run. The nightly copies that file unconditionally (`if:
+    # always()`, keyed on the file existing rather than on it being fresh), so
+    # any exit that does not rewrite it republishes the previous run's numbers
+    # as today's result. Hence the whole eval path is guarded, not just the
+    # degenerate case: a refusal gets the friendlier notice and exit 1, and
+    # every other failure gets the catch-all notice and its traceback re-raised
+    # so the run log still shows what broke. No results JSON is written on
+    # either path.
+    try:
+        return await _run(args, started_at)
+    except DegenerateRunError as exc:
+        write_summary(args.summary, render_degenerate_summary(exc, started_at))
+        log.error("permissions_scale: degenerate run, refusing to score - %s", exc)
+        print(f"permissions_scale eval REFUSED: {exc}")
+        return 1
+    except Exception as exc:  # noqa: BLE001 - re-raised below
+        write_summary(args.summary, render_failed_summary(exc, started_at))
+        raise
+
+
+async def _run(args: argparse.Namespace, started_at: str) -> int:
+    """The eval proper. Every exit path out of here is guarded by `amain`."""
     supabase_url = os.environ.get("SUPABASE_URL")
     if not supabase_url:
         raise RuntimeError("SUPABASE_URL is required")
@@ -557,8 +626,12 @@ async def amain() -> int:
 
     stable_id_map = await fetch_wikipedia_stable_id_map(database_url)
     if not stable_id_map:
-        raise RuntimeError(
-            "no wikipedia chunks found — run `python -m db_seed.wikipedia_seed` first"
+        # An unseeded database is the canonical degenerate run: no corpus means
+        # no cell can produce signal, so this is the same refusal as a blind
+        # gold cell rather than an unrelated crash.
+        raise DegenerateRunError(
+            "no wikipedia chunks found - run `python -m db_seed.wikipedia_seed` "
+            "first. Nothing to score, so no summary table is published."
         )
     log.info("permissions_scale: %d wikipedia chunks loaded", len(stable_id_map))
 
@@ -570,29 +643,14 @@ async def amain() -> int:
         viewer_headers[viewer["name"]] = user_headers(token, anon_key)
 
     openai_client = AsyncOpenAI(api_key=openai_api_key)
-    started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     started = time.perf_counter()
 
-    # A degenerate run must leave no publishable table behind. The nightly
-    # copies `summary.md` unconditionally (`if: always()`, keyed on the file
-    # existing), so aborting without touching it would republish the previous
-    # run's healthy numbers as today's result. Overwrite it with the notice,
-    # write NO results JSON, and still exit non-zero.
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as http:
-            per_question = await run_eval(
-                questions, cfg, viewer_headers, stable_id_map,
-                openai_client, http, supabase_url,
-            )
-        aggregates = aggregate(per_question, cfg)
-    except DegenerateRunError as exc:
-        args.summary.parent.mkdir(parents=True, exist_ok=True)
-        args.summary.write_text(
-            render_degenerate_summary(exc, started_at), encoding="utf-8"
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        per_question = await run_eval(
+            questions, cfg, viewer_headers, stable_id_map,
+            openai_client, http, supabase_url,
         )
-        log.error("permissions_scale: degenerate run, refusing to score - %s", exc)
-        print(f"permissions_scale eval REFUSED: {exc}")
-        return 1
+    aggregates = aggregate(per_question, cfg)
 
     elapsed_s = round(time.perf_counter() - started, 2)
 
@@ -629,9 +687,9 @@ async def amain() -> int:
         encoding="utf-8",
     )
 
-    args.summary.write_text(
+    write_summary(
+        args.summary,
         render_summary(aggregates, cfg, len(per_question), elapsed_s),
-        encoding="utf-8",
     )
 
     print(

@@ -27,6 +27,10 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from evals.permissions_scale import runner
@@ -34,6 +38,7 @@ from evals.permissions_scale.runner import (
     DegenerateRunError,
     _assert_cell_has_signal,
     aggregate,
+    amain,
     recall_at_k,
     run_eval,
 )
@@ -175,7 +180,114 @@ def _degenerate_summary_checks() -> None:
     assert str(exc) in out, out
     # And no recall table survives into it.
     assert "ef_search=40 |" not in out and "| Viewer |" not in out, out
-    print("  render_degenerate_summary: overwrites the table, keeps the markers")
+
+    # The same stale-table hazard applies to a run that died of anything else -
+    # an unseeded DB, a rejected viewer JWT, an embedder outage - so the
+    # catch-all notice has to satisfy the same contract, plus name the type
+    # (an arbitrary exception's text need not say what kind of failure it was).
+    failed = runner.render_failed_summary(
+        RuntimeError("401 Client Error for match_chunks"),
+        "2026-07-30T00:00:00+00:00",
+    )
+    assert failed.startswith("<!-- BEGIN EVAL_SUMMARY -->"), failed
+    assert "<!-- END EVAL_SUMMARY -->" in failed, failed
+    assert "RuntimeError: 401 Client Error for match_chunks" in failed, failed
+    assert "| Viewer |" not in failed, failed
+    print("  render_degenerate_summary / render_failed_summary: overwrite the "
+          "table, keep the markers")
+
+
+_FAKE_ENV = {
+    "SUPABASE_URL": "http://127.0.0.1:54321",
+    "SUPABASE_SERVICE_ROLE_KEY": "test-service-role-key",
+    "OPENAI_API_KEY": "test-openai-key",
+    "DATABASE_URL": "postgresql://test:test@127.0.0.1:1/test",
+}
+
+# A stand-in for the pre-regression table that `summary.md` holds in git.
+_HEALTHY_TABLE = (
+    "<!-- BEGIN EVAL_SUMMARY -->\n\n"
+    "| Viewer | Visible chunks | Selectivity | ef_search=40 |\n"
+    "|---|---|---|---|\n"
+    "| viewer_1pct | 100 | 1.0% | 1.000 |\n\n"
+    "<!-- END EVAL_SUMMARY -->\n"
+)
+
+
+async def _no_stale_summary_checks() -> None:
+    """No exit path may leave behind a summary describing an earlier, healthier run.
+
+    The nightly's publish step is `if: always()` and keyed on `summary.md`
+    *existing* rather than on it being fresh, so a run that aborts without
+    rewriting it republishes the last good table as today's result - healthy
+    numbers for a run that measured nothing, which is strictly harder to spot
+    than the 0.000 this harness was fixed to stop emitting. Both failure classes
+    are exercised: the refusal (`DegenerateRunError`, exit 1) and the catch-all
+    (any other exception, re-raised).
+
+    Offline: the only thing stubbed is the chunk_id→stable_id lookup, which is
+    the first thing on the eval path to touch the database, so nothing here
+    opens a connection or a socket.
+    """
+    original_fetch = runner.fetch_wikipedia_stable_id_map
+    original_argv = sys.argv
+    original_env = {k: os.environ.get(k) for k in _FAKE_ENV}
+    os.environ.update(_FAKE_ENV)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            summary_path = Path(tmp) / "summary.md"
+            out_path = Path(tmp) / "scale.json"
+            sys.argv = [
+                "runner", "--summary", str(summary_path), "--out", str(out_path),
+            ]
+
+            # An unseeded corpus is the canonical degenerate run: refused, exit
+            # 1, and the stale table is gone rather than merely untouched.
+            summary_path.write_text(_HEALTHY_TABLE, encoding="utf-8")
+
+            async def _empty_map(_url: str) -> dict[str, str]:
+                return {}
+
+            runner.fetch_wikipedia_stable_id_map = _empty_map
+            rc = await amain()
+            assert rc == 1, f"a degenerate run must exit non-zero; got {rc}"
+            written = summary_path.read_text(encoding="utf-8")
+            assert "DEGENERATE RUN" in written, written
+            assert "wikipedia_seed" in written, written
+            assert "1.000" not in written and "| Viewer |" not in written, written
+            assert not out_path.exists(), "a refused run must write no results JSON"
+
+            # Any other failure on the eval path - a rejected viewer JWT, an
+            # embedder outage - leaves the same stale table behind unless the
+            # catch-all arm fires. It must still re-raise so the traceback
+            # reaches the run log and the job stays red.
+            summary_path.write_text(_HEALTHY_TABLE, encoding="utf-8")
+
+            async def _boom(_url: str) -> dict[str, str]:
+                raise RuntimeError("connection refused")
+
+            runner.fetch_wikipedia_stable_id_map = _boom
+            try:
+                await amain()
+            except RuntimeError as e:
+                assert "connection refused" in str(e), str(e)
+            else:
+                raise AssertionError("a failed run must not be swallowed")
+            written = summary_path.read_text(encoding="utf-8")
+            assert "RUN FAILED" in written, written
+            assert "RuntimeError: connection refused" in written, written
+            assert "1.000" not in written and "| Viewer |" not in written, written
+            assert not out_path.exists(), "a failed run must write no results JSON"
+        print("  amain: neither a refusal nor a crash leaves the previous run's "
+              "table publishable")
+    finally:
+        runner.fetch_wikipedia_stable_id_map = original_fetch
+        sys.argv = original_argv
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _stub_embed(_client, texts):
@@ -278,6 +390,7 @@ async def main() -> None:
     _aggregate_checks()
     _degenerate_summary_checks()
     await _run_eval_checks()
+    await _no_stale_summary_checks()
     print("all degenerate-run guard checks passed")
 
 
