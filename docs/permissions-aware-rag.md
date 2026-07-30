@@ -423,6 +423,51 @@ the nightly will fail loudly. Today the floor is set at recall@5 ≥ 0.10
 for `(viewer_1pct, ef_search=40)`; with the planner choosing exact NN
 the actual is 1.000.
 
+**Two ways this nightly goes red, and they mean opposite things.** The
+first is the floor alarm above: a measured recall@5 dropped, which is
+the signal the eval exists to raise. The second is a *refusal* - the
+harness will not score a run that produced no signal. Gold here is not
+a fixture; it is this same sweep's `ef_search=500` cell, so a viewer
+that can see nothing yields an empty gold set and every cell would
+divide out to a well-formed, entirely meaningless 0.000. The runner
+raises `DegenerateRunError` the moment a gold cell comes back with
+nothing to score (also on an unseeded corpus, and on a viewer ×
+`ef_search` pair no question contributed to), exits non-zero, and
+publishes a **`DEGENERATE RUN`** notice - naming the viewer, question
+id and `ef_search` that went dark - in place of the table. Any other
+crash on the measurement path publishes a **`RUN FAILED`** notice. So
+triage a red nightly off the heading in the published `<DATE>.md`:
+only a real recall@5 table means the floor alarm fired. The refusal is
+deliberately scoped to the *gold* cell - a non-gold cell returning zero
+rows is a genuine measured recall collapse, exactly the phenomenon this
+section is about, and still scores a real 0.000. Both notices keep the
+`EVAL_SUMMARY` markers, and `<DATE>.md` / `<DATE>.json` always describe
+the same run: the runner writes both to scratch paths, a refused or
+failed run writes no JSON, and a job that dies before the eval ever
+runs publishes neither and disturbs nothing already committed for that
+date.
+
+**Reading the 2026-06-01 → 2026-07-30 nightlies: an outage, not a
+regression.** Both failure modes above are retrofits after that window
+published two months of misleading artifacts, and the committed
+snapshots still show it. From **2026-06-01 to 2026-06-18** the workflow
+published a `<DATE>.md` with *no* `<DATE>.json` beside it and an
+identical `47.93s wall` line every night: the eval produced no numbers
+on those nights, and the publish step re-copied the git-tracked
+`evals/permissions_scale/summary.md` (the last good table) as if it
+were that day's measurement. From **2026-06-19 onward** the eval did
+run, against a corpus its viewers could no longer see:
+`db_seed/wikipedia_seed.py` created its owner and
+three viewers *after* the `20260617120200` migration's backfill, so
+none of them got a `workspace_membership` row, and the US-003 clause is
+AND-ed under owner-OR-ACL rather than OR-ed into it - a principal with
+no membership row retrieves nothing, not even chunks granted to it
+explicitly in `chunk_acl`. Every cell scored 0.000 for six weeks while
+CI stayed green. Treat every artifact from that window as unmeasured.
+The seeder now joins its principals to the Default Workspace, and the
+harness refuses rather than reporting a number it did not measure; the
+durable rules are invariants 11 and 12 in `AGENTS.md`.
+
 ## 6. Out of scope (deliberate)
 
 The v0 cuts below were not skipped from forgetfulness. Each was
@@ -477,3 +522,16 @@ The embed script reads each `summary.md`, strips its outer
 `EVAL_SUMMARY` markers, and replaces the bracketed region in this doc.
 Adding a new embed target later means dropping a marker pair into the
 doc and one line into `EMBEDS` in `docs/_embed_eval_summaries.py`.
+
+Skip the seed and the scale runner refuses the run (`DegenerateRunError`,
+non-zero exit) rather than writing a table of zeros. On that path it
+leaves `evals/permissions_scale/summary.md` deliberately untouched -
+the file is git-tracked and holds the last good table, so a failed
+local run can never leave a `DEGENERATE RUN` notice staged for an
+accidental `git commit -a` and from there into this doc. Pass
+`--summary <scratch-path>` when you *want* the notice as an artifact;
+that is how the nightly publishes it (§5b). The refusal itself is
+pinned by `python -m evals.permissions_scale.test_degenerate_guard`,
+which runs fully offline - no database, no secrets, no network -
+deliberately, so it cannot pass merely because the local database
+happens to be unseeded.

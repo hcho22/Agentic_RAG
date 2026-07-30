@@ -55,8 +55,11 @@ shipped; the recall curve surfaces at the corpus size where exact NN
 over the filtered set becomes more expensive than HNSW + post-filter
 (tens to hundreds of thousands of visible chunks per query). The
 nightly workflow fails loudly if the configured recall floor is
-breached. See [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md)
-§5b for the full plan output.
+breached, and separately refuses to publish a table at all when the run
+produced no signal - a `DEGENERATE RUN` notice goes out in place of the
+numbers, so an unmeasured run can never read as a measured 0.000. See
+[`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md)
+§5b for the full plan output and both red-nightly paths.
 
 ## Why this is hard
 
@@ -116,6 +119,13 @@ python -m evals.retrieval.runner          # populates evals/retrieval/summary.md
 python -m evals.permissions_scale.runner  # populates evals/permissions_scale/summary.md (after wikipedia_seed)
 python -m docs._embed_eval_summaries      # injects into docs/permissions-aware-rag.md
 ```
+
+A scale run that measured nothing (unseeded corpus, a viewer that can
+see no chunks) exits non-zero and deliberately leaves the git-tracked
+`evals/permissions_scale/summary.md` untouched, so the embedded table
+is never replaced by a failure notice you could commit by accident.
+Pass `--summary <path>` to capture that notice as an artifact instead -
+that is what the nightly workflow does.
 
 ## Repository layout
 
@@ -352,7 +362,7 @@ The CI workflows wrap the eval runners:
 - **`.github/workflows/escalation-eval-weekly.yml`** — Sundays 06:00 UTC + manual `workflow_dispatch`. Runs the **full** E7 deflection sweep including the LLM-judged P2/P3 legs + the knob sweep; publishes to `docs/escalation-weekly/<DATE>.md` + `.json`. A measured false-resolve rate above the buyer's ceiling (the pinned safety number) fails the *scheduled* workflow and files an issue — it never blocks a merge (a judge wobble must not red-bar a PR; US-059).
 - **`.github/workflows/retrieval-eval-ragas-weekly.yml`** — Sundays 04:00 UTC + manual `workflow_dispatch`. Scores the four canonical RAGAS metrics weekly; publishes to `docs/ragas-weekly/<DATE>.md`; files an issue on a red gate finding.
 - **`.github/workflows/retrieval-eval-nightly.yml`** — daily 02:00 UTC. Publishes snapshots to `docs/nightly/<DATE>.md` + `.json`, plus a `hybrid+llm` reranker observability run to `docs/nightly/<DATE>-rerank-llm.json` (US-117) in an isolated `continue-on-error` step after the baseline publish, so a reranker failure never blocks the baseline snapshot. Reranker methodology + recommendation: `docs/reranker-bakeoff.md`.
-- **`.github/workflows/permissions-scale-eval.yml`** — daily 03:00 UTC + manual `workflow_dispatch`. Runs the Wikipedia 10k seed + ef_search sweep; publishes to `docs/permissions-scale-nightly/<DATE>.md`. **Fails the workflow if the configured recall floor is breached** — this is the regression alarm for the day the planner flips to HNSW for some workload.
+- **`.github/workflows/permissions-scale-eval.yml`** — daily 03:00 UTC + manual `workflow_dispatch`. Runs the Wikipedia 10k seed + ef_search sweep; publishes `docs/permissions-scale-nightly/<DATE>.md` + `.json` as a pair that always describes the *same* run (the runner writes both to scratch paths, so a job that dies before the eval publishes neither and leaves any earlier artifact for that date untouched). **Fails the workflow if the configured recall floor is breached** — this is the regression alarm for the day the planner flips to HNSW for some workload. It also fails, with a different meaning, when the run produced no signal to score: the published `<DATE>.md` then carries a `DEGENERATE RUN` heading (the harness refused to score, naming the viewer / question / `ef_search` that went dark) or a `RUN FAILED` heading (the measurement phase crashed), and no `.json`. Triage off the notice heading, not off a red job alone - only a real recall@5 table means the floor alarm fired. See [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md) §5b.
 
 To run the eval locally:
 
