@@ -160,10 +160,13 @@ jobs:
           RUNNER_EXIT: ${{ steps.e7.outputs.exit_code }}
         run: |
           EXIT_DESC="exited ${RUNNER_EXIT}"
+          LOG_HINT="the traceback is in the *Seed corpus + run full E7 sweep* step"
           if [ -z "${RUNNER_EXIT}" ]; then
             EXIT_DESC="never ran (the job failed before the run step)"
+            LOG_HINT="the *Seed corpus + run full E7 sweep* step never executed, so the failure is in an earlier step"
           fi
           echo "exit_desc=${EXIT_DESC}" >> "$GITHUB_OUTPUT"
+          echo "log_hint=${LOG_HINT}" >> "$GITHUB_OUTPUT"
           if [ -f /tmp/e7-weekly.json ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
@@ -204,6 +207,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUNNER_EXIT: ${{ steps.e7.outputs.exit_code }}
           EXIT_DESC: ${{ steps.snapshot.outputs.exit_desc }}
+          LOG_HINT: ${{ steps.snapshot.outputs.log_hint }}
           EVENT_NAME: ${{ github.event_name }}
           SNAPSHOT: ${{ steps.snapshot.outputs.present }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -224,7 +228,7 @@ jobs:
                   "" \
                   "Nothing was published to \`docs/escalation-weekly/\`. The per-PR deterministic P1a/P1b tripwire in \`retrieval-eval.yml\` is unaffected and still blocks merges." \
                   "" \
-                  "Run log (the traceback is in the *Seed corpus + run full E7 sweep* step): ${RUN_URL}" \
+                  "Run log (${LOG_HINT}): ${RUN_URL}" \
                   "" \
                   "This issue is deduped on the \`${HARNESS_LABEL}\` label and auto-closes as soon as a run produces a snapshot again.")"
               echo "filed harness-failure issue"
@@ -239,8 +243,15 @@ jobs:
           # Unlike the gate auto-close below this is NOT restricted to scheduled
           # runs - "did the harness produce a snapshot" is a fact about this run
           # alone, not a verdict a partial re-run could misrepresent.
+          #
+          # Both the label creation and the list are non-fatal: this branch runs
+          # on every MEASURED run, so a never-yet-created label or a transient gh
+          # blip here must not turn a fully-measured green run red - that is the
+          # exact miscaption this step exists to remove.
+          gh label create "${HARNESS_LABEL}" --color B60205 \
+            --description "E7 weekly harness died before producing a snapshot" --force || true
           for num in $(gh issue list --label "${HARNESS_LABEL}" --state open \
-            --json number --jq '.[].number'); do
+            --json number --jq '.[].number' || true); do
             gh issue close "${num}" \
               --comment "Auto-closed: the E7 weekly harness produced a snapshot again (${RUN_URL}), so the safety invariants are being measured."
             echo "auto-closed harness-failure issue #${num}"

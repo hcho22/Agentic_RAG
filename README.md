@@ -40,21 +40,31 @@ could in principle leak via timing or payload size).
 (15 multi-hop queries against a synthetic Wikipedia 10k-chunk corpus,
 gold = top-5 at the most exhaustive sweep):
 
-> **Last genuinely measured 2026-05-31.** This table is hard-coded, not
-> generated, and it did not track the nightly through two consecutive
-> outages of this benchmark. From 2026-06-01 the runner died before
-> rewriting its summary and the nightly republished the checked-in table
-> verbatim for 18 days; from 2026-06-19 to 2026-07-30 the eval viewers had
-> no `workspace_membership` row, so the tenant-isolation clause hid the
-> whole corpus from them and every cell was a real, measured **0.000** for
-> 42 days. The floor alarm fired the whole time - the nightly was red every
-> one of those nights - but this page kept showing the numbers below
-> regardless, which is the failure that mattered. The seeding defect and
-> the publish-a-zero path are both fixed (see the paragraph after the
-> table); the live output is
-> [`docs/permissions-scale-nightly/`](docs/permissions-scale-nightly/) and
-> that, not this table, is the number to trust until a green post-fix
-> nightly replaces it.
+> **These numbers were generated on 2026-05-14** (commit `393ffaf`, the
+> only commit `evals/permissions_scale/summary.md` has ever had, stamped
+> `47.93s wall`); 2026-05-31 is the last night a nightly independently
+> reproduced the same all-1.000 values, in its own separate run
+> (`56.95s wall`). This table is hand-transcribed, not generated, so it did
+> not track the nightly through two consecutive outages of this benchmark.
+> From 2026-06-01 the runner died before rewriting its summary and the
+> nightly republished the checked-in table verbatim for 18 days; from
+> 2026-06-19 to 2026-07-30 the eval viewers had no `workspace_membership`
+> row, so the tenant-isolation clause hid the whole corpus from them and
+> every cell was a real, measured **0.000** for 42 days. The floor alarm
+> fired the whole time - the nightly was red every one of those nights -
+> but this page kept showing the numbers below regardless, which is the
+> failure that mattered. The seeding defect and the publish-a-zero path are
+> both fixed (see the paragraph after the table), but nothing automated
+> refreshes *this* table: the nightly writes its summary to a scratch path
+> and commits only `docs/permissions-scale-nightly/`. Updating the numbers
+> here is a deliberate manual step - run
+> `python -m evals.permissions_scale.runner` and
+> `python -m docs._embed_eval_summaries` to regenerate the embedded table
+> in [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md), then
+> re-transcribe it here and commit. Until someone does that, the live
+> output in
+> [`docs/permissions-scale-nightly/`](docs/permissions-scale-nightly/) is
+> the number to trust, not this one.
 
 | Viewer | Visible chunks | Selectivity | ef_search=40 | ef_search=80 | ef_search=200 | ef_search=500 (gold) |
 |---|---|---|---|---|---|---|
