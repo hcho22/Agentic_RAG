@@ -24,11 +24,12 @@ Determinism stack:
   gives *exactly* K visible chunks per viewer, deterministic across
   runs, and statistically independent across viewers.
 
-Workspace: documents omit `workspace_id` and so land in the Default
-Workspace via the column DEFAULT (20260617120200). The owner and all three
-viewers are added to that workspace by `_ensure_workspace_membership` -
-without it the US-003 membership clause hides the whole corpus from every
-one of them and the scale eval silently measures nothing.
+Workspace: documents are stamped with DEFAULT_WORKSPACE_ID explicitly rather
+than left to the column DEFAULT that 20260617120200 documents as TRANSITIONAL,
+and the owner plus all three viewers are joined to that same constant by
+`_ensure_workspace_membership` - so both sides are provably the same value.
+Without the membership rows the US-003 clause hides the whole corpus from
+every one of them and the scale eval silently measures nothing.
 
 Idempotency: identifies prior wikipedia-seeded rows by
 `documents.user_id = WIKIPEDIA_USER_ID AND metadata->>'wikipedia_seed' =
@@ -269,9 +270,13 @@ async def _ensure_workspace_membership(
     """Add the wikipedia owner + every viewer to the Default Workspace (US-002).
 
     Default Workspace is the right workspace because `_insert_document` below
-    omits `workspace_id`, so every wikipedia document lands there via the column
-    DEFAULT set by 20260617120200_default_workspace_backfill.sql - and it is
-    `d.workspace_id` that the membership clause resolves against.
+    stamps that same DEFAULT_WORKSPACE_ID constant onto every wikipedia
+    document - and it is `d.workspace_id` that the membership clause resolves
+    against. Both sides name the constant explicitly rather than relying on the
+    column DEFAULT from 20260617120200_default_workspace_backfill.sql, which
+    that migration itself labels TRANSITIONAL: were it dropped or repointed,
+    coupling the two through it would land the documents in a workspace nobody
+    is joined to and silently reproduce the very blackout this helper fixes.
 
     Mirrors `db_seed.corpus_seed._ensure_workspace_membership` for this corpus,
     and for the same reason: 20260617120200's auth.users backfill only captures
@@ -330,14 +335,15 @@ async def _insert_document(
     await conn.execute(
         """
         insert into public.documents (
-            id, user_id, filename, storage_path, byte_size,
+            id, user_id, workspace_id, filename, storage_path, byte_size,
             content_type, status, chunks_count, metadata
         ) values (
-            $1, $2, $3, $4, $5, 'text/plain', 'ready', $6, $7::jsonb
+            $1, $2, $3, $4, $5, $6, 'text/plain', 'ready', $7, $8::jsonb
         )
         """,
         document_id,
         WIKIPEDIA_USER_ID,
+        DEFAULT_WORKSPACE_ID,
         f"wikipedia-{doc_idx:04d}.txt",
         f"wikipedia-seed/wikipedia-{doc_idx:04d}.txt",
         byte_size,

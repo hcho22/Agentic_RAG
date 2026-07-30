@@ -208,6 +208,8 @@ def _assert_cell_has_signal(
     ef: int,
     n_returned: int,
     mapped_stable_ids: list[str],
+    *,
+    is_gold_cell: bool,
 ) -> None:
     """Refuse a retrieval cell that came back with nothing to score.
 
@@ -216,20 +218,35 @@ def _assert_cell_has_signal(
     never reaches `recall_at_k` cannot route around the guard.
 
     Two distinct no-signal cases, kept distinct in the message because they have
-    different causes: the RPC returned no rows at all (the viewer is blind -
-    missing chunk_acl grants, or missing workspace_membership), versus it
+    different causes: the gold cell returned no rows at all (the viewer is blind
+    - missing chunk_acl grants, or missing workspace_membership), versus a cell
     returned rows that all fell outside the wikipedia corpus (a stale/foreign
     stable_id map, so the top-k we would score is not the top-k the viewer got).
+
+    The zero-rows refusal is scoped to the GOLD cell (`ef_search_for_gold`)
+    deliberately. Gold is built from that one cell, so gold going dark is what
+    makes the metric unscoreable; a NON-gold cell coming back empty is instead a
+    measured HNSW recall collapse - a low-ef graph walk finding no visible
+    candidate inside a sparse ACL set - which is the very phenomenon this eval
+    exists to observe, and must score a real 0.000 rather than abort the sweep.
+    This still closes the incident class the guard was written for: a
+    permissions/membership bug blinds EVERY cell including gold, so gold refuses
+    and the run fails loudly. Note this is forward-compatibility only today -
+    match_chunks' `distinct on (c.id) ... order by c.id` subquery prevents HNSW
+    ordering, so the scan is exact and `ef_search` is currently inert, making
+    the two behaviours identical on the present schema.
     """
     where = f"viewer={viewer_name} question={qid} ef_search={ef}"
     if n_returned == 0:
+        if not is_gold_cell:
+            return
         raise DegenerateRunError(
-            f"match_chunks returned 0 rows for {where} - the viewer can see "
-            f"nothing, so there is no signal to score. Check that the viewer has "
-            f"chunk_acl grants AND a public.workspace_membership row for the "
-            f"wikipedia documents' workspace (the US-003 membership clause is "
-            f"AND-ed with the owner-OR-ACL predicate, so a missing membership row "
-            f"hides even explicitly granted chunks); reseed with "
+            f"match_chunks returned 0 rows for the gold cell {where} - the "
+            f"viewer can see nothing, so there is no signal to score. Check that "
+            f"the viewer has chunk_acl grants AND a public.workspace_membership "
+            f"row for the wikipedia documents' workspace (the US-003 membership "
+            f"clause is AND-ed with the owner-OR-ACL predicate, so a missing "
+            f"membership row hides even explicitly granted chunks); reseed with "
             f"`python -m db_seed.wikipedia_seed`."
         )
     if not mapped_stable_ids:
@@ -315,7 +332,10 @@ async def run_eval(
                 # Refuse the cell here - the earliest point the degeneracy is
                 # knowable, and before gold exists - so no caller can reach the
                 # scoring chain with a no-signal cell.
-                _assert_cell_has_signal(vname, qid, int(ef), len(rows), top_stable_ids)
+                _assert_cell_has_signal(
+                    vname, qid, int(ef), len(rows), top_stable_ids,
+                    is_gold_cell=int(ef) == ef_gold,
+                )
                 per_ef[str(ef)] = {
                     "top_stable_ids": top_stable_ids,
                     "n_returned": len(rows),
@@ -349,11 +369,12 @@ def aggregate(
 
     Raises `DegenerateRunError` on a (viewer × ef_search) pair that no question
     contributed to. The old `if n > 0` skipped such a pair, leaving the cell to
-    render as `render_summary`'s dash placeholder and the recall floor to
-    report a vague "cell missing" - the
+    render as a dash and the recall floor to report a vague "cell missing" - the
     same class of quiet degradation as scoring an empty gold set. There is no
     legitimate reason for a configured viewer to have zero measured questions,
-    so it is a failure, not a gap in the table.
+    so it is a failure, not a gap in the table. Because this raises, every
+    configured cell is populated by construction, which is why `render_summary`
+    indexes the aggregate directly instead of carrying a placeholder branch.
     """
     ef_values = [str(e) for e in cfg["ef_search_values"]]
     by_viewer_ef: dict[str, dict[str, float]] = {}
@@ -421,12 +442,49 @@ def render_summary(
         sel = visible / total_chunks * 100
         row = [f"| {vname} | {visible:,} | {sel:.1f}% |"]
         for ef in ef_values:
-            v = by_viewer.get(vname, {}).get(ef)
-            row.append(f" {v:.3f} |" if v is not None else " — |")
+            # `aggregate` raises rather than skipping a cell, so every
+            # configured viewer × ef_search pair is populated by construction.
+            row.append(f" {by_viewer[vname][ef]:.3f} |")
         lines.append("".join(row))
 
     lines += ["", "<!-- END EVAL_SUMMARY -->", ""]
     return "\n".join(lines)
+
+
+def render_degenerate_summary(exc: DegenerateRunError, started_at: str) -> str:
+    """The summary written IN PLACE OF the table when the run measured nothing.
+
+    `summary.md` is a git-tracked file that normally holds the last good table,
+    and the nightly's publish step is `if: always()` and keyed on the file
+    *existing* rather than on it being fresh. So a run that aborts without
+    rewriting this file publishes yesterday's healthy numbers as today's
+    nightly - strictly harder to spot than the 0.000 the guard replaced. The
+    notice therefore has to overwrite the table rather than merely be absent.
+
+    It keeps the same `<!-- BEGIN/END EVAL_SUMMARY -->` markers because
+    `docs/_embed_eval_summaries.py` keys off exactly that pair; dropping them
+    would break the embed into `docs/permissions-aware-rag.md` instead of
+    propagating the failure into it. The `DegenerateRunError` message is carried
+    verbatim so the published nightly names the viewer, question id and
+    ef_search that went dark, without anyone needing the CI log.
+    """
+    return "\n".join([
+        "<!-- BEGIN EVAL_SUMMARY -->",
+        "",
+        "### Permissions scale: DEGENERATE RUN - no numbers published",
+        "",
+        f"_Run started {started_at}. The harness refused to score this run: it "
+        f"produced no signal, so there is no recall@5 table. The numbers below "
+        f"are absent, not zero - see the invariant in `AGENTS.md` on refusing to "
+        f"score a run that produced no signal._",
+        "",
+        "```",
+        str(exc),
+        "```",
+        "",
+        "<!-- END EVAL_SUMMARY -->",
+        "",
+    ])
 
 
 def check_recall_floor(
@@ -515,13 +573,27 @@ async def amain() -> int:
     started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     started = time.perf_counter()
 
-    async with httpx.AsyncClient(timeout=60.0) as http:
-        per_question = await run_eval(
-            questions, cfg, viewer_headers, stable_id_map,
-            openai_client, http, supabase_url,
+    # A degenerate run must leave no publishable table behind. The nightly
+    # copies `summary.md` unconditionally (`if: always()`, keyed on the file
+    # existing), so aborting without touching it would republish the previous
+    # run's healthy numbers as today's result. Overwrite it with the notice,
+    # write NO results JSON, and still exit non-zero.
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as http:
+            per_question = await run_eval(
+                questions, cfg, viewer_headers, stable_id_map,
+                openai_client, http, supabase_url,
+            )
+        aggregates = aggregate(per_question, cfg)
+    except DegenerateRunError as exc:
+        args.summary.parent.mkdir(parents=True, exist_ok=True)
+        args.summary.write_text(
+            render_degenerate_summary(exc, started_at), encoding="utf-8"
         )
+        log.error("permissions_scale: degenerate run, refusing to score - %s", exc)
+        print(f"permissions_scale eval REFUSED: {exc}")
+        return 1
 
-    aggregates = aggregate(per_question, cfg)
     elapsed_s = round(time.perf_counter() - started, 2)
 
     results = {
@@ -569,10 +641,9 @@ async def amain() -> int:
     )
     for viewer in cfg["viewers"]:
         vname = viewer["name"]
-        cells = aggregates["recall_at_5_by_viewer_ef"].get(vname, {})
+        cells = aggregates["recall_at_5_by_viewer_ef"][vname]
         cell_str = " ".join(
             f"ef={ef}:{cells[str(ef)]:.3f}" for ef in cfg["ef_search_values"]
-            if str(ef) in cells
         )
         print(f"  {vname}: {cell_str}")
 
