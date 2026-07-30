@@ -74,6 +74,37 @@ class ZeroResolveError(RuntimeError):
         )
 
 
+class EmptyGoldError(RuntimeError):
+    """A metric was asked to score against an EMPTY gold set. Refuses to return 0.0.
+
+    Recall / nDCG over an empty gold set has no defined value, and the historical
+    `return 0.0` in the scorers published one anyway - so "we measured nothing"
+    reached the gate wearing the exact shape of "we retrieved the wrong things".
+    Those two must never collapse into the same reportable number: a golden-set
+    authoring error then scores as a retrieval regression, drags the gated E4/E6
+    mean down, and is indistinguishable from the real thing in the summary table.
+
+    `ZeroResolveError` above already fails the run when a single *anchor* matches
+    no chunk. This is the same refusal one layer down, covering every other route
+    by which a gold set can arrive empty at a scorer: a question that resolved to
+    nothing, a Workspace-B copy that never received a question's gold chunks (E6),
+    or any caller that hand-builds a gold set and filters it down to nothing.
+
+    Callers pass a `context` naming the cell (question / mode / viewer / filter)
+    so the refusal is diagnosable from the CI log alone, without a re-run.
+    """
+
+    def __init__(self, context: str, remedy: str = "") -> None:
+        self.context = context
+        self.remedy = remedy
+        tail = f" {remedy}" if remedy else ""
+        super().__init__(
+            f"empty gold set for {context} - there is nothing to score, so no "
+            f"number is reportable. Refusing to report 0.000 for a cell that "
+            f"measured nothing.{tail}"
+        )
+
+
 def normalize_for_match(text: str) -> str:
     """Collapse whitespace runs to a single space and strip the ends.
 

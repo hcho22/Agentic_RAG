@@ -82,6 +82,7 @@ from reranking import (  # noqa: E402
 
 from .content_anchors import (  # noqa: E402
     ContentAnchorResolver,
+    EmptyGoldError,
     fetch_chunk_contents,
     parse_gold_anchors,
 )
@@ -374,9 +375,24 @@ def resolve_gold_anchors(
     invisible past this point. A `ZeroResolveError` (an anchor matching no
     current chunk) propagates and fails the whole run — never a silent
     `recall=0`. A straddling anchor resolves to both overlapping chunks.
+
+    The emptiness check below is the earliest point at which an unscoreable
+    question is knowable — before a single query is issued, let alone scored.
+    `resolve_question` already guarantees a non-empty union today, so this is a
+    standing assertion on that contract rather than a live code path: it is what
+    stops a future resolver change (a filter step, a soft-fail branch) from
+    quietly handing empty gold to the scorers for them to render as 0.000.
     """
     resolver = ContentAnchorResolver(chunk_contents)
     resolver.resolve_all(questions)
+    unscoreable = [
+        str(q.get("id", "<no id>")) for q in questions if not q["gold_stable_ids"]
+    ]
+    if unscoreable:
+        raise EmptyGoldError(
+            f"question(s) {', '.join(unscoreable)} after anchor resolution",
+            GOLD_REMEDY,
+        )
     total_gold = sum(len(q["gold_stable_ids"]) for q in questions)
     log.info(
         "US-107: resolved content anchors for %d questions -> %d gold stable_ids",
@@ -548,26 +564,55 @@ async def reset_viewer_acls(
 # ---------------------------------------------------------------------------
 
 
-def recall_at_k(gold: set[str], retrieved: list[str], k: int) -> float:
-    """Per-chunk partial-credit recall: `|gold ∩ top_k| / |gold|`."""
+# Appended to every `EmptyGoldError` these scorers raise. Gold here is authored
+# (content anchors in `retrieval_gold.yaml`), not derived from the run, so the
+# remedy is a golden-set fix rather than a reseed.
+GOLD_REMEDY = (
+    "Gold is authored as content anchors in the golden set and resolved at eval "
+    "time; an empty gold set is a golden-set defect (an anchor list that resolved "
+    "to nothing, or a question filtered down to nothing), not a retrieval result. "
+    "Fix the anchors - see docs/golden-set-authoring.md."
+)
+
+
+def recall_at_k(
+    gold: set[str], retrieved: list[str], k: int, *, context: str = ""
+) -> float:
+    """Per-chunk partial-credit recall: `|gold ∩ top_k| / |gold|`.
+
+    Raises `EmptyGoldError` rather than scoring an empty gold set. This branch
+    used to `return 0.0`, which is the defect the guard closes: it turned "this
+    question has no gold to measure against" into a reportable retrieval number
+    that lands in the gated E4/E6 mean looking exactly like a real regression.
+    """
     if not gold:
-        return 0.0
+        raise EmptyGoldError(context or "recall_at_k", GOLD_REMEDY)
     top_k = set(retrieved[:k])
     return len(gold & top_k) / len(gold)
 
 
-def mrr(gold: set[str], retrieved: list[str]) -> float:
-    """1 / rank of first correct chunk in top-10; 0 if none."""
+def mrr(gold: set[str], retrieved: list[str], *, context: str = "") -> float:
+    """1 / rank of first correct chunk in top-10; 0 if none.
+
+    The trailing `return 0.0` is a real measurement - gold exists and nothing in
+    the ranking hit it. The empty-gold guard above is what keeps that meaningful:
+    without it the same 0.0 also stood for "there was no gold to hit".
+    """
+    if not gold:
+        raise EmptyGoldError(context or "mrr", GOLD_REMEDY)
     for i, sid in enumerate(retrieved, start=1):
         if sid in gold:
             return 1.0 / i
     return 0.0
 
 
-def ndcg_at_5(gold: set[str], retrieved: list[str]) -> float:
-    """Binary-relevance nDCG@5 with log2(i+1) position discount."""
+def ndcg_at_5(gold: set[str], retrieved: list[str], *, context: str = "") -> float:
+    """Binary-relevance nDCG@5 with log2(i+1) position discount.
+
+    Raises on an empty gold set for the same reason as `recall_at_k`.
+    """
     if not gold:
-        return 0.0
+        raise EmptyGoldError(context or "ndcg_at_5", GOLD_REMEDY)
     dcg = 0.0
     for i, sid in enumerate(retrieved[:5], start=1):
         if sid in gold:
@@ -762,15 +807,28 @@ def _metrics_block(
     gold: set[str],
     retrieved_stable_ids: list[str],
     unknown: int,
+    *,
+    context: str,
 ) -> dict[str, Any]:
-    """Build the canonical metrics dict for one (question × mode × viewer × filter)."""
+    """Build the canonical metrics dict for one (question × mode × viewer × filter).
+
+    Guards the empty-gold case here as well as inside each scorer: this is the
+    point at which the cell being scored is fully identified, so it is where the
+    refusal can name the question, mode, viewer and filter that went dark. The
+    per-scorer guards remain so a caller reaching them directly cannot route
+    around it.
+    """
+    if not gold:
+        raise EmptyGoldError(context, GOLD_REMEDY)
     block: dict[str, Any] = {
         "top_10_stable_ids": retrieved_stable_ids,
-        "mrr": mrr(gold, retrieved_stable_ids),
-        "ndcg_at_5": ndcg_at_5(gold, retrieved_stable_ids),
+        "mrr": mrr(gold, retrieved_stable_ids, context=context),
+        "ndcg_at_5": ndcg_at_5(gold, retrieved_stable_ids, context=context),
     }
     for k in RECALL_KS:
-        block[f"recall_at_{k}"] = recall_at_k(gold, retrieved_stable_ids, k)
+        block[f"recall_at_{k}"] = recall_at_k(
+            gold, retrieved_stable_ids, k, context=context
+        )
     if unknown:
         block["unknown_chunks"] = unknown
     return block
@@ -927,7 +985,11 @@ async def run_eval(
                 post_ids, _post_chunks, post_unknown = _project_to_corpus(
                     owner_results, stable_id_map, viewer_set
                 )
-                post_block = _metrics_block(gold, post_ids, post_unknown)
+                cell = f"question={qid} mode={mode} viewer={viewer}"
+                post_block = _metrics_block(
+                    gold, post_ids, post_unknown,
+                    context=f"{cell} filter=post_filter",
+                )
 
                 # Pre-filter: query as the viewer themselves. For
                 # full_access we re-use the owner ranking — same JWT.
@@ -946,7 +1008,10 @@ async def run_eval(
                 pre_ids, pre_corpus_chunks, pre_unknown = _project_to_corpus(
                     pre_results, stable_id_map, None
                 )
-                pre_block = _metrics_block(gold, pre_ids, pre_unknown)
+                pre_block = _metrics_block(
+                    gold, pre_ids, pre_unknown,
+                    context=f"{cell} filter=pre_filter",
+                )
 
                 # Generation + judge runs only on the canonical cell so
                 # the cost stays at the US-036 budget regardless of how

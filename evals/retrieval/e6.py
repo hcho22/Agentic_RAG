@@ -59,6 +59,8 @@ import httpx
 import openai
 from openai import AsyncOpenAI
 
+from .content_anchors import EmptyGoldError
+
 log = logging.getLogger("agentic_rag.evals.retrieval.e6")
 
 # E6 makes ~300 live calls (3 modes x 50 questions x 2 passes), each embedding a
@@ -176,12 +178,58 @@ def b_chunk_uuid(stable_id: str) -> uuid.UUID:
     return uuid.uuid5(uuid.NAMESPACE_URL, f"{_B_DOC_PREFIX}/{stable_id}")
 
 
-def recall_at_10(gold_ids: set[str], retrieved_ids: list[str]) -> float:
-    """Per-chunk partial-credit recall@10 over chunk-UUID strings."""
+# Appended to every `EmptyGoldError` raised on this path. Unlike E4's authored
+# anchors, E6's gold is DERIVED from the run itself - `seed_workspace_b` copies
+# the gold-bearing corpus into Workspace B - so the remedy is a reseed, not a
+# golden-set edit.
+B_GOLD_REMEDY = (
+    "E6's gold is derived from this run: `seed_workspace_b` copies the "
+    "gold-bearing corpus into Workspace B and the negative assertion scores "
+    "against that copy. An empty set means the copy never received this "
+    "question's gold chunks, so the row proves nothing about the boundary. "
+    "Re-run `python -m db_seed.corpus_seed` and check `seed_workspace_b`."
+)
+
+
+def recall_at_10(
+    gold_ids: set[str], retrieved_ids: list[str], *, context: str = ""
+) -> float:
+    """Per-chunk partial-credit recall@10 over chunk-UUID strings.
+
+    Raises `EmptyGoldError` rather than scoring an empty gold set. The old
+    `return 0.0` was the most dangerous instance of that pattern in the repo:
+    E6's negative assertion is literally `recall@10 == 0.0` against B's gold, so
+    an empty B-gold set scored a PASS on a tenant-isolation invariant that the
+    run never actually exercised. The existing `positive_control_ok` catches the
+    case where EVERY question's B-gold is empty; this catches the per-question
+    case, where a few blind rows hide inside an otherwise-healthy positive
+    control.
+    """
     if not gold_ids:
-        return 0.0
+        raise EmptyGoldError(context or "recall_at_10", B_GOLD_REMEDY)
     top = set(retrieved_ids[:TOP_K])
     return len(gold_ids & top) / len(gold_ids)
+
+
+def b_gold_for(
+    question: dict[str, Any], stable_to_b_chunk: dict[str, uuid.UUID]
+) -> set[str]:
+    """The Workspace-B copies of one question's gold chunks. Never empty.
+
+    Every one of E6's four scoring loops needs this same projection, and every
+    one of them is unscoreable if it comes back empty - so the refusal lives
+    here, once, naming the question, rather than in each caller.
+    """
+    gold = question["gold_stable_ids"]
+    b_gold = {str(stable_to_b_chunk[s]) for s in gold if s in stable_to_b_chunk}
+    if not b_gold:
+        qid = question.get("id", "<no id>")
+        raise EmptyGoldError(
+            f"question={qid} in Workspace B (none of its {len(gold)} gold "
+            f"chunk(s) were copied)",
+            B_GOLD_REMEDY,
+        )
+    return b_gold
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +557,13 @@ async def run_e6(
 
         all_b_chunk_ids = {str(cid) for cid in stable_to_b_chunk.values()}
 
+        # Pre-flight: every question must have a scoreable B-gold set BEFORE any
+        # query runs. `b_gold_for` would refuse mid-loop anyway, but only after
+        # burning the queries for the questions ahead of the blind one - and the
+        # blindness is fully knowable here, the moment the B copy exists.
+        for q in questions:
+            b_gold_for(q, stable_to_b_chunk)
+
         # ---- Negative pass: viewer is NOT a member of B -------------------
         await _retry_transient(
             lambda: set_viewer_in_workspace_b(conn, member=False),
@@ -520,10 +575,19 @@ async def run_e6(
         for q in questions:
             qid = q["id"]
             gold = q["gold_stable_ids"]
-            b_gold = {str(stable_to_b_chunk[s]) for s in gold if s in stable_to_b_chunk}
+            b_gold = b_gold_for(q, stable_to_b_chunk)
             a_gold_ids = {
                 sid_to_a_chunk[s] for s in gold if s in sid_to_a_chunk
             }
+            if not a_gold_ids:
+                raise EmptyGoldError(
+                    f"question={qid} in Workspace A (none of its {len(gold)} "
+                    f"gold chunk(s) resolved to a corpus chunk)",
+                    "This is the A-side sanity metric that proves the viewer can "
+                    "retrieve what it legitimately owns; an empty set makes the "
+                    "whole negative pass unfalsifiable. Reseed with "
+                    "`python -m db_seed.corpus_seed`.",
+                )
             for mode in modes:
                 rows = await _retry_transient(
                     functools.partial(
@@ -534,8 +598,13 @@ async def run_e6(
                 )
                 retrieved = [r.id for r in rows]
                 neg_pre_rankings[(qid, mode)] = retrieved
-                neg_pre[mode].append(recall_at_10(b_gold, retrieved))
-                a_gold[mode].append(recall_at_10(a_gold_ids, retrieved))
+                cell = f"question={qid} mode={mode} pass=negative"
+                neg_pre[mode].append(
+                    recall_at_10(b_gold, retrieved, context=f"{cell} gold=workspace_b")
+                )
+                a_gold[mode].append(
+                    recall_at_10(a_gold_ids, retrieved, context=f"{cell} gold=workspace_a")
+                )
 
         # ---- Positive control: same viewer ADDED to B --------------------
         await _retry_transient(
@@ -546,8 +615,7 @@ async def run_e6(
         pos_rankings: dict[tuple[str, str], list[str]] = {}
         for q in questions:
             qid = q["id"]
-            gold = q["gold_stable_ids"]
-            b_gold = {str(stable_to_b_chunk[s]) for s in gold if s in stable_to_b_chunk}
+            b_gold = b_gold_for(q, stable_to_b_chunk)
             for mode in modes:
                 rows = await _retry_transient(
                     functools.partial(
@@ -558,7 +626,12 @@ async def run_e6(
                 )
                 retrieved = [r.id for r in rows]
                 pos_rankings[(qid, mode)] = retrieved
-                pos[mode].append(recall_at_10(b_gold, retrieved))
+                pos[mode].append(
+                    recall_at_10(
+                        b_gold, retrieved,
+                        context=f"question={qid} mode={mode} pass=positive_control",
+                    )
+                )
     finally:
         # Always restore the no-member state so a future run's negative pass is
         # honest, then drop the connection. A cleanup failure (e.g. the conn
@@ -588,10 +661,12 @@ async def run_e6(
     # pre_filter leaks: the SQL boundary failed for any row with recall > 0.
     for q in questions:
         qid = q["id"]
-        gold = q["gold_stable_ids"]
-        b_gold = {str(stable_to_b_chunk[s]) for s in gold if s in stable_to_b_chunk}
+        b_gold = b_gold_for(q, stable_to_b_chunk)
         for mode in modes:
-            r = recall_at_10(b_gold, neg_pre_rankings[(qid, mode)])
+            r = recall_at_10(
+                b_gold, neg_pre_rankings[(qid, mode)],
+                context=f"question={qid} mode={mode} filter=pre_filter gold=workspace_b",
+            )
             if r > 0.0:
                 leaking_rows.append(
                     {"question_id": qid, "mode": mode, "filter": "pre_filter",
@@ -605,11 +680,13 @@ async def run_e6(
     post_fracs: dict[str, list[float]] = {m: [] for m in modes}
     for q in questions:
         qid = q["id"]
-        gold = q["gold_stable_ids"]
-        b_gold = {str(stable_to_b_chunk[s]) for s in gold if s in stable_to_b_chunk}
+        b_gold = b_gold_for(q, stable_to_b_chunk)
         for mode in modes:
             kept = [cid for cid in pos_rankings[(qid, mode)] if cid not in all_b_chunk_ids]
-            r = recall_at_10(b_gold, kept)
+            r = recall_at_10(
+                b_gold, kept,
+                context=f"question={qid} mode={mode} filter=post_filter gold=workspace_b",
+            )
             post_fracs[mode].append(1.0 if r == 0.0 else 0.0)
             if r > 0.0:
                 leaking_rows.append(
