@@ -42,7 +42,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from evals.retrieval.content_anchors import EmptyGoldError  # noqa: E402
-from evals.retrieval.e6 import b_gold_for, recall_at_10  # noqa: E402
+from evals.retrieval.e6 import a_gold_for, b_gold_for, recall_at_10  # noqa: E402
 from evals.retrieval.runner import (  # noqa: E402
     _metrics_block,
     mrr,
@@ -98,10 +98,11 @@ def _scorer_checks() -> None:
     )
     # Every refusal points at the golden set, not at a reseed - gold here is
     # authored, so that is where the fix lives.
-    try:
-        recall_at_k(set(), [], 5, context=ctx)
-    except EmptyGoldError as e:
-        assert "golden-set defect" in str(e), str(e)
+    _expect_raises(
+        lambda: recall_at_k(set(), [], 5, context=ctx),
+        must_mention=["golden-set defect"],
+        what="recall_at_k(empty gold) remedy",
+    )
 
     # A real miss is NOT degenerate: gold exists, the ranking simply missed it.
     assert recall_at_k({"a", "b"}, ["c", "d"], 5) == 0.0
@@ -178,10 +179,11 @@ def _e6_checks() -> None:
     )
     # E6's gold is derived from the run (the Workspace-B copy), so unlike E4 the
     # remedy it names is a reseed.
-    try:
-        recall_at_10(set(), [])
-    except EmptyGoldError as e:
-        assert "seed_workspace_b" in str(e), str(e)
+    _expect_raises(
+        lambda: recall_at_10(set(), []),
+        must_mention=["seed_workspace_b"],
+        what="recall_at_10(empty B-gold) remedy",
+    )
 
     # b_gold_for: the projection every E6 loop shares. Refuses by question id.
     import uuid
@@ -195,6 +197,19 @@ def _e6_checks() -> None:
         ),
         must_mention=["q99", "Workspace B"],
         what="b_gold_for(question absent from the B copy)",
+    )
+
+    # a_gold_for: the A-side sibling. Both projections are resolved in the same
+    # pre-flight, so neither side can burn a query before its blindness is known.
+    a_map = {"refund-policy:0": "a-chunk-1"}
+    ok_a = a_gold_for({"id": "q01", "gold_stable_ids": ["refund-policy:0"]}, a_map)
+    assert ok_a == {"a-chunk-1"}, ok_a
+    _expect_raises(
+        lambda: a_gold_for(
+            {"id": "q98", "gold_stable_ids": ["loyalty-tiers:2"]}, a_map
+        ),
+        must_mention=["q98", "Workspace A", "corpus_seed"],
+        what="a_gold_for(question absent from the corpus)",
     )
 
     # The load-bearing half: a REAL zero - B-gold exists and none of it was

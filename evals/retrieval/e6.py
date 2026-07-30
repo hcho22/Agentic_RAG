@@ -232,6 +232,30 @@ def b_gold_for(
     return b_gold
 
 
+def a_gold_for(
+    question: dict[str, Any], sid_to_a_chunk: dict[str, str]
+) -> set[str]:
+    """The Workspace-A copies of one question's gold chunks. Never empty.
+
+    The A-side sibling of `b_gold_for`, and unscoreable for the same reason: it
+    is the sanity metric proving the viewer can retrieve what it legitimately
+    owns, so an empty set makes the whole negative pass unfalsifiable.
+    """
+    gold = question["gold_stable_ids"]
+    a_gold = {sid_to_a_chunk[s] for s in gold if s in sid_to_a_chunk}
+    if not a_gold:
+        qid = question.get("id", "<no id>")
+        raise EmptyGoldError(
+            f"question={qid} in Workspace A (none of its {len(gold)} gold "
+            f"chunk(s) resolved to a corpus chunk)",
+            "This is the A-side sanity metric that proves the viewer can "
+            "retrieve what it legitimately owns; an empty set makes the whole "
+            "negative pass unfalsifiable. Reseed with "
+            "`python -m db_seed.corpus_seed`.",
+        )
+    return a_gold
+
+
 # ---------------------------------------------------------------------------
 # DB fixtures (idempotent; service-role asyncpg connection bypasses RLS)
 # ---------------------------------------------------------------------------
@@ -557,12 +581,14 @@ async def run_e6(
 
         all_b_chunk_ids = {str(cid) for cid in stable_to_b_chunk.values()}
 
-        # Pre-flight: every question must have a scoreable B-gold set BEFORE any
-        # query runs. `b_gold_for` would refuse mid-loop anyway, but only after
-        # burning the queries for the questions ahead of the blind one - and the
-        # blindness is fully knowable here, the moment the B copy exists.
-        for q in questions:
-            b_gold_for(q, stable_to_b_chunk)
+        # Pre-flight: every question must have a scoreable gold set on BOTH
+        # sides before any query runs. Either projection would refuse mid-loop
+        # anyway, but only after burning the queries for the questions ahead of
+        # the blind one - and both are fully knowable here, the moment the B
+        # copy exists. Resolving them once also makes this the single place a
+        # refusal can originate; the four scoring loops below only index.
+        b_gold_by_qid = {q["id"]: b_gold_for(q, stable_to_b_chunk) for q in questions}
+        a_gold_by_qid = {q["id"]: a_gold_for(q, sid_to_a_chunk) for q in questions}
 
         # ---- Negative pass: viewer is NOT a member of B -------------------
         await _retry_transient(
@@ -574,20 +600,8 @@ async def run_e6(
         neg_pre_rankings: dict[tuple[str, str], list[str]] = {}
         for q in questions:
             qid = q["id"]
-            gold = q["gold_stable_ids"]
-            b_gold = b_gold_for(q, stable_to_b_chunk)
-            a_gold_ids = {
-                sid_to_a_chunk[s] for s in gold if s in sid_to_a_chunk
-            }
-            if not a_gold_ids:
-                raise EmptyGoldError(
-                    f"question={qid} in Workspace A (none of its {len(gold)} "
-                    f"gold chunk(s) resolved to a corpus chunk)",
-                    "This is the A-side sanity metric that proves the viewer can "
-                    "retrieve what it legitimately owns; an empty set makes the "
-                    "whole negative pass unfalsifiable. Reseed with "
-                    "`python -m db_seed.corpus_seed`.",
-                )
+            b_gold = b_gold_by_qid[qid]
+            a_gold_ids = a_gold_by_qid[qid]
             for mode in modes:
                 rows = await _retry_transient(
                     functools.partial(
@@ -615,7 +629,7 @@ async def run_e6(
         pos_rankings: dict[tuple[str, str], list[str]] = {}
         for q in questions:
             qid = q["id"]
-            b_gold = b_gold_for(q, stable_to_b_chunk)
+            b_gold = b_gold_by_qid[qid]
             for mode in modes:
                 rows = await _retry_transient(
                     functools.partial(
@@ -661,7 +675,7 @@ async def run_e6(
     # pre_filter leaks: the SQL boundary failed for any row with recall > 0.
     for q in questions:
         qid = q["id"]
-        b_gold = b_gold_for(q, stable_to_b_chunk)
+        b_gold = b_gold_by_qid[qid]
         for mode in modes:
             r = recall_at_10(
                 b_gold, neg_pre_rankings[(qid, mode)],
@@ -680,7 +694,7 @@ async def run_e6(
     post_fracs: dict[str, list[float]] = {m: [] for m in modes}
     for q in questions:
         qid = q["id"]
-        b_gold = b_gold_for(q, stable_to_b_chunk)
+        b_gold = b_gold_by_qid[qid]
         for mode in modes:
             kept = [cid for cid in pos_rankings[(qid, mode)] if cid not in all_b_chunk_ids]
             r = recall_at_10(

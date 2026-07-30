@@ -154,13 +154,21 @@ jobs:
         id: snapshot
         if: always()
         env:
+          # Unset when the job died BEFORE the runner step (supabase start, pip
+          # install, the timeout kill). Naming that as its own phrase keeps the
+          # annotation from blaming the runner for a failure it never reached.
           RUNNER_EXIT: ${{ steps.e7.outputs.exit_code }}
         run: |
+          EXIT_DESC="exited ${RUNNER_EXIT}"
+          if [ -z "${RUNNER_EXIT}" ]; then
+            EXIT_DESC="never ran (the job failed before the run step)"
+          fi
+          echo "exit_desc=${EXIT_DESC}" >> "$GITHUB_OUTPUT"
           if [ -f /tmp/e7-weekly.json ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::error title=E7 weekly UNMEASURED::The runner exited ${RUNNER_EXIT} without writing a snapshot, so no pinned safety invariant was evaluated this week. This is not a gate finding; nothing was measured."
+            echo "::error title=E7 weekly UNMEASURED::The runner ${EXIT_DESC} without writing a snapshot, so no pinned safety invariant was evaluated this week. This is not a gate finding; nothing was measured."
           fi
 
       - name: Publish to docs/escalation-weekly/
@@ -195,6 +203,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUNNER_EXIT: ${{ steps.e7.outputs.exit_code }}
+          EXIT_DESC: ${{ steps.snapshot.outputs.exit_desc }}
           EVENT_NAME: ${{ github.event_name }}
           SNAPSHOT: ${{ steps.snapshot.outputs.present }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -209,7 +218,7 @@ jobs:
               gh issue create --label "${HARNESS_LABEL}" \
                 --title "E7 weekly: no snapshot produced — the safety invariants are UNMEASURED" \
                 --body "$(printf '%s\n' \
-                  "The weekly E7 runner exited \`${RUNNER_EXIT}\` without writing \`/tmp/e7-weekly.json\`." \
+                  "The weekly E7 runner ${EXIT_DESC} without writing \`/tmp/e7-weekly.json\`." \
                   "" \
                   "**No pinned safety invariant was evaluated this week.** That includes the false-resolve ceiling (the Risk #3 buyer number), which is fed SOLELY by the P3 leg scored in this workflow - so it is not green, it is unknown, and it stays unknown until a run produces a snapshot." \
                   "" \
