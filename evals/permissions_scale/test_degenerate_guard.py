@@ -267,7 +267,7 @@ async def _no_stale_summary_checks() -> None:
             # 1, and the stale table is gone rather than merely untouched.
             summary_path.write_text(_HEALTHY_TABLE, encoding="utf-8")
 
-            async def _empty_map(_url: str) -> dict[str, str]:
+            async def _empty_map(database_url: str) -> dict[str, str]:
                 return {}
 
             runner.fetch_wikipedia_stable_id_map = _empty_map
@@ -285,7 +285,7 @@ async def _no_stale_summary_checks() -> None:
             # reaches the run log and the job stays red.
             summary_path.write_text(_HEALTHY_TABLE, encoding="utf-8")
 
-            async def _boom(_url: str) -> dict[str, str]:
+            async def _boom(database_url: str) -> dict[str, str]:
                 raise RuntimeError("connection refused")
 
             runner.fetch_wikipedia_stable_id_map = _boom
@@ -346,7 +346,7 @@ async def _default_summary_never_dirtied_checks() -> None:
             # No --summary, so args.summary falls back to DEFAULT_SUMMARY.
             sys.argv = ["runner", "--out", str(out_path)]
 
-            async def _empty_map(_url: str) -> dict[str, str]:
+            async def _empty_map(database_url: str) -> dict[str, str]:
                 return {}
 
             runner.fetch_wikipedia_stable_id_map = _empty_map
@@ -356,7 +356,7 @@ async def _default_summary_never_dirtied_checks() -> None:
                 "a refused run must not rewrite the git-tracked default summary"
             )
 
-            async def _boom(_url: str) -> dict[str, str]:
+            async def _boom(database_url: str) -> dict[str, str]:
                 raise RuntimeError("connection refused")
 
             runner.fetch_wikipedia_stable_id_map = _boom
@@ -452,7 +452,7 @@ async def _guard_boundary_checks() -> None:
             )
             rows = [{"id": f"id-{i}"} for i in range(5)]
 
-            async def _map(_url: str) -> dict[str, str]:
+            async def _map(database_url: str) -> dict[str, str]:
                 return {f"id-{i}": f"wikipedia-0000:{i:04d}" for i in range(5)}
 
             runner.fetch_wikipedia_stable_id_map = _map
@@ -502,6 +502,13 @@ def _make_stub_match_chunks(rows_per_call: list[dict[str, Any]]):
     return _stub
 
 
+# run_eval takes an AsyncOpenAI and an httpx.AsyncClient, but every call below
+# stubs out embed_texts and call_match_chunks - the only two things that touch
+# them - so a bare sentinel stands in for both. Typed Any so the offline test
+# still typechecks without importing either client library.
+STUB_CLIENT: Any = object()
+
+
 async def _run_eval_checks() -> None:
     """`run_eval` must refuse the degenerate run before scoring ever happens.
 
@@ -519,7 +526,8 @@ async def _run_eval_checks() -> None:
         runner.call_match_chunks = _make_stub_match_chunks([])
         try:
             await run_eval(
-                QUESTIONS, CFG, {"viewer_1pct": {}}, {}, object(), object(), "http://x",
+                QUESTIONS, CFG, {"viewer_1pct": {}}, {},
+                STUB_CLIENT, STUB_CLIENT, "http://x",
             )
         except DegenerateRunError as e:
             assert "viewer=viewer_1pct" in str(e) and "question=q21" in str(e), str(e)
@@ -543,7 +551,7 @@ async def _run_eval_checks() -> None:
         runner.call_match_chunks = _stub_gold_only
         collapsed = await run_eval(
             QUESTIONS, CFG, {"viewer_1pct": {}}, gold_only_map,
-            object(), object(), "http://x",
+            STUB_CLIENT, STUB_CLIENT, "http://x",
         )
         collapsed_cells = collapsed[0]["by_viewer"]["viewer_1pct"]
         assert collapsed_cells["40"]["n_returned"] == 0, collapsed_cells["40"]
@@ -566,7 +574,7 @@ async def _run_eval_checks() -> None:
         runner.call_match_chunks = _stub_unmapped_low_ef
         unmapped = await run_eval(
             QUESTIONS, CFG, {"viewer_1pct": {}}, gold_only_map,
-            object(), object(), "http://x",
+            STUB_CLIENT, STUB_CLIENT, "http://x",
         )
         unmapped_cells = unmapped[0]["by_viewer"]["viewer_1pct"]
         assert unmapped_cells["40"]["n_returned"] == 1, unmapped_cells["40"]
@@ -588,7 +596,7 @@ async def _run_eval_checks() -> None:
         runner.call_match_chunks = _stub_by_ef
         per_question = await run_eval(
             QUESTIONS, CFG, {"viewer_1pct": {}}, stable_map,
-            object(), object(), "http://x",
+            STUB_CLIENT, STUB_CLIENT, "http://x",
         )
         cells = per_question[0]["by_viewer"]["viewer_1pct"]
         assert cells["500"]["recall_at_5"] == 1.0, cells["500"]
