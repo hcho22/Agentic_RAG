@@ -26,6 +26,10 @@ They will not, on purpose.
 
 Each corpus is owned by its **own sentinel user** so all three coexist in one database without colliding - the retrieval eval, the scale eval, and the structured-data agent each pin their own principal.
 
+Every *document* seeder also has to **join each principal it creates to the workspace it stamps on its documents** - `db_seed/corpus_seed.py` and `db_seed/wikipedia_seed.py` each do it in an idempotent `_ensure_workspace_membership`, and `db_seed/generic_seed.py` builds the same rows from your manifest. (The CRM seeder is exempt: it seeds relational tables, not `documents` / `chunks`.)
+This is not optional bookkeeping: the workspace-membership clause is AND-ed *under* owner-OR-ACL, so a principal with no `workspace_membership` row retrieves **nothing** - not even chunks it owns, and not even chunks granted to it explicitly in `chunk_acl` - and the migration that backfills memberships only sees users that existed when it ran, never ones a seeder inserts afterwards.
+Copy that helper into your own seeder, and stamp the workspace id on your documents explicitly rather than leaning on the column default.
+
 ---
 
 ## 1. E-commerce (default) - permissions + escalation
@@ -53,7 +57,8 @@ That failure is your prompt to author a new golden set on your own docs - see `d
 
 The critical property, and the reason it has its own section: **Wikipedia is filler only and is never golden-answerable.**
 No golden question is answered *from* a Wikipedia chunk.
-The scale benchmark's "gold" is a deterministic hash-derived visible-chunks set per viewer (`evals/permissions_scale/scale_gold.yaml`), used to measure whether the right chunks survive the ACL pre-filter at scale - it is **not** a content-anchor answerability set like the e-commerce golden set.
+The scale benchmark has no *authored* gold: `evals/permissions_scale/scale_gold.yaml` pins each viewer's deterministic hash-derived **visible-chunks** set (exactly 5000 / 1000 / 100 of the 10k), and recall is then scored at runtime against that same run's top-5 at the most exhaustive `ef_search` - it measures whether the right chunks survive the ACL pre-filter at scale, and it is **not** a content-anchor answerability set like the e-commerce golden set.
+Because the gold comes out of the run itself, a run whose viewers can see nothing has no gold at all; the runner refuses to score that rather than publishing a table of zeros (`docs/permissions-aware-rag.md` §5b).
 When you combine Wikipedia with an answerable corpus, the **golden questions stay anchored to the real (e-commerce or your own) documents**; Wikipedia only supplies the surrounding volume that makes recall@k a meaningful measurement.
 
 Imitate this corpus when you want to **benchmark retrieval at your production scale**: pour in high-volume filler to stress the pre-filter, but keep every *answerable* golden question anchored to your real documents, never to the filler.

@@ -30,6 +30,10 @@ These are distilled from the whole Epic-E surface. If a change appears to requir
 
 10. **Support is optional and fails closed at the boundary.** With no `SUPABASE_SERVICE_ROLE_KEY`, every `/widget/*` route 503s (inert, never unprotected) and the rate limiter/breaker are a clean no-op. With no `SUPABASE_JWT_SECRET`, the bot degrades to the generic deferral rather than answering. A knowledge-assistant-only deploy leaves both unset and is unaffected.
 
+11. **Every seeder inserts its own `workspace_membership` rows for every principal it creates.** The `20260617120200` backfill only captures users that existed at MIGRATION time; seed users are inserted *after* migrations run. The US-003 clause is AND-ed with the owner-OR-ACL predicate, so a principal with no membership row sees NOTHING - not chunks it owns, not chunks explicitly granted to it in `chunk_acl`. A seeder must stamp `DEFAULT_WORKSPACE_ID` explicitly on the documents it inserts AND join its principals to that same constant - never rely on the `workspace_id` column DEFAULT, which `20260617120200` itself labels TRANSITIONAL and US-007 may drop or repoint. `db_seed/corpus_seed.py` and `db_seed/wikipedia_seed.py` each have an idempotent `_ensure_workspace_membership`; a new seeder without one silently retrieves zero rows.
+
+12. **An eval whose gold is DERIVED AT RUNTIME must refuse to score a run that produced no signal.** Where gold comes from the run itself (permissions_scale builds it from the `ef_search_for_gold` cell of the same sweep), an empty gold set means the run measured nothing, and "retrieved nothing" must never collapse into the same reportable number as "retrieved the wrong things" - a `return 0.0` there publishes a well-formed table indistinguishable from a real regression (that is what hid invariant 11 for two months of nightlies). Guard where the degeneracy is first knowable, not only inside the scoring function; name the principal / question / knob in the message; and never let a failed run leave the previous run's summary behind for the publish step to commit. `evals/permissions_scale/runner.py::DegenerateRunError` is the pattern; `evals/permissions_scale/test_degenerate_guard.py` pins it. **Known gap:** the sibling `evals/retrieval/runner.py` still returns `0.0` for a fixture-authored empty `gold_chunks` list. Its gold is a YAML fixture, not a runtime cell, and it feeds the gated E4/E6 metrics, so changing it was deliberately left out of scope - but if hit, a golden-set authoring error scores as a retrieval regression and drags the gated mean down.
+
 ## Two trust models for conversation-shaped tables (do not merge)
 
 Two parallel chat-message table pairs exist on purpose, with **different RLS boundaries**:
@@ -43,6 +47,7 @@ Do NOT collapse these into one table with a `kind` discriminator branching the p
 
 - Backend story tests are `python -m backend.test_usXXX_*` (plus `test_conversation_status_machine`, `test_supabase_jwt`, `test_au4_auth_attacks`). Each has a **unit layer that always runs** (no DB/secrets) and an **integration layer that skips cleanly** without a local Supabase. The full module list is in `docs/support-widget-internals.md`.
 - Cross-workspace zero-leak: `python -m backend.test_us066_conversations_rls` (needs local Supabase + `DATABASE_URL`). API-edge auth attacks: `python -m backend.test_au4_auth_attacks`.
+- Eval-harness guard tests run offline with no DB or secrets: `python -m evals.permissions_scale.test_degenerate_guard`.
 - Frontend gate is `npm run typecheck && npm run build` (multi-page; `tsc` is the lint gate - no ESLint config).
 - Manual browser QA for the deferred UI checks: `docs/manual-test-plan-support-widget.md`.
 
@@ -53,3 +58,10 @@ Do NOT collapse these into one table with a `kind` discriminator branching the p
 - `docs/evals.md` + `docs/golden-set-authoring.md` - the eval harness, gate classes, and golden-set authoring.
 - `docs/adr/` - committed ADRs (0001 RAGAS, 0002 tenant isolation, 0007 ingestion boundary, 0009 keyword OR-fallback, 0010 deterministic-alpha fusion, 0011 product name Purvia). ADR-0003/0004/0008 are cited but not committed; their record is the internals doc + PRs #51-70.
 - `CONTEXT.md` - domain language; `.claude/agent/tasks/prd-phase2-implementation.md` - the Phase-2 PRD + per-story status.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

@@ -24,6 +24,13 @@ Determinism stack:
   gives *exactly* K visible chunks per viewer, deterministic across
   runs, and statistically independent across viewers.
 
+Workspace: documents are stamped with DEFAULT_WORKSPACE_ID explicitly rather
+than left to the column DEFAULT that 20260617120200 documents as TRANSITIONAL,
+and the owner plus all three viewers are joined to that same constant by
+`_ensure_workspace_membership` - so both sides are provably the same value.
+Without the membership rows the US-003 clause hides the whole corpus from
+every one of them and the scale eval silently measures nothing.
+
 Idempotency: identifies prior wikipedia-seeded rows by
 `documents.user_id = WIKIPEDIA_USER_ID AND metadata->>'wikipedia_seed' =
 'true'` and deletes them before re-inserting (chunks + chunk_acl cascade
@@ -67,7 +74,13 @@ from embeddings import embed_texts, get_embedding_model, to_pgvector  # noqa: E4
 # US-026/US-027: reuse the corpus seeder's single-row embedding_config upsert and
 # its embedder-ProviderConfig client builder so both embedding-producing seed
 # paths stamp the corpus identically and embed via the SAME configured provider.
-from db_seed.corpus_seed import build_embedder_client, stamp_embedding_config  # noqa: E402
+# US-002: DEFAULT_WORKSPACE_ID is imported rather than redeclared so the two
+# seeders cannot drift onto different workspaces.
+from db_seed.corpus_seed import (  # noqa: E402
+    DEFAULT_WORKSPACE_ID,
+    build_embedder_client,
+    stamp_embedding_config,
+)
 
 log = logging.getLogger("agentic_rag.db_seed.wikipedia")
 
@@ -222,14 +235,26 @@ def viewer_visible_indices(
     return sorted(idx for _, idx in scored[:visible_count])
 
 
+def _seed_principals(viewers: list[dict[str, Any]]) -> list[tuple[uuid.UUID, str]]:
+    """Every principal this seeder creates: the owner, then the config viewers.
+
+    Single source of truth for both `_ensure_users` and
+    `_ensure_workspace_membership`, deliberately. The failure this seeder exists
+    to prevent is exactly "a principal exists in auth.users with no
+    workspace_membership row", so the two sets must be provably identical rather
+    than two lists that happen to agree until someone edits one of them.
+    """
+    principals: list[tuple[uuid.UUID, str]] = [(WIKIPEDIA_USER_ID, WIKIPEDIA_USER_EMAIL)]
+    principals += [(uuid.UUID(v["id"]), v["email"]) for v in viewers]
+    return principals
+
+
 async def _ensure_users(
     conn: asyncpg.Connection,
     viewers: list[dict[str, Any]],
 ) -> None:
     """Idempotently insert the wikipedia owner + viewer users into auth.users."""
-    rows: list[tuple[uuid.UUID, str]] = [(WIKIPEDIA_USER_ID, WIKIPEDIA_USER_EMAIL)]
-    for v in viewers:
-        rows.append((uuid.UUID(v["id"]), v["email"]))
+    rows = _seed_principals(viewers)
     await conn.executemany(
         """
         insert into auth.users (
@@ -245,6 +270,58 @@ async def _ensure_users(
             now(), now()
         )
         on conflict (id) do nothing
+        """,
+        rows,
+    )
+
+
+async def _ensure_workspace_membership(
+    conn: asyncpg.Connection,
+    viewers: list[dict[str, Any]],
+) -> None:
+    """Add the wikipedia owner + every viewer to the Default Workspace (US-002).
+
+    Default Workspace is the right workspace because `_insert_document` below
+    stamps that same DEFAULT_WORKSPACE_ID constant onto every wikipedia
+    document - and it is `d.workspace_id` that the membership clause resolves
+    against. Both sides name the constant explicitly rather than relying on the
+    column DEFAULT from 20260617120200_default_workspace_backfill.sql, which
+    that migration itself labels TRANSITIONAL: were it dropped or repointed,
+    coupling the two through it would land the documents in a workspace nobody
+    is joined to and silently reproduce the very blackout this helper fixes.
+
+    Mirrors `db_seed.corpus_seed._ensure_workspace_membership` for this corpus,
+    and for the same reason: 20260617120200's auth.users backfill only captures
+    users that exist at MIGRATION time, but `_ensure_users` inserts these ones
+    *after* migrations run. Under the US-003 subtractive membership clause
+    (`exists (select 1 from workspace_membership wm where wm.workspace_id =
+    d.workspace_id and wm.user_id = auth.uid())` inside match_chunks), a
+    principal with no membership row sees NOTHING - not even chunks it owns, and
+    not even chunks explicitly granted to it in chunk_acl, because the clause is
+    AND-ed with the owner-OR-ACL predicate rather than OR-ed into it.
+
+    Without this the permissions-scale eval measures nothing: all three viewers
+    retrieve 0 rows at every ef_search, gold comes back empty, and every cell
+    scores a meaningless 0.000 (the nightly regression from 2026-06-19 onward).
+
+    The owner is included alongside the viewers. It is not what the eval reads -
+    the runner authenticates only as the three viewers - but the same clause
+    hides the owner's own 10k chunks from itself, which is the identical latent
+    trap and exactly what the corpus seeder's single membership row prevents.
+    The principal list comes from `_seed_principals`, the same helper
+    `_ensure_users` inserts from, so no principal can land in auth.users without
+    a membership row here.
+
+    Idempotent, so a repeat seed is a no-op.
+    """
+    rows = [
+        (DEFAULT_WORKSPACE_ID, user_id) for user_id, _email in _seed_principals(viewers)
+    ]
+    await conn.executemany(
+        """
+        insert into public.workspace_membership (workspace_id, user_id, role)
+        values ($1, $2, 'member')
+        on conflict do nothing
         """,
         rows,
     )
@@ -274,14 +351,15 @@ async def _insert_document(
     await conn.execute(
         """
         insert into public.documents (
-            id, user_id, filename, storage_path, byte_size,
+            id, user_id, workspace_id, filename, storage_path, byte_size,
             content_type, status, chunks_count, metadata
         ) values (
-            $1, $2, $3, $4, $5, 'text/plain', 'ready', $6, $7::jsonb
+            $1, $2, $3, $4, $5, $6, 'text/plain', 'ready', $7, $8::jsonb
         )
         """,
         document_id,
         WIKIPEDIA_USER_ID,
+        DEFAULT_WORKSPACE_ID,
         f"wikipedia-{doc_idx:04d}.txt",
         f"wikipedia-seed/wikipedia-{doc_idx:04d}.txt",
         byte_size,
@@ -401,6 +479,7 @@ async def seed(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
     produced_dim: int | None = None
     try:
         await _ensure_users(conn, viewers)
+        await _ensure_workspace_membership(conn, viewers)
         purged = await _purge_existing(conn)
         if purged:
             log.info("wikipedia_seed: purged %d previously-seeded documents", purged)

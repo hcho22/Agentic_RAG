@@ -107,11 +107,36 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           # --enforce-floor: exit non-zero if the recall_floor cell in
-          # scale_gold.yaml drops below threshold. This is the only
-          # failure path; dataset-fetch / seed errors fall through the
-          # `set -e` shell default and also fail the job.
+          # scale_gold.yaml drops below threshold. Dataset-fetch / seed
+          # errors fall through the `set -e` shell default and also fail
+          # the job.
+          # The runner has a second, semantically different non-zero exit:
+          # it REFUSES a run that produced no signal (blind gold cell,
+          # unseeded corpus) and writes a DEGENERATE RUN notice in place
+          # of the table.
+          #
+          # Triaging a red nightly: the discriminator is the NOTICE HEADING
+          # in the published <DATE>.md, not the presence or absence of
+          # <DATE>.json. Three cases:
+          #   - "DEGENERATE RUN"  the run measured nothing and the harness
+          #     refused to score it; the notice names the viewer, question
+          #     and ef_search that went dark. Not a recall regression.
+          #   - "RUN FAILED"      the measurement phase crashed on something
+          #     else (viewer JWT rejected, embedder outage, DB gone). Also
+          #     not a recall regression.
+          #   - a real recall@5 table  the run measured fine, so a red job
+          #     is the --enforce-floor alarm: recall genuinely regressed.
+          # A job that dies BEFORE the runner (Supabase start, pip install,
+          # seed, timeout kill) publishes neither file, so no <DATE>.md at
+          # all points at the step log rather than at the eval.
+          # --summary: write to a scratch path, NOT the git-tracked
+          # evals/permissions_scale/summary.md default. The publish step
+          # copies from here, so what gets committed as today's nightly is
+          # by construction something THIS run wrote - and a job that dies
+          # before the runner leaves no file to publish at all.
           python -m evals.permissions_scale.runner \
             --out /tmp/scale.json \
+            --summary /tmp/scale-summary.md \
             --enforce-floor
 
       - name: Publish to docs/permissions-scale-nightly/
@@ -124,14 +149,39 @@ jobs:
         run: |
           DATE=$(date -u +"%Y-%m-%d")
           mkdir -p docs/permissions-scale-nightly
-          # The run may not have produced /tmp/scale.json if seed failed
-          # — guard the copy so the publish step itself doesn't crash.
-          if [ -f /tmp/scale.json ]; then
-            cp /tmp/scale.json "docs/permissions-scale-nightly/${DATE}.json"
-          fi
-          if [ -f evals/permissions_scale/summary.md ]; then
-            cp evals/permissions_scale/summary.md \
+          # THE PAIR INVARIANT: <DATE>.md and <DATE>.json always describe the
+          # SAME run, and a job that never reached the runner never touches the
+          # published record at all.
+          #
+          # Both sources are scratch paths only this run could have written -
+          # never the git-tracked in-repo summary - so "the file exists" and
+          # "this run produced it" are the same statement.
+          #
+          # /tmp/scale-summary.md is the discriminator: the runner writes it on
+          # every path that reaches a verdict, including a refusal or a crash.
+          # So its presence means "this run has something to say about this
+          # date", and its absence means the job died before the eval ran
+          # (`supabase start`, `pip install`, the seed step, or the 30-minute
+          # `timeout-minutes` kill).
+          if [ -f /tmp/scale-summary.md ]; then
+            cp /tmp/scale-summary.md \
                "docs/permissions-scale-nightly/${DATE}.md"
+            # A refused or failed run writes the notice but no results JSON, so
+            # any same-date .json still on disk is from a DIFFERENT run - this
+            # workflow has `workflow_dispatch`, so a re-dispatch after a healthy
+            # cron run would otherwise leave the morning's <DATE>.json beside
+            # the afternoon's DEGENERATE <DATE>.md. Reconcile it to this run.
+            if [ -f /tmp/scale.json ]; then
+              cp /tmp/scale.json "docs/permissions-scale-nightly/${DATE}.json"
+            else
+              rm -f "docs/permissions-scale-nightly/${DATE}.json"
+            fi
+          else
+            # Publish NOTHING and delete NOTHING. Anything already committed for
+            # this date belongs to an earlier run that DID reach a verdict, and
+            # deleting half of it here would manufacture the very orphaned pair
+            # the invariant above exists to prevent.
+            echo "eval never reached a verdict - leaving ${DATE} artifacts untouched"
           fi
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
