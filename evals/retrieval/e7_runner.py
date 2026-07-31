@@ -171,12 +171,15 @@ DEFAULT_FAITHFULNESS_JUDGE_MIN = 4
 # only fails the run when EVERY row is mislabeled (zero exercised); this ceiling
 # governs the PARTIAL case: when the mislabeled FRACTION over the full presented P3
 # population exceeds it, the leg is failed/flagged low-confidence so heavy gold drift
-# trips the gate instead of quietly diluting the false-resolve rate. That path is LIVE,
-# not hypothetical: the 9-row P3 gold has 5 rows measuring below 0.5 (e7-p3-01/02/03 in
-# the 0.42–0.47 band, e7-p3-07 at 0.4234, e7-p3-09 at 0.4570), so any τ_sim=0.5 point
-# mislabels 5/9 = 56% — over this ceiling — even though the main leg's default τ_sim of
-# 0.4 currently leaves all 9 above the retrieval gate. Default 0.5 (a majority-
-# mislabeled P3 leg is a gold defect); override via E7_P3_MISLABEL_RATIO_MAX or
+# trips the gate instead of quietly diluting the false-resolve rate. This guard is
+# DORMANT at today's main leg, not firing: at the default τ_sim of 0.4
+# (`backend.escalation.DEFAULT_TAU_SIM`) all 9 P3 rows clear the retrieval gate, so the
+# measured ratio is 0/9. It becomes REACHABLE the moment ESCALATION_TAU_SIM is promoted
+# to 0.5 — the 5 rows measuring below that (e7-p3-01 0.4607, e7-p3-02 0.4214, e7-p3-03
+# 0.4298, e7-p3-07 0.4234, e7-p3-09 0.4570) then fall out at the retrieval gate, so the
+# ratio is AT LEAST 5/9 ≈ 56% (a lower bound — rows can additionally fall out on
+# n_cleared < n_min) — over this ceiling. Default 0.5 (a majority-mislabeled P3 leg
+# is a gold defect); override via E7_P3_MISLABEL_RATIO_MAX or
 # --p3-mislabel-ratio-max. The denominator is the full presented population
 # (`n_questions`), matching the false-resolve rate's — NOT `len(exercised)`.
 DEFAULT_P3_MISLABEL_RATIO_MAX = 0.5
@@ -2143,10 +2146,22 @@ class SweepPoint:
 
     @property
     def p3_vacuous(self) -> bool:
-        """True when the P3 leg was PRESENT but NO row reached the faithfulness
-        gate, so this point's false-resolve rate is not a measurement at all.
-        Mirrors the main leg's positive control (`E7P3Result.passed`)."""
-        return self.p3_n_questions > 0 and self.p3_n_exercised == 0
+        """True when NO P3 row reached the faithfulness gate at this point, so this
+        point's false-resolve rate is not a measurement at all. Mirrors the main leg's
+        positive control (`E7P3Result.passed` is `len(exercised) > 0`) EXACTLY,
+        including the EMPTY population: a gold carrying zero `should_escalate` rows
+        measured nothing just as surely as one whose rows all escalated early, and
+        AGENTS.md invariant 12 forbids reporting either as a measurement. The two
+        causes read differently in the rendered report (`p3_absent` picks them apart);
+        the flag does not distinguish them because the consequence is identical."""
+        return self.p3_n_exercised == 0
+
+    @property
+    def p3_absent(self) -> bool:
+        """True when this point presented NO P3 rows at all — the empty-gold half of
+        `p3_vacuous`, split out so the report can name the right remedy (author P3
+        rows, vs. keep the existing ones above τ_sim)."""
+        return self.p3_n_questions == 0
 
     @property
     def deflection(self) -> float | None:
@@ -2469,7 +2484,9 @@ def render_e7_sweep_section(
         fe = "—" if p.false_escalate is None else f"{p.false_escalate:.0%}"
         feas = "✅" if p.feasible else "✗"
         exercised = f"{p.p3_n_exercised}/{p.p3_n_questions}"
-        if p.p3_vacuous:
+        if p.p3_absent:
+            exercised += " ⚠️ no P3 population"
+        elif p.p3_vacuous:
             exercised += " ⚠️ vacuous"
         mark = " ⭐ knee" if knee is not None and p.index == knee.index else ""
         lines.append(
@@ -2478,7 +2495,16 @@ def render_e7_sweep_section(
         )
 
     lines.append("")
-    if knee is not None and knee.p3_vacuous:
+    if knee is not None and knee.p3_absent:
+        lines.append(
+            "> ⚠️ **The knee is vacuous — there is no P3 population at all.** This "
+            "sweep presented zero `should_escalate` rows, so no operating point "
+            "measured the false-resolve ceiling and the recommendation below rests "
+            "on nothing. The main leg's P3 positive control would exit the runner "
+            "non-zero on this run. Author P3 rows and re-sweep."
+        )
+        lines.append("")
+    elif knee is not None and knee.p3_vacuous:
         lines.append(
             "> ⚠️ **The knee is vacuous.** No P3 row reached the faithfulness gate "
             "at this operating point, so its false-resolve rate measured nothing "
@@ -2514,6 +2540,16 @@ def render_e7_sweep_section(
             f"({knee.faithfulness_judge_min}/5) is guidance only — the runtime "
             "`ESCALATION_FAITHFULNESS_CUTOFF` is a different [0,1] scale (US-048/050), "
             "tuned separately."
+        )
+    elif sweep.knee_reason == "no_point_under_ceiling" and sweep.points and all(
+        p.p3_absent for p in sweep.points
+    ):
+        lines.append(
+            "**No knee — and nothing was measured:** every operating point presented "
+            "ZERO P3 rows, so the false-resolve rate is `None` everywhere and no "
+            "point could clear the ceiling. This is an empty-gold run, not a red "
+            "curve: do not read it as evidence about the pipeline. Author P3 rows "
+            "(or re-run with `--include-p3`) and re-sweep."
         )
     elif sweep.knee_reason == "no_point_under_ceiling":
         lines.append(
@@ -2691,8 +2727,10 @@ def e7_pinned_invariants_failed(
     # positive control above. That control fails closed only when EVERY P3 row is
     # mislabeled (zero exercised); a leg that is heavily but not entirely mislabeled
     # still exercises ≥1 row (so `passed` is True) yet runs the false-resolve ceiling
-    # over a shrunken sample — a live masking path now that the P3 gold is 9 rows, 5 of
-    # which measure below 0.5 and so mislabel together (56%) at any τ_sim=0.5 point.
+    # over a shrunken sample. At the main leg's default τ_sim of 0.4 all 9 P3 rows clear
+    # retrieval, so this guard is dormant (0/9); it becomes reachable if
+    # ESCALATION_TAU_SIM is promoted to 0.5, where the 5 rows measuring below that fall
+    # out for a ratio of AT LEAST 5/9 ≈ 56%.
     # Gated on `passed` so the empty / all-mislabeled cases stay
     # owned by the positive control above (one clear failure reason each); fires only
     # when the mislabeled FRACTION over the full presented population STRICTLY exceeds

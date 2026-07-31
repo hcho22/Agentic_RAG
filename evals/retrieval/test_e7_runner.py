@@ -1878,6 +1878,61 @@ def test_sweep_majority_mislabel_callout_tracks_the_configured_ceiling() -> None
     print("ok: the majority-mislabeled callout tracks the configured mislabel ceiling")
 
 
+def test_sweep_flags_an_empty_p3_population_as_vacuous() -> None:
+    """The EMPTY-gold half of AGENTS.md invariant 12, inside the sweep.
+
+    `E7P3Result.passed` is `len(exercised) > 0`, which is False for a population
+    that is empty just as much as for one that is entirely `mislabeled` — both
+    measured nothing. `SweepPoint.p3_vacuous` must mirror that exactly, otherwise a
+    gold carrying zero `should_escalate` rows renders `0/0` with no marker and emits
+    `p3_vacuous: false`, i.e. "measured nothing" reported as if it were fine.
+
+    Failure indicator: before this, every point of a P3-less sweep claimed
+    `p3_vacuous: false`.
+    """
+    questions = [
+        _p1a("e-p1a-a", "eq-p1a-a"),
+        _p2("e-p2-a", "eq-p2-a"),
+        _p2("e-p2-b", "eq-p2-b"),
+    ]
+    rows = {"eq-p1a-a": WEAK, "eq-p2-a": STRONG, "eq-p2-b": STRONG}
+    scores = {
+        "eq-p2-a": {"faithfulness": 5, "helpfulness": 5},
+        "eq-p2-b": {"faithfulness": 5, "helpfulness": 5},
+    }
+    sweep, _, _, _ = _run_sweep(
+        questions, rows,
+        tau_sims=[0.40, 0.60], n_mins=[1], faithfulness_mins=[4],
+        ceiling=0.05, scores_by_question=scores,
+    )
+
+    for p in sweep.points:
+        _check(p.p3_n_questions == 0 and p.p3_n_exercised == 0,
+               f"no P3 rows were presented, got {p.p3_n_exercised}/{p.p3_n_questions}")
+        _check(p.p3_vacuous is True,
+               "a point that presented zero P3 rows measured nothing — vacuous")
+        _check(p.p3_absent is True, "and the cause is an absent population, not drift")
+        _check(p.false_resolve is None,
+               f"the false-resolve rate is unmeasured, got {p.false_resolve}")
+        _check(p.feasible is False, "so no point can clear the ceiling")
+
+    _check(sweep.knee is None and sweep.knee_reason == "no_point_under_ceiling",
+           f"an unmeasured sweep recommends nothing, got {sweep.knee_reason}")
+
+    d = sweep.to_dict()
+    _check(all(p["p3_vacuous"] is True for p in d["points"]),
+           "the JSON snapshot says every point measured nothing")
+    _check(all(c["p3_vacuous"] is True for c in d["curve"]),
+           "and so does the plottable curve")
+
+    md = "\n".join(render_e7_sweep_section(sweep))
+    _check("0/0 ⚠️ no P3 population" in md,
+           f"the table names the empty population rather than staying quiet, got:\n{md}")
+    _check("nothing was measured" in md,
+           f"and the no-knee verdict says the run measured nothing, got:\n{md}")
+    print("ok: a sweep with no P3 population reports vacuity instead of a clean 0/0")
+
+
 # --- US-057 P1b no-access replay fixtures + tests -------------------------
 
 
@@ -2277,6 +2332,7 @@ def main() -> int:
         test_sweep_to_dict_shape,
         test_sweep_reports_p3_exercise_per_point,
         test_sweep_majority_mislabel_callout_tracks_the_configured_ceiling,
+        test_sweep_flags_an_empty_p3_population_as_vacuous,
         test_p1b_no_gold_in_result_passes,
         test_p1b_nongold_strong_is_not_a_leak,
         test_p1b_gold_in_result_is_a_leak,

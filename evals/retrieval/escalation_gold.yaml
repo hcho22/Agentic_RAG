@@ -89,9 +89,10 @@
 #   breaches the ceiling (the disarm path `e7_pinned_invariants_failed` and the
 #   issue-#26 mislabel-ratio guard exist to catch).
 #
-#   The original three P3 rows (e7-p3-01/02/03) all score top1_cosine in the
-#   0.42–0.47 band, so EVERY one of them escalates at the retrieval gate once
-#   τ_sim ≥ 0.5. That made the 2026-07-31 weekly sweep's "knee" at τ_sim=0.5 read
+#   The original three P3 rows each measured below 0.5 — e7-p3-01 (0.4607),
+#   e7-p3-03 (0.4298) and e7-p3-02 (0.4214) — so EVERY one of them escalates at
+#   the retrieval gate once τ_sim ≥ 0.5.
+#   That made the 2026-07-31 weekly sweep's "knee" at τ_sim=0.5 read
 #   false-resolve 0% while measuring nothing — the faithfulness gate was never
 #   exercised at that point. The above-0.5 coverage is carried by four rows, each
 #   with its OWN measured top-1 cosine — e7-p3-05 (0.5800), e7-p3-11 (0.5605),
@@ -99,10 +100,13 @@
 #   about and merely varies a parameter the corpus never covers, so a meaningful
 #   fraction of the P3 population stays ABOVE 0.5 and keeps exercising the
 #   faithfulness gate across the whole swept grid. The other shipped P3 rows do
-#   NOT carry it — e7-p3-01/02/03 measured in the 0.42–0.47 band, and e7-p3-09
-#   (0.4570) and e7-p3-07 (0.4234) measured mid-band too — and e7-p3-06 (0.3556) /
-#   e7-p3-08 (0.3539) were retired for measuring weak (see the retirement block
-#   below). Keep this property when adding P3 rows: a P3 population clustered
+#   NOT carry it — e7-p3-01 (0.4607), e7-p3-09 (0.4570), e7-p3-03 (0.4298),
+#   e7-p3-07 (0.4234) and e7-p3-02 (0.4214) each measured mid-band — and
+#   e7-p3-06 (0.3556) / e7-p3-08 (0.3539) were retired for measuring weak (see the
+#   retirement block below). Those five mid-band rows are also why a τ_sim promoted
+#   to 0.5 would take the main leg's mislabel ratio to AT LEAST 5/9 ≈ 56%, over the
+#   issue-#26 ceiling; at today's default τ_sim of 0.4 all nine clear, so that guard
+#   is dormant. Keep this property when adding P3 rows: a P3 population clustered
 #   below the top of the τ_sim grid cannot falsify a τ_sim recommendation, and
 #   only a row with its own recorded measurement may be counted toward the claim —
 #   never an aggregate range standing in for a per-row number.
@@ -187,10 +191,12 @@ questions:
         doc: warranty-terms
     reference: The warranty policy covers Electronics, Apparel, and Home Goods but does not list jewelry, so no warranty period for jewelry can be grounded in the corpus; this should be escalated to a human rather than answered with an invented period.
     notes: >-
-      strong retrieval of the warranty doc (anchored on its by-category intro), but
-      its categories are Electronics / Apparel / Home Goods / Books / Food — jewelry
-      is not covered, so no faithful answer exists and the row must escalate (not
-      invent a period).
+      MEASURED 0.4607 (warranty-terms:0) — mid-band, clears τ_sim=0.4 but NOT 0.5,
+      so it is `mislabeled` at the top of the swept grid and must not be counted
+      toward the above-0.5 coverage claim. Retrieval of the warranty doc is
+      topically strong (anchored on its by-category intro), but its categories are
+      Electronics / Apparel / Home Goods / Books / Food — jewelry is not covered, so
+      no faithful answer exists and the row must escalate (not invent a period).
 
   - id: e7-p3-02
     escalation: should_escalate
@@ -200,9 +206,11 @@ questions:
         doc: shipping-faq
     reference: The shipping FAQ gives the standard delivery window only for the contiguous US and never addresses Hawaii, so no specific Hawaii timeline can be grounded in the corpus; this should be escalated to a human rather than answered with a guessed number of days.
     notes: >-
-      shipping-faq:0 states the standard window only for the *contiguous* US;
-      Hawaii (non-contiguous) is never addressed, so the specific timeline is
-      absent — topically strong retrieval, no grounded answer.
+      MEASURED 0.4214 (shipping-faq:1) — mid-band, clears τ_sim=0.4 but NOT 0.5, so
+      it is `mislabeled` at the top of the swept grid and must not be counted toward
+      the above-0.5 coverage claim. shipping-faq:0 states the standard window only
+      for the *contiguous* US; Hawaii (non-contiguous) is never addressed, so the
+      specific timeline is absent — topically strong retrieval, no grounded answer.
 
   - id: e7-p3-03
     escalation: should_escalate
@@ -212,9 +220,12 @@ questions:
         doc: refund-policy
     reference: The refund policy places delivery-delay cases on a partial refund of 10–80% at the agent's discretion, so no exact refund amount can be grounded in the corpus; this should be escalated to a human rather than auto-resolved with a fabricated figure.
     notes: >-
-      refund-policy:0 places delivery-delay cases on a partial refund of 10–80%
-      "at the agent's discretion" — no fixed amount exists in the corpus, so the
-      exact-amount question must escalate to a human rather than auto-resolve.
+      MEASURED 0.4298 (refund-policy:0) — mid-band, clears τ_sim=0.4 but NOT 0.5, so
+      it is `mislabeled` at the top of the swept grid and must not be counted toward
+      the above-0.5 coverage claim. refund-policy:0 places delivery-delay cases on a
+      partial refund of 10–80% "at the agent's discretion" — no fixed amount exists
+      in the corpus, so the exact-amount question must escalate to a human rather
+      than auto-resolve.
 
   # ── should_escalate / P3, high-cosine band (see "P3 COSINE COVERAGE" above) ──
   # Authored to ask what the chunk is already about so retrieval stays strong ABOVE
@@ -295,12 +306,16 @@ questions:
         doc: loyalty-program
     reference: The loyalty program has exactly four tiers — Bronze, Silver, Gold and Platinum — and no Diamond tier exists, so no spend threshold for it can be grounded in the corpus; this should be escalated to a human rather than answered by extrapolating above the Platinum threshold.
     notes: >-
-      HIGH-COSINE PROBE. "annual spend threshold" and "tier" are loyalty-program
-      vocabulary and the tier-threshold list sits in the same chunk, so retrieval
-      should be strong. Structurally the same false-premise shape as e7-p3-01
-      (jewelry warranty) but expressed in the corpus's register rather than a
-      customer's. NOTE: this row MEASURED 0.4570 against e7-p3-01's 0.4607 — it
-      landed marginally LOWER, falsifying the "e7-p3-01 is a phrasing artefact"
+      MEASURED 0.4570 — mid-band, does NOT clear τ_sim=0.5, so it escalates at the
+      retrieval gate as `mislabeled` at the top of the swept grid and DILUTES the
+      exercised fraction there; it must not be counted toward the above-0.5 coverage
+      claim. It was AUTHORED on the expectation that retrieval would be strong —
+      "annual spend threshold" and "tier" are loyalty-program vocabulary and the
+      tier-threshold list sits in the same chunk — as the structurally identical
+      false-premise shape to e7-p3-01 (jewelry warranty) expressed in the corpus's
+      register rather than a customer's. The measurement disproved that expectation:
+      0.4570 against e7-p3-01's 0.4607 — it landed marginally LOWER, falsifying the
+      "e7-p3-01 is a phrasing artefact"
       hypothesis it was authored to test. Kept because a mid-band P3 row is still a
       real row, but do not cite it as evidence for the register effect; that effect
       is carried by the rows that each measured above 0.5 — e7-p3-04 (0.5339),
@@ -338,7 +353,10 @@ questions:
   # The method is CONTROL-VALIDATED: re-running it on five rows whose values were
   # already recorded here reproduced every one to 4 decimal places (delta 0.0000)
   # — e7-p3-09 0.4570, e7-p3-10 0.5288, e7-p3-11 0.5605, e7-p2-01 0.5546,
-  # e7-p2-04 0.5060.
+  # e7-p2-04 0.5060. The three original rows' values (e7-p3-01 0.4607, e7-p3-02
+  # 0.4214, e7-p3-03 0.4298) are independently corroborated by the committed
+  # docs/escalation-weekly/2026-07-31.json snapshot, which records the same top-1
+  # cosines the pipeline itself observed for them.
   #
   # Of 14 candidates screened that way only 5 cleared 0.50; of the six authored by
   # intuition (e7-p3-04/05/06/07/08/09), two — e7-p3-04 (0.5339) and e7-p3-05
