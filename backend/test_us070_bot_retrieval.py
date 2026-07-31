@@ -54,7 +54,9 @@ SUPABASE_URL = "http://supabase.test"
 ANON_KEY = "anon-key-public-not-an-identity"
 BOT_USER_ID = "11111111-1111-1111-1111-111111111111"
 WORKSPACE_ID = "22222222-2222-2222-2222-222222222222"
-CONFIG = EscalationConfig(tau_sim=0.4, n_min=2, faithfulness_cutoff=0.7)
+CONFIG = EscalationConfig(
+    tau_sim=0.4, n_min=2, faithfulness_cutoff=0.7, answer_cutoff=0.5
+)
 MATCH_THRESHOLD = 0.3
 
 
@@ -189,22 +191,35 @@ class _FakeAnswerer:
 
 
 class _JudgeCompletions:
-    def __init__(self, parsed: Any) -> None:
-        self.parsed = parsed
+    def __init__(self, faithful_parsed: Any, answer_parsed: Any) -> None:
+        # The runtime judge client is shared by the faithfulness gate and the
+        # issue-#97 answer-completeness gate; dispatch on the response_format so
+        # each gate sees a payload of its own schema.
+        self.faithful_parsed = faithful_parsed
+        self.answer_parsed = answer_parsed
         self.calls = 0
 
     async def parse(self, *, model: str, messages: Any, response_format: Any) -> Any:
         self.calls += 1
-        message = types.SimpleNamespace(parsed=self.parsed, refusal=None)
+        parsed = (
+            self.answer_parsed
+            if response_format.__name__ == "AnswerJudgment"
+            else self.faithful_parsed
+        )
+        message = types.SimpleNamespace(parsed=parsed, refusal=None)
         return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
 
 
 class _FakeJudge:
     def __init__(self, supported: bool, score: float) -> None:
-        from escalation import FaithfulnessJudgment
+        from escalation import AnswerJudgment, FaithfulnessJudgment
 
-        parsed = FaithfulnessJudgment(supported=supported, score=score)
-        self.chat = types.SimpleNamespace(completions=_JudgeCompletions(parsed))
+        faithful = FaithfulnessJudgment(supported=supported, score=score)
+        # A shared chunk yields a real grounded answer, so the answer gate passes.
+        answer = AnswerJudgment(answers=True, score=0.95)
+        self.chat = types.SimpleNamespace(
+            completions=_JudgeCompletions(faithful, answer)
+        )
 
 
 def _turn(

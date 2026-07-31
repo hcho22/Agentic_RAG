@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 from pydantic import ValidationError  # noqa: E402
 
 from escalation import (  # noqa: E402
+    DEFAULT_ANSWER_CUTOFF,
     DEFAULT_FAITHFULNESS_CUTOFF,
     DEFAULT_FALSE_RESOLVE_CEILING,
     DEFAULT_N_MIN,
@@ -53,6 +54,7 @@ _ESC_VARS = (
     "ESCALATION_TAU_SIM",
     "ESCALATION_N_MIN",
     "ESCALATION_FAITHFULNESS_CUTOFF",
+    "ESCALATION_ANSWER_CUTOFF",
     "ESCALATION_FALSE_RESOLVE_CEILING",
 )
 
@@ -61,7 +63,7 @@ _ESC_VARS = (
 def env(**overrides: str) -> Iterator[None]:
     """Run a block with the escalation env knobs set exactly to `overrides`.
 
-    All four knobs are cleared first (so an unspecified knob is genuinely unset,
+    All knobs are cleared first (so an unspecified knob is genuinely unset,
     exercising the default path), the overrides applied, and the prior
     environment restored afterwards — no cross-test leakage.
     """
@@ -104,6 +106,7 @@ def test_valid_values_load() -> None:
         ESCALATION_TAU_SIM="0.4",
         ESCALATION_N_MIN="2",
         ESCALATION_FAITHFULNESS_CUTOFF="0.7",
+        ESCALATION_ANSWER_CUTOFF="0.6",
         ESCALATION_FALSE_RESOLVE_CEILING="0.05",
     ):
         cfg = EscalationConfig.from_env()
@@ -112,6 +115,10 @@ def test_valid_values_load() -> None:
         _check(
             cfg.faithfulness_cutoff == 0.7,
             f"cutoff should be 0.7, got {cfg.faithfulness_cutoff}",
+        )
+        _check(
+            cfg.answer_cutoff == 0.6,
+            f"answer_cutoff should be 0.6, got {cfg.answer_cutoff}",
         )
         _check(
             get_false_resolve_ceiling() == 0.05,
@@ -131,6 +138,10 @@ def test_defaults_when_unset() -> None:
             "cutoff should default",
         )
         _check(
+            cfg.answer_cutoff == DEFAULT_ANSWER_CUTOFF,
+            "answer_cutoff should default",
+        )
+        _check(
             get_false_resolve_ceiling() == DEFAULT_FALSE_RESOLVE_CEILING,
             "ceiling should default",
         )
@@ -144,6 +155,7 @@ def test_blank_and_whitespace_use_default() -> None:
         ESCALATION_TAU_SIM="",
         ESCALATION_N_MIN="   ",
         ESCALATION_FAITHFULNESS_CUTOFF=" ",
+        ESCALATION_ANSWER_CUTOFF="  ",
         ESCALATION_FALSE_RESOLVE_CEILING="",
     ):
         cfg = EscalationConfig.from_env()
@@ -152,6 +164,10 @@ def test_blank_and_whitespace_use_default() -> None:
         _check(
             cfg.faithfulness_cutoff == DEFAULT_FAITHFULNESS_CUTOFF,
             "whitespace cutoff -> default",
+        )
+        _check(
+            cfg.answer_cutoff == DEFAULT_ANSWER_CUTOFF,
+            "whitespace answer_cutoff -> default",
         )
         _check(
             get_false_resolve_ceiling() == DEFAULT_FALSE_RESOLVE_CEILING,
@@ -178,7 +194,7 @@ def test_tau_sim_out_of_range_raises() -> None:
 
 
 def test_cutoff_and_ceiling_out_of_range_raise() -> None:
-    """The other two [0,1] knobs validate identically and name their own var."""
+    """The other [0,1] knobs validate identically and name their own var."""
     with env(ESCALATION_FAITHFULNESS_CUTOFF="1.2"):
         try:
             EscalationConfig.from_env()
@@ -186,6 +202,13 @@ def test_cutoff_and_ceiling_out_of_range_raise() -> None:
             _check("ESCALATION_FAITHFULNESS_CUTOFF" in str(e), f"got: {e!r}")
         else:
             raise AssertionError("cutoff=1.2 must raise ValueError")
+    with env(ESCALATION_ANSWER_CUTOFF="1.2"):
+        try:
+            EscalationConfig.from_env()
+        except ValueError as e:
+            _check("ESCALATION_ANSWER_CUTOFF" in str(e), f"got: {e!r}")
+        else:
+            raise AssertionError("answer_cutoff=1.2 must raise ValueError")
     with env(ESCALATION_FALSE_RESOLVE_CEILING="2"):
         try:
             get_false_resolve_ceiling()
@@ -251,8 +274,8 @@ def test_ceiling_is_not_a_config_field() -> None:
     object the pipeline reads — structurally un-wireable into the latency path."""
     fields = set(EscalationConfig.model_fields)
     _check(
-        fields == {"tau_sim", "n_min", "faithfulness_cutoff"},
-        f"EscalationConfig must carry only the 3 gate knobs, got {sorted(fields)}",
+        fields == {"tau_sim", "n_min", "faithfulness_cutoff", "answer_cutoff"},
+        f"EscalationConfig must carry only the 4 gate knobs, got {sorted(fields)}",
     )
     for forbidden in ("false_resolve_ceiling", "ceiling", "false_resolve"):
         _check(
@@ -271,7 +294,9 @@ def test_ceiling_is_not_a_config_field() -> None:
 def test_frozen_and_direct_construction_validates() -> None:
     """The config is frozen (immutable) and self-validates on direct
     construction (defense in depth: not only the env path range-checks)."""
-    cfg = EscalationConfig(tau_sim=0.4, n_min=2, faithfulness_cutoff=0.7)
+    cfg = EscalationConfig(
+        tau_sim=0.4, n_min=2, faithfulness_cutoff=0.7, answer_cutoff=0.5
+    )
     try:
         cfg.tau_sim = 0.9  # type: ignore[misc]
     except ValidationError:
@@ -279,9 +304,10 @@ def test_frozen_and_direct_construction_validates() -> None:
     else:
         raise AssertionError("EscalationConfig must be frozen (immutable)")
     for kwargs in (
-        {"tau_sim": 1.5, "n_min": 2, "faithfulness_cutoff": 0.7},
-        {"tau_sim": 0.4, "n_min": 0, "faithfulness_cutoff": 0.7},
-        {"tau_sim": 0.4, "n_min": 2, "faithfulness_cutoff": -0.1},
+        {"tau_sim": 1.5, "n_min": 2, "faithfulness_cutoff": 0.7, "answer_cutoff": 0.5},
+        {"tau_sim": 0.4, "n_min": 0, "faithfulness_cutoff": 0.7, "answer_cutoff": 0.5},
+        {"tau_sim": 0.4, "n_min": 2, "faithfulness_cutoff": -0.1, "answer_cutoff": 0.5},
+        {"tau_sim": 0.4, "n_min": 2, "faithfulness_cutoff": 0.7, "answer_cutoff": 1.5},
     ):
         try:
             EscalationConfig(**kwargs)  # type: ignore[arg-type]

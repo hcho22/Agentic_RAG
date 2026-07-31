@@ -522,6 +522,7 @@ async def run_bot_deflection_turn(
         n_min=config.n_min,
         match_threshold=match_threshold,
         faithfulness_cutoff=config.faithfulness_cutoff,
+        answer_cutoff=config.answer_cutoff,
         top_k=top_k,
         answerer_model=answerer_model,
         judge_model=judge_model,
