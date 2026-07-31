@@ -124,6 +124,7 @@ if str(_ROOT / "backend") not in sys.path:
     sys.path.insert(0, str(_ROOT / "backend"))
 
 from escalation import (  # noqa: E402
+    DEFAULT_ANSWER_CUTOFF,
     EscalationConfig,
     RetrievalGateDecision,
     _escalated,
@@ -2383,7 +2384,13 @@ async def run_e7_sweep(
     points: list[SweepPoint] = []
     for index, (tau, n_min, faith_min) in enumerate(grid):
         config = EscalationConfig(
-            tau_sim=tau, n_min=n_min, faithfulness_cutoff=faithfulness_cutoff
+            tau_sim=tau,
+            n_min=n_min,
+            faithfulness_cutoff=faithfulness_cutoff,
+            # The E7 offline legs score with the 1-5 cross-family judge, not the
+            # runtime answer_gate (issue #97), so this carries the default for a
+            # valid config; sweeping it is the separate P3-observability story.
+            answer_cutoff=DEFAULT_ANSWER_CUTOFF,
         )
         p1a = await run_e7_p1a(
             questions=questions,

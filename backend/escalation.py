@@ -28,15 +28,30 @@ NET-NEW one-call check, NOT the offline RAGAS `faithfulness` metric in
 runs weekly); the same English word "faithfulness" names two distinct
 machineries on two different latency budgets.
 
-US-049: `run_deflection_pipeline` wires the two gates into the exact ADR-0003
+Issue #97: `answer_gate` is a SECOND, distinct runtime judge — grounding and
+answering are orthogonal, and the faithfulness gate only checks the former. A
+draft that says "I don't have that information about X" carries zero unsupported
+claims, so the faithfulness judge scores it `supported=True` and (before this
+gate) it was auto-sent and counted as a deflection though it answered nothing.
+The retrieval gate cannot catch it either: retrieval is *strong* precisely
+because the chunk is topically adjacent (the right subject, the wrong fact). So a
+separate operand — composed per ADR-0003 as deterministic control flow, not a
+model tool — verifies the draft actually ANSWERS the customer's question, and
+fails **closed** like the faithfulness gate (any judge error ⇒ escalate). It runs
+only on the would-be-answered path (after the draft clears faithfulness), so it
+adds ONE judge call to a turn that was about to auto-resolve — exactly the
+population at risk — and none to any escalate path.
+
+US-049: `run_deflection_pipeline` wires the gates into the exact ADR-0003
 control flow — `retrieve (hybrid, once) → retrieval gate → [if strong] draft →
-faithfulness gate → answer-or-escalate` — as deterministic control flow, never a
-model `escalate()` tool and never the M1 agentic loop (`MAX_TOOL_ITERATIONS` in
-`main.py`). The OR short-circuits on its cheap left operand: a weak retrieval
-escalates having made ZERO draft and ZERO judge calls. On any escalate the
-customer-facing message is a fixed generic deferral with NO reason/access
-metadata; the decision tags live only on the internal result fields (for logging
-/ the US-067 conversation status), never in `customer_message`.
+faithfulness gate → answer gate → answer-or-escalate` — as deterministic control
+flow, never a model `escalate()` tool and never the M1 agentic loop
+(`MAX_TOOL_ITERATIONS` in `main.py`). The OR short-circuits on its cheap left
+operand: a weak retrieval escalates having made ZERO draft and ZERO judge calls.
+On any escalate the customer-facing message is a fixed generic deferral with NO
+reason/access metadata; the decision tags live only on the internal result
+fields (for logging / the US-067 conversation status), never in
+`customer_message`.
 
 US-050: `EscalationConfig` (+ the standalone `get_false_resolve_ceiling`) is the
 ONE place the gate knobs are resolved from env and validated. The gates and the
@@ -308,6 +323,157 @@ def _unfaithful(tag: str) -> FaithfulnessDecision:
 
 
 # -----------------------------------------------------------------------------
+# Issue #97: one-call runtime ANSWER-COMPLETENESS gate.
+#
+# The faithfulness gate proves the draft doesn't LIE; it says nothing about
+# whether the draft ANSWERS. A grounded non-answer ("I don't have that
+# information about X") is trivially faithful — zero unsupported claims — so
+# without this gate it auto-sends and is counted as a deflection though the
+# customer got nothing. This is a SECOND, orthogonal judge call that verifies the
+# draft actually addresses the customer's question, and — like the faithfulness
+# gate — fails **closed**: any judge error / refusal / parse failure / timeout is
+# treated as a non-answer (⇒ escalate), never auto-sent. It compares the QUESTION
+# against the DRAFT (NOT the chunks — grounding is the other gate's job); it is
+# the runtime companion to the OFFLINE-only `answer_relevancy` RAGAS metric
+# (`evals/retrieval/ragas.py`), which gates CI regressions, never an individual
+# customer reply.
+# -----------------------------------------------------------------------------
+
+_ANSWER_JUDGE_SYSTEM_PROMPT = (
+    "You are a strict answer-completeness judge for an automated customer-support "
+    "reply. You are given the customer's QUESTION and a draft ANSWER. Decide "
+    "whether the ANSWER actually answers the QUESTION — that it provides the "
+    "specific information the customer asked for. A reply that says it does not "
+    "have the information, that it cannot help, that it is unsure, or that it is "
+    "deferring the customer to a human, or that answers only a DIFFERENT question "
+    "than the one asked, does NOT answer the question. Judge ONLY whether the "
+    "question is answered — not grounding, tone, or politeness (a blunt but "
+    "responsive answer still answers; a warm apology that gives no information "
+    "does not). Return `answers` and a `score` in [0,1] for how completely the "
+    "QUESTION is answered (1.0 = fully and directly answered, 0.0 = not answered "
+    "at all)."
+)
+
+
+class AnswerJudgment(BaseModel):
+    """Structured-output schema the answer-completeness judge returns per call.
+
+    Mirrors `FaithfulnessJudgment` — one boolean and one score for a single fast
+    round trip. The `[0,1]` bound on `score` is stated in the description and
+    enforced by clamping in `answer_gate`, not as a JSON-schema constraint, so
+    strict structured-output mode never rejects a slightly-out-of-range value.
+    """
+
+    answers: bool = Field(
+        ...,
+        description=(
+            "True iff the ANSWER actually answers the customer's QUESTION with "
+            "the specific information requested. False if it defers, says it "
+            "lacks the information, cannot help, or answers a different question."
+        ),
+    )
+    score: float = Field(
+        ...,
+        description=(
+            "Confidence in [0,1] that the QUESTION is fully and directly "
+            "answered. 1.0 = fully answered; 0.0 = not answered at all."
+        ),
+    )
+
+
+class AnswerDecision(BaseModel):
+    """Outcome of the runtime answer-completeness gate — frozen, like the other
+    gate decisions.
+
+    `answers` is the bottom-line verdict the orchestrator (US-049) acts on:
+    `True` ⇒ the (already-faithful) draft may auto-send, `False` ⇒ escalate. It
+    is `addressed AND score >= cutoff`, forced `False` on any judge failure
+    (fail-closed). `addressed` / `score` carry the raw judge output (score clamped
+    to `[0,1]`; `0.0` on failure). `reason` is a machine-stable tag for logging /
+    eval only — every escalating reason starts with `"non_answer"` — and is never
+    shown to the customer (US-049 returns the generic deferral).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    answers: bool
+    addressed: bool
+    score: float
+    reason: str
+
+
+async def answer_gate(
+    judge_client: AsyncOpenAI,
+    question: str,
+    draft: str,
+    cutoff: float,
+    *,
+    model: str | None = None,
+) -> AnswerDecision:
+    """Verify a drafted answer actually answers the question via ONE judge call.
+
+    Makes exactly one `chat.completions.parse` structured-output call on the
+    runtime-judge client/model and returns `answers = addressed AND
+    score >= cutoff`. Any failure mode — SDK/API error, timeout, refusal, empty
+    choices, missing parsed payload — fails **closed**: `answers=False`
+    (escalate), never open. Compares the QUESTION against the DRAFT only; grounding
+    is `faithfulness_gate`'s job, not this gate's.
+    """
+    resolved_model = model or get_judge_model()
+    user_prompt = (
+        f"QUESTION:\n{question}\n\n"
+        f"ANSWER:\n{draft}\n\n"
+        "Does the ANSWER actually answer the QUESTION?"
+    )
+    try:
+        completion = await judge_client.chat.completions.parse(
+            model=resolved_model,
+            messages=[
+                {"role": "system", "content": _ANSWER_JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format=AnswerJudgment,
+        )
+    except Exception as e:  # noqa: BLE001 — any SDK/API/timeout failure fails closed
+        log.warning("answer-completeness judge call failed: %s", e)
+        return _non_answer("judge_error")
+
+    if not completion.choices:
+        log.warning("answer-completeness judge returned no choices")
+        return _non_answer("judge_no_choices")
+    message = completion.choices[0].message
+    if getattr(message, "refusal", None):
+        log.warning("answer-completeness judge refused: %s", message.refusal)
+        return _non_answer("judge_refusal")
+    judgment = getattr(message, "parsed", None)
+    if judgment is None:
+        log.warning("answer-completeness judge returned no parsed payload")
+        return _non_answer("judge_no_payload")
+
+    score = max(0.0, min(1.0, judgment.score))
+    answers = judgment.answers and score >= cutoff
+    if answers:
+        reason = "answers"
+    elif not judgment.answers:
+        reason = "non_answer: judge_unaddressed"
+    else:
+        reason = f"non_answer: score {score:.4f} < cutoff {cutoff:.4f}"
+    return AnswerDecision(
+        answers=answers,
+        addressed=judgment.answers,
+        score=score,
+        reason=reason,
+    )
+
+
+def _non_answer(tag: str) -> AnswerDecision:
+    """The fail-closed decision: the draft did not answer, escalate."""
+    return AnswerDecision(
+        answers=False, addressed=False, score=0.0, reason=f"non_answer: {tag}"
+    )
+
+
+# -----------------------------------------------------------------------------
 # US-049: deterministic deflection pipeline orchestrator.
 #
 # Runs the exact ADR-0003 control flow as plain control flow — never a model
@@ -353,8 +519,12 @@ class DeflectionResult(BaseModel):
     `action == "escalated"`. The remaining fields are internal diagnostics for
     logging and the US-067 conversation status — `retrieval` (always present),
     `faithfulness` (`None` when the retrieval gate short-circuited before any
-    draft/judge call), and `reason` (a machine-stable tag that must NEVER be
-    surfaced to the customer).
+    draft/judge call), `answer` (the answer-completeness decision, issue #97;
+    `None` unless the draft reached the answer gate — i.e. it cleared
+    faithfulness), and `reason` (a machine-stable tag that must NEVER be surfaced
+    to the customer). An `action == "answered"` result ALWAYS carries a non-None
+    `answer` with `answers=True`: the gate is a mandatory operand on the send
+    path, never skipped.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -363,6 +533,7 @@ class DeflectionResult(BaseModel):
     customer_message: str
     retrieval: RetrievalGateDecision
     faithfulness: FaithfulnessDecision | None
+    answer: AnswerDecision | None = None
     reason: str
 
     @property
@@ -374,14 +545,21 @@ def _escalated(
     retrieval: RetrievalGateDecision,
     faithfulness: FaithfulnessDecision | None,
     reason: str,
+    answer: AnswerDecision | None = None,
 ) -> DeflectionResult:
     """The sole constructor of an escalated result: `customer_message` is ALWAYS
-    the generic deferral, so the gate `reason` can never leak to the customer."""
+    the generic deferral, so the gate `reason` can never leak to the customer.
+
+    `answer` is the answer-completeness decision (issue #97) when the escalate
+    was that gate's call; `None` on every earlier escalate (retrieval
+    short-circuit, draft error/empty, unfaithful draft) where the answer gate
+    never ran."""
     return DeflectionResult(
         action="escalated",
         customer_message=GENERIC_DEFERRAL,
         retrieval=retrieval,
         faithfulness=faithfulness,
+        answer=answer,
         reason=reason,
     )
 
@@ -431,6 +609,7 @@ async def run_deflection_pipeline(
     n_min: int,
     match_threshold: float,
     faithfulness_cutoff: float,
+    answer_cutoff: float,
     top_k: int = DEFAULT_TOP_K,
     answerer_model: str | None = None,
     judge_model: str | None = None,
@@ -444,8 +623,11 @@ async def run_deflection_pipeline(
         retrieve (hybrid, ONCE) → retrieval gate
             → weak  ⇒ escalate now (ZERO draft, ZERO judge calls)
             → strong ⇒ draft → faithfulness gate
-                → faithful   ⇒ answer (send the draft)
-                → unfaithful ⇒ escalate
+                → unfaithful ⇒ escalate (answer gate never runs)
+                → faithful   ⇒ answer-completeness gate (issue #97)
+                    → answers    ⇒ answer (send the draft)
+                    → non-answer ⇒ escalate (a grounded non-answer is NOT a
+                                   deflection — it answered nothing)
 
     `supabase_headers` MUST carry the customer's/bot's JWT so retrieval runs
     under RLS + the workspace membership clause — that membership, resolved from
@@ -494,15 +676,32 @@ async def run_deflection_pipeline(
     faithfulness = await faithfulness_gate(
         judge_client, draft, chunks, faithfulness_cutoff, model=judge_model
     )
-    if faithfulness.faithful:
-        return DeflectionResult(
-            action="answered",
-            customer_message=draft,
-            retrieval=retrieval,
-            faithfulness=faithfulness,
-            reason="answered",
+    if not faithfulness.faithful:
+        return _escalated(
+            retrieval, faithfulness=faithfulness, reason=faithfulness.reason
         )
-    return _escalated(retrieval, faithfulness=faithfulness, reason=faithfulness.reason)
+
+    # Issue #97: a faithful draft still may not ANSWER — a grounded "I don't have
+    # that information" is trivially faithful. The answer gate is the second,
+    # orthogonal operand on the send path; it fails closed. It runs ONLY here
+    # (after the draft cleared faithfulness), so it adds one judge call to a turn
+    # that was about to auto-resolve and none to any escalate path.
+    answer = await answer_gate(
+        judge_client, message, draft, answer_cutoff, model=judge_model
+    )
+    if not answer.answers:
+        return _escalated(
+            retrieval, faithfulness=faithfulness, reason=answer.reason, answer=answer
+        )
+
+    return DeflectionResult(
+        action="answered",
+        customer_message=draft,
+        retrieval=retrieval,
+        faithfulness=faithfulness,
+        answer=answer,
+        reason="answered",
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -533,6 +732,12 @@ async def run_deflection_pipeline(
 DEFAULT_TAU_SIM = 0.4
 DEFAULT_N_MIN = 2
 DEFAULT_FAITHFULNESS_CUTOFF = 0.7
+# Issue #97 answer-completeness gate cutoff: the minimum `answers` score a
+# faithful draft must clear to auto-send. A clear non-answer scores near 0 and a
+# real answer near 1, so a mid default cleanly separates them; conservative
+# pending the E7 sweep, which should price the false-*escalate* trade this gate
+# introduces rather than assume it.
+DEFAULT_ANSWER_CUTOFF = 0.5
 
 # The buyer's single risk-tolerance number: the maximum fraction of
 # should-escalate (P3) questions allowed to auto-resolve. Consumed ONLY by the
@@ -581,10 +786,11 @@ class EscalationConfig(BaseModel):
 
     Carries ONLY the per-request gate parameters the deflection pipeline
     consumes: `tau_sim` and `n_min` for the retrieval gate (US-047),
-    `faithfulness_cutoff` for the faithfulness gate (US-048). It deliberately
-    does NOT carry the false-resolve ceiling (`get_false_resolve_ceiling`) — that
-    is an eval-time population metric, structurally kept off this object so it
-    cannot leak into the latency path.
+    `faithfulness_cutoff` for the faithfulness gate (US-048), and `answer_cutoff`
+    for the answer-completeness gate (issue #97). It deliberately does NOT carry
+    the false-resolve ceiling (`get_false_resolve_ceiling`) — that is an
+    eval-time population metric, structurally kept off this object so it cannot
+    leak into the latency path.
 
     The gate's per-row `match_threshold` is NOT here either: it is the existing
     retrieval similarity threshold (`retrieval.get_similarity_threshold`, env
@@ -602,22 +808,26 @@ class EscalationConfig(BaseModel):
     tau_sim: float = Field(..., ge=0.0, le=1.0)
     n_min: int = Field(..., ge=1)
     faithfulness_cutoff: float = Field(..., ge=0.0, le=1.0)
+    answer_cutoff: float = Field(..., ge=0.0, le=1.0)
 
     @classmethod
     def from_env(cls) -> EscalationConfig:
         """Resolve + validate the global escalation knobs from the environment.
 
-        Each knob is parsed and range-checked (`tau_sim`/`faithfulness_cutoff` in
-        [0,1], `n_min` >= 1); a non-numeric or out-of-range value raises a
-        `ValueError` naming the offending env var. Omitting a knob yields its
-        ADR-0003 / E7-sweep default. Call once at startup so a misconfiguration
-        fails the boot, not the first support request.
+        Each knob is parsed and range-checked (`tau_sim`/`faithfulness_cutoff`/
+        `answer_cutoff` in [0,1], `n_min` >= 1); a non-numeric or out-of-range
+        value raises a `ValueError` naming the offending env var. Omitting a knob
+        yields its ADR-0003 / E7-sweep default. Call once at startup so a
+        misconfiguration fails the boot, not the first support request.
         """
         return cls(
             tau_sim=_env_unit_float("ESCALATION_TAU_SIM", DEFAULT_TAU_SIM),
             n_min=_env_min_int("ESCALATION_N_MIN", DEFAULT_N_MIN, minimum=1),
             faithfulness_cutoff=_env_unit_float(
                 "ESCALATION_FAITHFULNESS_CUTOFF", DEFAULT_FAITHFULNESS_CUTOFF
+            ),
+            answer_cutoff=_env_unit_float(
+                "ESCALATION_ANSWER_CUTOFF", DEFAULT_ANSWER_CUTOFF
             ),
         )
 
