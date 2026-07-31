@@ -375,6 +375,35 @@ corpus. Recall is computed against the viewer's own top-5 at the
 highest `ef_search` (=500), so the ef_search=500 column is 1.000 by
 construction; the curve at 40 / 80 / 200 is what the table reports.
 
+> **The embedded table below was generated on 2026-05-14** - commit
+> `393ffaf`, the only commit `evals/permissions_scale/summary.md` has ever
+> had, which is why the block carries `47.93s wall`. 2026-05-31 is a
+> different fact: it is the last night a nightly independently reproduced
+> the same all-1.000 values, in its own run (`56.95s wall`), so the
+> snapshot for that date does not match this artifact byte-for-byte.
+> The source file then went stale and then wrong without this section
+> changing: from 2026-06-01 the runner died before rewriting it and the
+> nightly republished it verbatim for 18 days (18 snapshots carrying an
+> identical `47.93s wall` and no results JSON), then from 2026-06-19 to
+> 2026-07-30 a missing `workspace_membership` row for the eval viewers made
+> every cell a real, measured 0.000 for 42 days. The seeder now joins its
+> viewers to the workspace, and a refused or crashed run states "no
+> numbers" in a named refusal notice - but it publishes that notice to the
+> nightly's own `--summary` scratch path (`/tmp/scale-summary.md`), which
+> the workflow copies to `docs/permissions-scale-nightly/<DATE>.md`.
+> `_write_failure_notice` deliberately leaves the git-tracked
+> `evals/permissions_scale/summary.md` untouched, so a failing run can never
+> rewrite the committed baseline this section embeds. Nothing automated
+> refreshes it either: the nightly commits only
+> `docs/permissions-scale-nightly/`, and `docs/_embed_eval_summaries.py`
+> runs in no workflow. Refreshing the table below is a deliberate manual
+> step - `python -m evals.permissions_scale.runner` with its DEFAULT
+> `--summary`, then `python -m docs._embed_eval_summaries`, then a commit -
+> which is exactly why the date stamp above and this pointer are the
+> operative instruction. The live per-night output is in
+> [`permissions-scale-nightly/`](permissions-scale-nightly/); read that,
+> not this snapshot.
+
 <!-- BEGIN EVAL_SUMMARY:permissions_scale -->
 
 ### Permissions scale: recall@5 vs ef_search × selectivity
@@ -534,4 +563,11 @@ that is how the nightly publishes it (§5b). The refusal itself is
 pinned by `python -m evals.permissions_scale.test_degenerate_guard`,
 which runs fully offline - no database, no secrets, no network -
 deliberately, so it cannot pass merely because the local database
-happens to be unseeded.
+happens to be unseeded. Since it is offline it needs no Supabase
+stack in CI either, so it runs per-PR in the `eval-harness-guards`
+job of `.github/workflows/retrieval-eval.yml` on any change under
+`evals/permissions_scale/**`, alongside the retrieval harness's
+sibling guard (`evals.retrieval.test_empty_gold_guard`, the
+authored-gold half of the same invariant). Both run unconditionally
+with no `|| true`: a guard that can go quiet is the failure mode it
+exists to catch.

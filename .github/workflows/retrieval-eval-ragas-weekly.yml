@@ -10,7 +10,10 @@
 # against. A red gate finding (US-005 operational, or a US-007 corroborated
 # score regression) makes the runner exit non-zero; this workflow then files
 # one GitHub issue per finding tag and fails so a maintainer is paged. A green
-# scheduled run auto-closes stale operational issues.
+# scheduled run auto-closes stale operational issues. A run that produces NO
+# snapshot is a third state — UNMEASURED, not green and not red — and files its
+# own deduped `ragas-weekly-harness-failure` issue rather than going quiet; see
+# the snapshot check below for why that state has to exist.
 
 name: RAGAS eval (weekly)
 
@@ -92,8 +95,12 @@ jobs:
           # syntax. `--summary` points at /tmp so the default
           # evals/retrieval/summary.md (the nightly retrieval artifact) is
           # left untouched. The runner exits 1 on a red gate finding but
-          # writes the JSON + summary first, so the snapshot is always
-          # publishable — capture the code rather than letting it abort.
+          # writes the JSON + summary first, so a snapshot is publishable for
+          # any failure ON THE GATE PATH. It is NOT a guarantee that a snapshot
+          # exists: anything that kills the process before scoring (a bad API
+          # key, a seed failure) produces none, which the snapshot check below
+          # treats as its own UNMEASURED state rather than as a verdict.
+          # Capture the code rather than letting it abort.
           set +e
           python -m evals.retrieval.runner \
             --include-generation --include-ragas \
@@ -104,13 +111,39 @@ jobs:
           echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
           echo "runner exited ${code}"
 
-      - name: Publish to docs/ragas-weekly/
+      # The runner's "always writes a snapshot first" contract is a claim about
+      # the gate path, not about the whole run: anything that kills the process
+      # BEFORE scoring (an invalid ANTHROPIC_API_KEY, a seed failure, an OOM)
+      # leaves no snapshot at all. That case is neither green nor red, it is
+      # UNMEASURED, and it has to be named as its own state here so the steps
+      # below cannot quietly treat it as either.
+      - name: Check the runner produced a snapshot
+        id: snapshot
         if: always()
+        env:
+          # Unset when the job died BEFORE the runner step (supabase start, pip
+          # install, the timeout kill). Naming that as its own phrase keeps the
+          # annotation from blaming the runner for a failure it never reached.
+          RUNNER_EXIT: ${{ steps.ragas.outputs.exit_code }}
         run: |
-          if [ ! -f /tmp/ragas-weekly.json ]; then
-            echo "runner produced no snapshot — nothing to publish"
-            exit 0
+          EXIT_DESC="exited ${RUNNER_EXIT}"
+          LOG_HINT="the traceback is in the *Seed corpus + run RAGAS eval* step"
+          if [ -z "${RUNNER_EXIT}" ]; then
+            EXIT_DESC="never ran (the job failed before the run step)"
+            LOG_HINT="the *Seed corpus + run RAGAS eval* step never executed, so the failure is in an earlier step"
           fi
+          echo "exit_desc=${EXIT_DESC}" >> "$GITHUB_OUTPUT"
+          echo "log_hint=${LOG_HINT}" >> "$GITHUB_OUTPUT"
+          if [ -f /tmp/ragas-weekly.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::error title=RAGAS weekly UNMEASURED::The runner ${EXIT_DESC} without writing a snapshot, so no gate was evaluated this week. This is not a red gate finding; nothing was measured."
+          fi
+
+      - name: Publish to docs/ragas-weekly/
+        if: always() && steps.snapshot.outputs.present == 'true'
+        run: |
           DATE=$(date -u +"%Y-%m-%d")
           mkdir -p docs/ragas-weekly
           cp /tmp/ragas-weekly.json "docs/ragas-weekly/${DATE}.json"
@@ -125,17 +158,69 @@ jobs:
             git push
           fi
 
+      # A missing snapshot IS a finding, and the loudest one this workflow can
+      # produce - it means the gates went unmeasured. The old `exit 0` here is
+      # what kept this workflow silent for nine consecutive weekly failures
+      # (2026-05-24 through 2026-07-26, an invalid ANTHROPIC_API_KEY 401'ing the
+      # judge before any scoring): the publish step found nothing to publish,
+      # this step found nothing to read, and the only surviving signal was a red
+      # X captioned "a red gate finding fired" - describing the very thing that
+      # had NOT happened. The path that should shout must never be the path that
+      # goes quiet.
       - name: File / close gate-finding issues
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUNNER_EXIT: ${{ steps.ragas.outputs.exit_code }}
+          EXIT_DESC: ${{ steps.snapshot.outputs.exit_desc }}
+          LOG_HINT: ${{ steps.snapshot.outputs.log_hint }}
           EVENT_NAME: ${{ github.event_name }}
+          SNAPSHOT: ${{ steps.snapshot.outputs.present }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ ! -f /tmp/ragas-weekly.json ]; then
-            echo "no snapshot — skipping issue management"
-            exit 0
+          HARNESS_LABEL=ragas-weekly-harness-failure
+          if [ "${SNAPSHOT}" != "true" ]; then
+            gh label create "${HARNESS_LABEL}" --color B60205 \
+              --description "RAGAS weekly harness died before producing a snapshot" --force || true
+            open=$(gh issue list --label "${HARNESS_LABEL}" --state open \
+              --json number --jq 'length')
+            if [ "${open}" = "0" ]; then
+              gh issue create --label "${HARNESS_LABEL}" \
+                --title "RAGAS weekly: no snapshot produced — the gates are UNMEASURED" \
+                --body "$(printf '%s\n' \
+                  "The weekly RAGAS runner ${EXIT_DESC} without writing \`/tmp/ragas-weekly.json\`." \
+                  "" \
+                  "**No gate was evaluated this week.** This is not a green run and not a red one - it is an unmeasured one, and every RAGAS number the repo reports is as old as the last run that did produce a snapshot." \
+                  "" \
+                  "Nothing was published to \`docs/ragas-weekly/\`, so the newest file there is stale and must not be read as current." \
+                  "" \
+                  "Run log (${LOG_HINT}): ${RUN_URL}" \
+                  "" \
+                  "This issue is deduped on the \`${HARNESS_LABEL}\` label and auto-closes as soon as a run produces a snapshot again.")"
+              echo "filed harness-failure issue"
+            else
+              echo "open harness-failure issue already exists — dedup, skipping"
+            fi
+            exit 1
           fi
+          # A snapshot exists, so the harness is measuring again: clear any open
+          # harness-failure issue before dealing with the gate verdict itself.
+          # Unlike the gate-finding auto-close below this is NOT restricted to
+          # scheduled runs - "did the harness produce a snapshot" is a fact about
+          # this run alone, not a verdict a partial re-run could misrepresent.
+          #
+          # Both the label creation and the list are non-fatal: this branch runs
+          # on every MEASURED run, so a never-yet-created label or a transient gh
+          # blip here must not turn a fully-measured green run red - that is the
+          # exact miscaption this step exists to remove.
+          gh label create "${HARNESS_LABEL}" --color B60205 \
+            --description "RAGAS weekly harness died before producing a snapshot" --force || true
+          for num in $(gh issue list --label "${HARNESS_LABEL}" --state open \
+            --json number --jq '.[].number' || true); do
+            gh issue close "${num}" \
+              --comment "Auto-closed: the RAGAS weekly harness produced a snapshot again (${RUN_URL}), so the gates are being measured."
+            echo "auto-closed harness-failure issue #${num}"
+          done
           if [ "${RUNNER_EXIT}" != "0" ]; then
             # Red gate finding(s): file one issue per tag, deduped against an
             # open issue already carrying that label.
@@ -173,8 +258,12 @@ jobs:
             done
           fi
 
+      # Gated on the snapshot as well as the exit code: without one there is no
+      # gate verdict to reflect, and claiming "a red gate finding fired" for a
+      # harness crash is what made nine weeks of failures look like nine weeks of
+      # findings. That case fails the job from the issue step above instead.
       - name: Reflect runner exit code
-        if: always() && steps.ragas.outputs.exit_code == '1'
+        if: always() && steps.snapshot.outputs.present == 'true' && steps.ragas.outputs.exit_code == '1'
         run: |
           echo "RAGAS runner exited 1 — a red gate finding fired."
           echo "Findings have been filed as GitHub issues; failing the workflow."

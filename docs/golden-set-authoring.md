@@ -48,7 +48,7 @@ gold_anchors:
     doc: returns-process
 ```
 
-Three properties follow, and all three are the point:
+Four properties follow, and all four are the point:
 
 1. **A re-chunk needs zero re-labeling.**
    Sweep `chunk_size`, overlap, or the docling parser and re-run - the same anchor re-resolves to the new chunk indices.
@@ -63,6 +63,13 @@ Three properties follow, and all three are the point:
    An anchor that matches no current chunk raises `ZeroResolveError` naming the question id and the offending span, and fails the whole run.
    Matching is whitespace-normalized but otherwise **exact**: case, punctuation, and en/em dashes must match the corpus verbatim.
    The resolver does **not** fuzzy-match around a content edit - editing the source so the quoted words no longer appear breaks the anchor on purpose, which is how you find out a label went stale instead of shipping a green run over a broken one.
+
+4. **An empty gold set is unscoreable - the metrics refuse it rather than report 0.000.**
+   `ZeroResolveError` covers one *anchor* matching nothing; `EmptyGoldError` (its neighbour in `evals/retrieval/content_anchors.py`) covers every other route by which a question can arrive at a scorer with no gold at all.
+   It is raised at each depth where that becomes knowable: `resolve_gold_anchors` before a single query is issued, `_metrics_block` naming the exact question / mode / viewer / filter, and inside `recall_at_k` / `mrr` / `ndcg_at_5` themselves so no caller can route around it.
+   The distinction it protects is the one this whole section exists for: gold that exists and was *missed* is a real measurement and still scores **0.000**, while gold that does not exist is not a number at all.
+   Without the refusal an authoring mistake reaches the gate wearing the shape of a retrieval regression and drags the gated E4/E6 means down with it.
+   Every message points back here, because on the E4/E6 path the fix is always a golden-set fix.
 
 **Authoring an anchor:** copy the span verbatim from the seeded chunk, then confirm it resolves before you commit.
 A span that reads well in your head but is not a byte-for-byte substring of a chunk (a smart-quote, an em dash you typed as a hyphen, a word you paraphrased) fails loud on the first run.
@@ -205,7 +212,7 @@ The kit's default demonstrates cross-family corroboration on purpose so the ship
 ## Authoring checklist
 
 - [ ] Every gold label is an **answer-bearing content anchor** (a verbatim corpus span), never a chunk index (§2).
-- [ ] Every anchor **resolves** - run the eval; a `ZeroResolveError` names any stale or typo'd span (§2).
+- [ ] Every anchor **resolves** - run the eval; a `ZeroResolveError` names any stale or typo'd span, and an `EmptyGoldError` names any question left with no gold to score at all (§2).
 - [ ] Gold is **exhaustive**: every chunk that contains a question's answer is anchored, not just the best one (§3, the completeness contract).
 - [ ] You wrote **no** permission test and **no** P1b case - those derive from the gold (§4).
 - [ ] Support buyers only: one `escalation` label per question (§5); knowledge-assistant-only buyers omit the layer.

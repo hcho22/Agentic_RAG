@@ -27,6 +27,7 @@ import asyncpg
 import httpx
 
 import evals.retrieval.e6 as e6
+from evals.retrieval.content_anchors import EmptyGoldError
 from evals.retrieval.e6 import (
     RETRY_ATTEMPTS,
     E6ExecutionError,
@@ -80,7 +81,16 @@ def _offline_checks() -> None:
     )
 
     # --- recall@10 --------------------------------------------------------
-    assert recall_at_10(set(), ["a", "b"]) == 0.0
+    # Empty B-gold REFUSES rather than scoring 0.0. This assertion used to read
+    # `== 0.0`, which is precisely the fail-open it now pins shut: E6's negative
+    # assertion IS `recall@10 == 0.0`, so an empty gold set scored a PASS on a
+    # tenant-isolation invariant the run never exercised.
+    try:
+        recall_at_10(set(), ["a", "b"])
+    except EmptyGoldError as e:
+        assert "empty gold set" in str(e), str(e)
+    else:
+        raise AssertionError("recall_at_10(empty gold): expected EmptyGoldError")
     assert recall_at_10({"a"}, ["a", "b", "c"]) == 1.0
     assert recall_at_10({"a", "b"}, ["a", "x", "y"]) == 0.5
     assert recall_at_10({"a"}, []) == 0.0
