@@ -172,7 +172,9 @@ from evals.retrieval.e7_runner import (  # noqa: E402
 JUDGE_MODEL = "claude-haiku-4-5"  # the offline cross-family judge model id
 
 TAU, N_MIN, THRESH = 0.4, 2, 0.3
-CONFIG = EscalationConfig(tau_sim=TAU, n_min=N_MIN, faithfulness_cutoff=0.7)
+CONFIG = EscalationConfig(
+    tau_sim=TAU, n_min=N_MIN, faithfulness_cutoff=0.7, answer_cutoff=0.5
+)
 
 
 def _check(cond: bool, msg: str) -> None:
