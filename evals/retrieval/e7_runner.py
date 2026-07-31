@@ -171,9 +171,15 @@ DEFAULT_FAITHFULNESS_JUDGE_MIN = 4
 # only fails the run when EVERY row is mislabeled (zero exercised); this ceiling
 # governs the PARTIAL case: when the mislabeled FRACTION over the full presented P3
 # population exceeds it, the leg is failed/flagged low-confidence so heavy gold drift
-# trips the gate instead of quietly diluting the false-resolve rate (latent today at
-# the 3-row gold, a real masking path as the P3 gold grows). Default 0.5 (a majority-
-# mislabeled P3 leg is a gold defect); override via E7_P3_MISLABEL_RATIO_MAX or
+# trips the gate instead of quietly diluting the false-resolve rate. This guard is
+# DORMANT at today's main leg, not firing: at the default τ_sim of 0.4
+# (`backend.escalation.DEFAULT_TAU_SIM`) all 9 P3 rows clear the retrieval gate, so the
+# measured ratio is 0/9. It becomes REACHABLE the moment ESCALATION_TAU_SIM is promoted
+# to 0.5 — the 5 rows measuring below that (e7-p3-01 0.4607, e7-p3-02 0.4214, e7-p3-03
+# 0.4298, e7-p3-07 0.4234, e7-p3-09 0.4570) then fall out at the retrieval gate, so the
+# ratio is AT LEAST 5/9 ≈ 56% (a lower bound — rows can additionally fall out on
+# n_cleared < n_min) — over this ceiling. Default 0.5 (a majority-mislabeled P3 leg
+# is a gold defect); override via E7_P3_MISLABEL_RATIO_MAX or
 # --p3-mislabel-ratio-max. The denominator is the full presented population
 # (`n_questions`), matching the false-resolve rate's — NOT `len(exercised)`.
 DEFAULT_P3_MISLABEL_RATIO_MAX = 0.5
@@ -2108,6 +2114,23 @@ class SweepPoint:
     `false_resolve` / `false_escalate` properties are read straight off the
     embedded `E7Metrics` (US-055), so a swept rate is computed by the exact same
     consolidation code a single-point run uses.
+
+    `p3_n_exercised` / `p3_n_mislabeled` / `p3_mislabel_ratio` carry the P3 leg's
+    exercise stats AT THIS POINT, and they are the difference between a swept
+    false-resolve that is a measurement and one that is an artefact. Raising τ_sim
+    makes P3 rows escalate at the RETRIEVAL gate, where they are `mislabeled` — the
+    faithfulness gate never runs, so they can never be tallied a false-resolve and
+    the rate falls toward 0 without the pipeline having got any safer. At the
+    extreme (`p3_n_exercised == 0`) the point's false-resolve 0% measured NOTHING,
+    which is precisely what `e7_pinned_invariants_failed`'s P3 positive control and
+    the issue-#26 mislabel-ratio guard refuse to accept on the main leg (AGENTS.md
+    invariant 12) — so without these fields the sweep could recommend an operating
+    point the runner's own pinned invariants would exit 1 on.
+
+    These are REPORTED, not enforced: `feasible` and `_select_knee` are unchanged,
+    so the knee is still selected on false-resolve ≤ ceiling alone. A reader (or a
+    later gate) can now tell which points earned their number and which merely
+    stopped measuring — previously indistinguishable in the snapshot.
     """
 
     index: int
@@ -2116,6 +2139,29 @@ class SweepPoint:
     faithfulness_judge_min: int
     metrics: E7Metrics
     feasible: bool
+    p3_n_questions: int = 0
+    p3_n_exercised: int = 0
+    p3_n_mislabeled: int = 0
+    p3_mislabel_ratio: float | None = None
+
+    @property
+    def p3_vacuous(self) -> bool:
+        """True when NO P3 row reached the faithfulness gate at this point, so this
+        point's false-resolve rate is not a measurement at all. Mirrors the main leg's
+        positive control (`E7P3Result.passed` is `len(exercised) > 0`) EXACTLY,
+        including the EMPTY population: a gold carrying zero `should_escalate` rows
+        measured nothing just as surely as one whose rows all escalated early, and
+        AGENTS.md invariant 12 forbids reporting either as a measurement. The two
+        causes read differently in the rendered report (`p3_absent` picks them apart);
+        the flag does not distinguish them because the consequence is identical."""
+        return self.p3_n_exercised == 0
+
+    @property
+    def p3_absent(self) -> bool:
+        """True when this point presented NO P3 rows at all — the empty-gold half of
+        `p3_vacuous`, split out so the report can name the right remedy (author P3
+        rows, vs. keep the existing ones above τ_sim)."""
+        return self.p3_n_questions == 0
 
     @property
     def deflection(self) -> float | None:
@@ -2139,6 +2185,11 @@ class SweepPoint:
             "false_resolve": self.false_resolve,
             "false_escalate": self.false_escalate,
             "feasible": self.feasible,
+            "p3_n_questions": self.p3_n_questions,
+            "p3_n_exercised": self.p3_n_exercised,
+            "p3_n_mislabeled": self.p3_n_mislabeled,
+            "p3_mislabel_ratio": self.p3_mislabel_ratio,
+            "p3_vacuous": self.p3_vacuous,
             "metrics": self.metrics.to_dict(),
         }
 
@@ -2212,7 +2263,13 @@ class E7Sweep:
         """The deflection-vs-false-resolve curve as plottable points, sorted by
         false-resolve ascending then deflection descending — the operating curve
         the knee sits on. Points whose deflection or false-resolve is blind (None)
-        are omitted (they are not on the curve)."""
+        are omitted (they are not on the curve).
+
+        Each point carries `p3_n_exercised` / `p3_vacuous` alongside its rates: a
+        consumer plotting this curve straight off the snapshot must be able to
+        tell a false-resolve 0% that was MEASURED from one earned by driving every
+        P3 row out of the retrieval gate, which is otherwise the same number here.
+        """
         plottable = [
             p for p in self.points
             if p.false_resolve is not None and p.deflection is not None
@@ -2232,6 +2289,8 @@ class E7Sweep:
                 "n_min": p.n_min,
                 "faithfulness_judge_min": p.faithfulness_judge_min,
                 "feasible": p.feasible,
+                "p3_n_exercised": p.p3_n_exercised,
+                "p3_vacuous": p.p3_vacuous,
                 "index": p.index,
             }
             for p in plottable
@@ -2245,6 +2304,11 @@ class E7Sweep:
         The offline 1-5 faithfulness floor is reported as guidance only: the
         runtime `ESCALATION_FAITHFULNESS_CUTOFF` lives on a DIFFERENT [0,1] scale
         (US-048/050) and is tuned separately, so it is not promoted verbatim.
+
+        `p3_vacuous` / `p3_n_exercised` ride along so a SCRIPT promoting these
+        defaults sees the same warning the markdown prose carries: a vacuous knee's
+        false-resolve rate measured nothing, so these knobs are not safe to promote
+        on the strength of it.
         """
         k = self.knee
         if k is None:
@@ -2253,6 +2317,8 @@ class E7Sweep:
             "ESCALATION_TAU_SIM": k.tau_sim,
             "ESCALATION_N_MIN": k.n_min,
             "faithfulness_judge_min_offline_1_5": k.faithfulness_judge_min,
+            "p3_n_exercised": k.p3_n_exercised,
+            "p3_vacuous": k.p3_vacuous,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -2355,6 +2421,10 @@ async def run_e7_sweep(
                 faithfulness_judge_min=faith_min,
                 metrics=metrics,
                 feasible=(fr is not None and fr <= ceiling),
+                p3_n_questions=len(p3.decisions),
+                p3_n_exercised=len(p3.exercised),
+                p3_n_mislabeled=len(p3.mislabeled),
+                p3_mislabel_ratio=p3.mislabel_ratio,
             )
         )
 
@@ -2371,8 +2441,19 @@ async def run_e7_sweep(
     )
 
 
-def render_e7_sweep_section(sweep: E7Sweep) -> list[str]:
-    """Markdown lines for the E7 knob-sweep block: the curve table + the knee."""
+def render_e7_sweep_section(
+    sweep: E7Sweep,
+    *,
+    p3_mislabel_ratio_max: float = DEFAULT_P3_MISLABEL_RATIO_MAX,
+) -> list[str]:
+    """Markdown lines for the E7 knob-sweep block: the curve table + the knee.
+
+    `p3_mislabel_ratio_max` must be the ceiling ACTUALLY in force for this run
+    (the same resolved value amain hands `e7_pinned_invariants_failed`), so the
+    majority-mislabeled callout's claim that the main leg's guard would flag the
+    config is true under `--p3-mislabel-ratio-max` / `E7_P3_MISLABEL_RATIO_MAX`
+    in both directions.
+    """
     lines = [
         "",
         "### E7 knob sweep (US-056) — deflection-vs-false-resolve curve + knee",
@@ -2384,9 +2465,17 @@ def render_e7_sweep_section(sweep: E7Sweep) -> list[str]:
         "ceiling) — not maximize accuracy. LLM-judged → scheduled/weekly, never a "
         "per-PR block (US-059).",
         "",
+        "`P3 exercised` is how many P3 rows actually reached the faithfulness gate "
+        "at that point (the rest escalated at the retrieval gate — `mislabeled`, so "
+        "they can never be tallied a false-resolve). **Read the false-resolve column "
+        "together with it:** raising τ_sim drives rows out of the gate rather than "
+        "making the pipeline safer, so a point marked ⚠️ vacuous measured nothing "
+        "and its 0% is not a result. Reported, not enforced — the knee is still "
+        "selected on false-resolve ≤ ceiling alone.",
+        "",
         "| τ_sim | N_min | faith≥ | deflection | false-resolve | false-escalate "
-        "| ≤ ceiling |",
-        "|---|---|---|---|---|---|---|",
+        "| P3 exercised | ≤ ceiling |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     knee = sweep.knee
     for p in sweep.points:
@@ -2394,13 +2483,49 @@ def render_e7_sweep_section(sweep: E7Sweep) -> list[str]:
         fr = "—" if p.false_resolve is None else f"{p.false_resolve:.0%}"
         fe = "—" if p.false_escalate is None else f"{p.false_escalate:.0%}"
         feas = "✅" if p.feasible else "✗"
+        exercised = f"{p.p3_n_exercised}/{p.p3_n_questions}"
+        if p.p3_absent:
+            exercised += " ⚠️ no P3 population"
+        elif p.p3_vacuous:
+            exercised += " ⚠️ vacuous"
         mark = " ⭐ knee" if knee is not None and p.index == knee.index else ""
         lines.append(
             f"| {p.tau_sim} | {p.n_min} | {p.faithfulness_judge_min}/5 | {defl} | "
-            f"{fr} | {fe} | {feas}{mark} |"
+            f"{fr} | {fe} | {exercised} | {feas}{mark} |"
         )
 
     lines.append("")
+    if knee is not None and knee.p3_absent:
+        lines.append(
+            "> ⚠️ **The knee is vacuous — there is no P3 population at all.** This "
+            "sweep presented zero `should_escalate` rows, so no operating point "
+            "measured the false-resolve ceiling and the recommendation below rests "
+            "on nothing. The main leg's P3 positive control would exit the runner "
+            "non-zero on this run. Author P3 rows and re-sweep."
+        )
+        lines.append("")
+    elif knee is not None and knee.p3_vacuous:
+        lines.append(
+            "> ⚠️ **The knee is vacuous.** No P3 row reached the faithfulness gate "
+            "at this operating point, so its false-resolve rate measured nothing "
+            "and must not be read as evidence the point is safe. The main leg's P3 "
+            "positive control would exit the runner non-zero on this config. Treat "
+            "the recommendation below as unusable until the P3 population has rows "
+            "that stay above this τ_sim."
+        )
+        lines.append("")
+    elif knee is not None and knee.p3_mislabel_ratio is not None and (
+        knee.p3_mislabel_ratio > p3_mislabel_ratio_max
+    ):
+        lines.append(
+            f"> ⚠️ **The knee is majority-mislabeled** "
+            f"({knee.p3_n_mislabeled}/{knee.p3_n_questions} P3 rows escalated "
+            f"before the faithfulness gate, above the issue-#26 ceiling "
+            f"{p3_mislabel_ratio_max:.0%}). Its false-resolve rate rests on "
+            f"a heavily diluted sample; the main leg's mislabel-ratio guard would "
+            f"flag this config."
+        )
+        lines.append("")
     if sweep.knee_reason == "ok" and knee is not None:
         defl = "—" if knee.deflection is None else f"{knee.deflection:.0%}"
         fr = "—" if knee.false_resolve is None else f"{knee.false_resolve:.0%}"
@@ -2416,12 +2541,27 @@ def render_e7_sweep_section(sweep: E7Sweep) -> list[str]:
             "`ESCALATION_FAITHFULNESS_CUTOFF` is a different [0,1] scale (US-048/050), "
             "tuned separately."
         )
+    elif sweep.knee_reason == "no_point_under_ceiling" and sweep.points and all(
+        p.p3_absent for p in sweep.points
+    ):
+        lines.append(
+            "**No knee — and nothing was measured:** every operating point presented "
+            "ZERO P3 rows, so the false-resolve rate is `None` everywhere and no "
+            "point could clear the ceiling. This is an empty-gold run, not a red "
+            "curve: do not read it as evidence about the pipeline. Author P3 rows "
+            "(or re-run with `--include-p3`) and re-sweep."
+        )
     elif sweep.knee_reason == "no_point_under_ceiling":
         lines.append(
             f"**No knee:** no operating point achieves false-resolve ≤ "
             f"{sweep.ceiling:.0%}. Reported explicitly (the ceiling is a hard "
-            "constraint) rather than picking the least-bad point — tighten the gate "
-            "(raise τ_sim / N_min) or improve retrieval grounding, then re-sweep."
+            "constraint) rather than picking the least-bad point — improve "
+            "retrieval grounding, then re-sweep. Tightening the gate (raising "
+            "τ_sim / N_min) is a remedy only while the P3 rows still clear it: "
+            "read the `P3 exercised` column first, because a tightening that "
+            "drives it toward 0 buys a 0% that measured nothing, which is vacuous "
+            "rather than safe. If no point both clears the ceiling and keeps P3 "
+            "rows exercised, the honest outcome is no recommendation."
         )
     else:  # deflection_blind
         lines.append(
@@ -2587,8 +2727,11 @@ def e7_pinned_invariants_failed(
     # positive control above. That control fails closed only when EVERY P3 row is
     # mislabeled (zero exercised); a leg that is heavily but not entirely mislabeled
     # still exercises ≥1 row (so `passed` is True) yet runs the false-resolve ceiling
-    # over a shrunken sample — latent today at the 3-row gold, a real masking path as
-    # the P3 gold grows. Gated on `passed` so the empty / all-mislabeled cases stay
+    # over a shrunken sample. At the main leg's default τ_sim of 0.4 all 9 P3 rows clear
+    # retrieval, so this guard is dormant (0/9); it becomes reachable if
+    # ESCALATION_TAU_SIM is promoted to 0.5, where the 5 rows measuring below that fall
+    # out for a ratio of AT LEAST 5/9 ≈ 56%.
+    # Gated on `passed` so the empty / all-mislabeled cases stay
     # owned by the positive control above (one clear failure reason each); fires only
     # when the mislabeled FRACTION over the full presented population STRICTLY exceeds
     # the ceiling. Inert per-PR (p3_result is None → no P3 leg).
@@ -3131,7 +3274,13 @@ async def amain() -> int:
     print("\n".join(render_e7_metrics_section(metrics)))
     print("\n".join(render_e7_false_resolve_ceiling_section(ceiling_verdict)))
     if sweep_result is not None:
-        print("\n".join(render_e7_sweep_section(sweep_result)))
+        print(
+            "\n".join(
+                render_e7_sweep_section(
+                    sweep_result, p3_mislabel_ratio_max=p3_mislabel_ratio_max
+                )
+            )
+        )
     print(f"\n→ {out_path}")
 
     # P2 is a tunable quality metric, not a per-PR hard block (US-059): a

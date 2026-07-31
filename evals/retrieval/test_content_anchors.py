@@ -10,7 +10,7 @@ Two layers, both offline (no DB, no network, no backend-heavy import):
     validator's rejections.
 
   * CORPUS — the PRD US-107 Validation Test end to end, using the REAL
-    production chunker (`backend.chunking.chunk_text`) over the shipped 7-doc
+    production chunker (`backend.chunking.chunk_text`) over the shipped 8-doc
     corpus (no DB): seed at 500/50 and resolve the shipped `retrieval_gold.yaml`
     (every anchor resolves; the q07 straddle yields two stable_ids); RE-SEED at
     a different chunk_size and re-resolve the UNCHANGED golden set (zero

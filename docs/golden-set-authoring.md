@@ -150,6 +150,27 @@ Add one `escalation` label per question in `evals/retrieval/escalation_gold.yaml
 P2-vs-P3 is the single judgment that cannot be derived: "does a faithful answer actually exist from these chunks?" is a human call.
 Everything else in the escalation suite (the P1b no-access replay, the leak checks) is derived from the gold you already labeled.
 
+**Author your P3 rows to span the swept τ_sim grid, not to cluster below it.**
+A P3 row only proves something about the *faithfulness* gate if it first *clears* the *retrieval* gate: a row that escalates earlier is scored `mislabeled` and can never be tallied a false-resolve.
+So a P3 population whose retrieval similarity all sits below the top of the τ_sim grid makes the false-resolve rate fall to a clean-looking 0% at high τ_sim purely because nothing is being measured there — see `docs/evals.md` §6 for the guards that catch this on the main leg, and the `P3 exercised` column that exposes it per grid point in the sweep.
+The grid is `--sweep-tau-sim` (default `0.30,0.40,0.50`), so "the top of the grid" means τ_sim=0.50 today and a row only counts toward coverage there if its measured top-1 cosine clears it; widen the flag and the bar moves with it.
+The practical rule when authoring: ask what the chunk **is already about**, and vary only a parameter the corpus never covers.
+Embeddings are whole-chunk, so a question aimed at a single sentence buried inside a chunk that is mostly about something else retrieves weakly no matter how well its vocabulary matches — matching the corpus's **register** (short, corpus vocabulary, mirroring your strongest P2 rows) is secondary to matching the chunk's **dominant theme**, and is not sufficient on its own.
+The shipped set measured this the hard way: a shipping *cost* question against a chunk overwhelmingly about *durations* landed ~0.36, and a question in internal agent-instruction register sat far from any customer question form; both were retired.
+The rows that work — `e7-p3-04` (0.5339), `e7-p3-05` (0.5800), `e7-p3-10` (0.5288) and `e7-p3-11` (0.5605), each a warranty *period* against the warranty doc or a return *fee* against the return-shipping section — are what make a τ_sim recommendation falsifiable, because raising τ_sim cannot silence them.
+The cautionary counterparts are `e7-p3-07` (0.4234) and `e7-p3-09` (0.4570): both were authored in the corpus's register against vocabulary the chunk genuinely contains, both measured mid-band, and both therefore fall out of the gate as `mislabeled` at the top of the swept grid instead of exercising it.
+
+**Screen candidates by measuring, not by intuition.**
+Embed the candidate with the same model the retrieval gate uses and take `max(1 - (chunk.embedding <=> q))` over the corpus — the exact quantity τ_sim thresholds — before you commit the row.
+Of 14 candidates screened that way, 5 cleared 0.50; of the 6 authored by intuition, only 2 did — `e7-p3-04` (0.5339) and `e7-p3-05` (0.5800), against `e7-p3-06` (0.3556), `e7-p3-07` (0.4234), `e7-p3-08` (0.3539) and `e7-p3-09` (0.4570).
+Every one of those numbers is recorded in `escalation_gold.yaml`, which is what makes the tally checkable instead of merely asserted.
+`e7-p3-09` is the standing reminder: it was authored to show that restating `e7-p3-01` in the corpus's register raises similarity, then measured 0.4570 against that row's 0.4607 — marginally *lower*, falsifying the hypothesis it was written to demonstrate.
+It is kept as an honest mid-band row, and must not be cited as evidence for the register effect.
+Record the measured value in the row's `notes`, and never estimate one.
+
+The richest P3 rows are the ones where the retrieved chunk offers a **grounded-looking wrong answer** — the corpus states a fact adjacent to the question (the new-unit warranty period, the un-escalated refund cap) while the fact actually asked for is absent.
+A row whose answer is merely missing tests less than one whose answer is missing *next to* something that reads like it.
+
 A knowledge-assistant-only buyer **omits this layer entirely**.
 A base-only golden set with no `escalation` labels loads and runs the base plus derived-for-free layers without error; a support golden set additionally runs the escalation suite.
 A present-but-typo'd label is still rejected fail-closed.

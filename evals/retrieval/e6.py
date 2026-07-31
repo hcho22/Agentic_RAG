@@ -73,7 +73,7 @@ from .content_anchors import EmptyGoldError
 
 log = logging.getLogger("agentic_rag.evals.retrieval.e6")
 
-# E6 makes ~300 live calls (3 modes x 50 questions x 2 passes), each embedding a
+# E6 makes ~360 live calls (3 modes x 60 questions x 2 passes), each embedding a
 # query via OpenAI plus a PostgREST/asyncpg round-trip. A transient blip there
 # (rate-limit, network reset, 5xx, DB hiccup) is NOT a cross-workspace leak, so
 # it must never be conflated with E6's security verdict. These are retried with

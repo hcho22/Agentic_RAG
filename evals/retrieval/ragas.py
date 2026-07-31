@@ -2,7 +2,7 @@
 
 RAGAS (Retrieval Augmented Generation Assessment) computes the four canonical
 RAG metrics — Faithfulness, Answer Relevancy, Context Precision, Context
-Recall — over the retrieval eval's 50-question golden set. Those standardized
+Recall — over the retrieval eval's 60-question golden set. Those standardized
 metric names appear in nearly every reference RAG paper and competitor doc, so
 shipping them lets a reader recognize the methodology without reading runner
 source.

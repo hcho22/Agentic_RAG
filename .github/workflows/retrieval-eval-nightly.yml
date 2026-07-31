@@ -1,4 +1,4 @@
-# US-035: nightly retrieval-eval workflow. Runs the same 50-question
+# US-035: nightly retrieval-eval workflow. Runs the same 60-question
 # golden set the PR workflow does, on a schedule (02:00 UTC daily) and on
 # manual `workflow_dispatch`. Designed to grow into the "full sweep
 # including reranker modes" the PRD calls for — the reranker portion is a
