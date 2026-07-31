@@ -1777,6 +1777,88 @@ def test_sweep_reports_p3_exercise_per_point() -> None:
     print("ok: each sweep point reports whether its P3 leg actually ran the faithfulness gate")
 
 
+def test_sweep_majority_mislabel_callout_tracks_the_configured_ceiling() -> None:
+    """The majority-mislabeled callout must compare against the mislabel ceiling
+    ACTUALLY in force, not the module default.
+
+    The callout claims "the main leg's mislabel-ratio guard would flag this
+    config". `--p3-mislabel-ratio-max` / `E7_P3_MISLABEL_RATIO_MAX` moves that
+    guard, so a hardcoded 0.5 makes the claim false in BOTH directions: silent on
+    a config the guard fails, and shouting on one it passes.
+    """
+    # P3: 2 STRONG rows (exercised at every swept τ_sim, faithfulness 2 -> they
+    # escalate, so no false-resolve) + 3 MID rows that drop out at τ_sim 0.60.
+    # -> the feasible point is τ_sim=0.60: false-resolve 0/2, mislabel ratio 3/5.
+    questions = [
+        _p2("m-p2-a", "mq-p2-a"),
+        _p2("m-p2-b", "mq-p2-b"),
+        _p3("m-p3-hi-a", "mq-p3-hi-a"),
+        _p3("m-p3-hi-b", "mq-p3-hi-b"),
+        _p3("m-p3-mid-a", "mq-p3-mid-a"),
+        _p3("m-p3-mid-b", "mq-p3-mid-b"),
+        _p3("m-p3-mid-c", "mq-p3-mid-c"),
+    ]
+    rows = {
+        "mq-p2-a": STRONG,
+        "mq-p2-b": STRONG,
+        "mq-p3-hi-a": STRONG,
+        "mq-p3-hi-b": STRONG,
+        "mq-p3-mid-a": MID,
+        "mq-p3-mid-b": MID,
+        "mq-p3-mid-c": MID,
+    }
+    scores = {
+        "mq-p2-a": {"faithfulness": 5, "helpfulness": 5},
+        "mq-p2-b": {"faithfulness": 5, "helpfulness": 5},
+        "mq-p3-hi-a": {"faithfulness": 2, "helpfulness": 2},
+        "mq-p3-hi-b": {"faithfulness": 2, "helpfulness": 2},
+        "mq-p3-mid-a": {"faithfulness": 5, "helpfulness": 5},
+        "mq-p3-mid-b": {"faithfulness": 5, "helpfulness": 5},
+        "mq-p3-mid-c": {"faithfulness": 5, "helpfulness": 5},
+    }
+    sweep, _, _, _ = _run_sweep(
+        questions, rows,
+        tau_sims=[0.40, 0.60], n_mins=[1], faithfulness_mins=[4],
+        ceiling=0.05, scores_by_question=scores,
+    )
+
+    knee = sweep.knee
+    assert knee is not None
+    _check(knee.tau_sim == 0.60, f"the feasible point is τ_sim=0.60, got {knee.tau_sim}")
+    _check(knee.p3_vacuous is False, "the knee still exercises the gate — not vacuous")
+    _check(
+        knee.p3_n_mislabeled == 3 and knee.p3_n_questions == 5
+        and knee.p3_mislabel_ratio == 0.6,
+        f"knee mislabel ratio 3/5 expected, got "
+        f"{knee.p3_n_mislabeled}/{knee.p3_n_questions} = {knee.p3_mislabel_ratio}",
+    )
+
+    default_md = "\n".join(render_e7_sweep_section(sweep))
+    _check("The knee is majority-mislabeled" in default_md,
+           f"ratio 0.6 breaches the default 0.5 ceiling, got:\n{default_md}")
+    _check("ceiling 50%" in default_md,
+           f"the default callout prints the default ceiling, got:\n{default_md}")
+
+    # Failure indicator: with the ceiling raised above the measured ratio the main
+    # leg's guard PASSES, so the report must not claim it would flag the config.
+    loose_md = "\n".join(
+        render_e7_sweep_section(sweep, p3_mislabel_ratio_max=0.8)
+    )
+    _check("majority-mislabeled" not in loose_md,
+           f"ratio 0.6 is under a ceiling of 0.8 — no callout, got:\n{loose_md}")
+
+    # ...and with it lowered the guard FAILS, so the callout must fire and quote
+    # the ceiling actually in force rather than the module default.
+    strict_md = "\n".join(
+        render_e7_sweep_section(sweep, p3_mislabel_ratio_max=0.2)
+    )
+    _check("The knee is majority-mislabeled" in strict_md,
+           f"ratio 0.6 breaches a ceiling of 0.2, got:\n{strict_md}")
+    _check("ceiling 20%" in strict_md and "ceiling 50%" not in strict_md,
+           f"the callout quotes the ceiling in force (20%), got:\n{strict_md}")
+    print("ok: the majority-mislabeled callout tracks the configured mislabel ceiling")
+
+
 # --- US-057 P1b no-access replay fixtures + tests -------------------------
 
 
@@ -2175,6 +2257,7 @@ def main() -> int:
         test_sweep_deflection_blind_is_reported,
         test_sweep_to_dict_shape,
         test_sweep_reports_p3_exercise_per_point,
+        test_sweep_majority_mislabel_callout_tracks_the_configured_ceiling,
         test_p1b_no_gold_in_result_passes,
         test_p1b_nongold_strong_is_not_a_leak,
         test_p1b_gold_in_result_is_a_leak,

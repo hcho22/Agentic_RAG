@@ -2408,8 +2408,19 @@ async def run_e7_sweep(
     )
 
 
-def render_e7_sweep_section(sweep: E7Sweep) -> list[str]:
-    """Markdown lines for the E7 knob-sweep block: the curve table + the knee."""
+def render_e7_sweep_section(
+    sweep: E7Sweep,
+    *,
+    p3_mislabel_ratio_max: float = DEFAULT_P3_MISLABEL_RATIO_MAX,
+) -> list[str]:
+    """Markdown lines for the E7 knob-sweep block: the curve table + the knee.
+
+    `p3_mislabel_ratio_max` must be the ceiling ACTUALLY in force for this run
+    (the same resolved value amain hands `e7_pinned_invariants_failed`), so the
+    majority-mislabeled callout's claim that the main leg's guard would flag the
+    config is true under `--p3-mislabel-ratio-max` / `E7_P3_MISLABEL_RATIO_MAX`
+    in both directions.
+    """
     lines = [
         "",
         "### E7 knob sweep (US-056) — deflection-vs-false-resolve curve + knee",
@@ -2460,13 +2471,13 @@ def render_e7_sweep_section(sweep: E7Sweep) -> list[str]:
         )
         lines.append("")
     elif knee is not None and knee.p3_mislabel_ratio is not None and (
-        knee.p3_mislabel_ratio > DEFAULT_P3_MISLABEL_RATIO_MAX
+        knee.p3_mislabel_ratio > p3_mislabel_ratio_max
     ):
         lines.append(
             f"> ⚠️ **The knee is majority-mislabeled** "
             f"({knee.p3_n_mislabeled}/{knee.p3_n_questions} P3 rows escalated "
             f"before the faithfulness gate, above the issue-#26 ceiling "
-            f"{DEFAULT_P3_MISLABEL_RATIO_MAX:.0%}). Its false-resolve rate rests on "
+            f"{p3_mislabel_ratio_max:.0%}). Its false-resolve rate rests on "
             f"a heavily diluted sample; the main leg's mislabel-ratio guard would "
             f"flag this config."
         )
@@ -2490,8 +2501,13 @@ def render_e7_sweep_section(sweep: E7Sweep) -> list[str]:
         lines.append(
             f"**No knee:** no operating point achieves false-resolve ≤ "
             f"{sweep.ceiling:.0%}. Reported explicitly (the ceiling is a hard "
-            "constraint) rather than picking the least-bad point — tighten the gate "
-            "(raise τ_sim / N_min) or improve retrieval grounding, then re-sweep."
+            "constraint) rather than picking the least-bad point — improve "
+            "retrieval grounding, then re-sweep. Tightening the gate (raising "
+            "τ_sim / N_min) is a remedy only while the P3 rows still clear it: "
+            "read the `P3 exercised` column first, because a tightening that "
+            "drives it toward 0 buys a 0% that measured nothing, which is vacuous "
+            "rather than safe. If no point both clears the ceiling and keeps P3 "
+            "rows exercised, the honest outcome is no recommendation."
         )
     else:  # deflection_blind
         lines.append(
@@ -3201,7 +3217,13 @@ async def amain() -> int:
     print("\n".join(render_e7_metrics_section(metrics)))
     print("\n".join(render_e7_false_resolve_ceiling_section(ceiling_verdict)))
     if sweep_result is not None:
-        print("\n".join(render_e7_sweep_section(sweep_result)))
+        print(
+            "\n".join(
+                render_e7_sweep_section(
+                    sweep_result, p3_mislabel_ratio_max=p3_mislabel_ratio_max
+                )
+            )
+        )
     print(f"\n→ {out_path}")
 
     # P2 is a tunable quality metric, not a per-PR hard block (US-059): a

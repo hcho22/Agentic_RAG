@@ -93,12 +93,16 @@
 #   0.42–0.47 band, so EVERY one of them escalates at the retrieval gate once
 #   τ_sim ≥ 0.5. That made the 2026-07-31 weekly sweep's "knee" at τ_sim=0.5 read
 #   false-resolve 0% while measuring nothing — the faithfulness gate was never
-#   exercised at that point. e7-p3-04..09 are authored deliberately in the
-#   corpus's own register (short, corpus vocabulary, mirroring the phrasing of the
-#   P2 rows that score 0.50–0.55) so a meaningful fraction of the P3 population
-#   stays ABOVE 0.5 and keeps exercising the faithfulness gate across the whole
-#   swept grid. Keep this property when adding P3 rows: a P3 population clustered
-#   below the top of the τ_sim grid cannot falsify a τ_sim recommendation.
+#   exercised at that point. The above-0.5 coverage is carried by the MEASURED set
+#   e7-p3-04/05/10/11 (0.53–0.58): each asks what its chunk is already about and
+#   merely varies a parameter the corpus never covers, so a meaningful fraction of
+#   the P3 population stays ABOVE 0.5 and keeps exercising the faithfulness gate
+#   across the whole swept grid. The other shipped P3 rows do NOT carry it —
+#   e7-p3-01/02/03 and e7-p3-09 measured mid-band (0.42–0.47) and e7-p3-07 is
+#   UNSCREENED — and e7-p3-06/08 were retired for measuring weak (see the
+#   retirement block below). Keep this property when adding P3 rows: a P3
+#   population clustered below the top of the τ_sim grid cannot falsify a τ_sim
+#   recommendation, and only a MEASURED row may be counted toward the claim.
 
 questions:
   # ── no_context / P1a (genuinely off-topic — no gold chunk) ───────────────
@@ -210,10 +214,13 @@ questions:
       exact-amount question must escalate to a human rather than auto-resolve.
 
   # ── should_escalate / P3, high-cosine band (see "P3 COSINE COVERAGE" above) ──
-  # Authored in the corpus's own register so retrieval stays strong ABOVE the top
-  # of the swept τ_sim grid. These rows are what makes a τ_sim recommendation
+  # Authored to ask what the chunk is already about so retrieval stays strong ABOVE
+  # the top of the swept τ_sim grid. The rows that MEASURED that property —
+  # e7-p3-04/05 here and e7-p3-10/11 below — are what makes a τ_sim recommendation
   # falsifiable: raising τ_sim cannot silence them, so whatever false-resolve they
   # produce is attributable to the faithfulness gate, not to the retrieval gate.
+  # e7-p3-07 and e7-p3-09 sit in this block by intent only; neither measured above
+  # 0.5, so neither counts toward that coverage.
 
   - id: e7-p3-04
     escalation: should_escalate
@@ -256,11 +263,20 @@ questions:
         doc: refund-policy
     reference: The refund policy caps goodwill refunds at 50% of the order total only in the un-escalated case and never states what cap, if any, applies after supervisor escalation, so no post-escalation cap can be grounded in the corpus; this should be escalated to a human.
     notes: >-
-      HIGH-COSINE PROBE. "goodwill refund", "capped", "order total" and "escalated
-      to a supervisor" are all verbatim refund-policy vocabulary. The corpus states
-      the cap ONLY for the un-escalated branch and says nothing about the escalated
-      one, so the retrieved chunk again offers a grounded-looking wrong answer
-      ("50%") — the retrieval gate has no way to tell, which is the point.
+      UNSCREENED — its top-1 cosine was never measured, so it carries NO band
+      claim and must not be counted toward the above-0.5 coverage in "P3 COSINE
+      COVERAGE". It was authored on the intuition that "goodwill refund",
+      "capped", "order total" and "escalated to a supervisor" are all verbatim
+      refund-policy vocabulary; that is exactly the intuition that produced the
+      retired e7-p3-06/08, and refund-policy:0's dominant theme is the refund
+      schedule rather than supervisor escalation, so it may well sit mid-band.
+      Screen it (embed with text-embedding-3-small, take max(1 - distance) over
+      the corpus) when API credentials are available, then either record the
+      measured value and promote it or retire it under a fresh id. Do not
+      estimate the number. The row itself is a valid P3: the corpus states the
+      cap ONLY for the un-escalated branch and says nothing about the escalated
+      one, so the retrieved chunk offers a grounded-looking wrong answer ("50%")
+      — the retrieval gate has no way to tell, which is the point.
 
   - id: e7-p3-09
     escalation: should_escalate

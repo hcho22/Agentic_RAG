@@ -153,9 +153,17 @@ Everything else in the escalation suite (the P1b no-access replay, the leak chec
 **Author your P3 rows to span the swept τ_sim grid, not to cluster below it.**
 A P3 row only proves something about the *faithfulness* gate if it first *clears* the *retrieval* gate: a row that escalates earlier is scored `mislabeled` and can never be tallied a false-resolve.
 So a P3 population whose retrieval similarity all sits below the top of the τ_sim grid makes the false-resolve rate fall to a clean-looking 0% at high τ_sim purely because nothing is being measured there — see `docs/evals.md` §6 for the guards that catch this on the main leg, and the `P3 exercised` column that exposes it per grid point in the sweep.
-The practical rule when authoring: phrase some P3 questions in the corpus's **own register** — short, using the corpus's vocabulary, mirroring the phrasing of your strongest P2 rows — so they retrieve *strongly* while still having no faithful grounded answer.
-Those are the rows that make a τ_sim recommendation falsifiable, because raising τ_sim cannot silence them.
-The shipped set does this deliberately: `e7-p3-04` through `e7-p3-09` are register-matched twins of the P2 rows, and `e7-p3-09` is the corpus-register restatement of `e7-p3-01` specifically so the two can be compared.
+The practical rule when authoring: ask what the chunk **is already about**, and vary only a parameter the corpus never covers.
+Embeddings are whole-chunk, so a question aimed at a single sentence buried inside a chunk that is mostly about something else retrieves weakly no matter how well its vocabulary matches — matching the corpus's **register** (short, corpus vocabulary, mirroring your strongest P2 rows) is secondary to matching the chunk's **dominant theme**, and is not sufficient on its own.
+The shipped set measured this the hard way: a shipping *cost* question against a chunk overwhelmingly about *durations* landed ~0.36, and a question in internal agent-instruction register sat far from any customer question form; both were retired.
+The rows that work — `e7-p3-04` and `e7-p3-05` (a warranty *period* against the warranty doc, a return *fee* against the return-shipping section) and `e7-p3-10` (0.5288) and `e7-p3-11` (0.5605) — are what make a τ_sim recommendation falsifiable, because raising τ_sim cannot silence them.
+
+**Screen candidates by measuring, not by intuition.**
+Embed the candidate with the same model the retrieval gate uses and take `max(1 - (chunk.embedding <=> q))` over the corpus — the exact quantity τ_sim thresholds — before you commit the row.
+Of 14 candidates screened that way, 5 cleared 0.50; of 6 authored by intuition, only 2 did.
+`e7-p3-09` is the standing reminder: it was authored to show that restating `e7-p3-01` in the corpus's register raises similarity, then measured 0.4570 against that row's 0.4607 — marginally *lower*, falsifying the hypothesis it was written to demonstrate.
+It is kept as an honest mid-band row, and must not be cited as evidence for the register effect.
+Record the measured value in the row's `notes`, and never estimate one.
 
 The richest P3 rows are the ones where the retrieved chunk offers a **grounded-looking wrong answer** — the corpus states a fact adjacent to the question (the new-unit warranty period, the un-escalated refund cap) while the fact actually asked for is absent.
 A row whose answer is merely missing tests less than one whose answer is missing *next to* something that reads like it.
