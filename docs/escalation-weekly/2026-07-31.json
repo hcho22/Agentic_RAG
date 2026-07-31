@@ -1,0 +1,1826 @@
+{
+  "e7_false_resolve_ceiling": {
+    "breached": true,
+    "ceiling": 0.05,
+    "denominator": 3,
+    "numerator": 3,
+    "passed": false,
+    "rate": 1.0
+  },
+  "e7_metrics": {
+    "deflection": {
+      "by_population": [
+        {
+          "counts_toward_rate": true,
+          "denominator": 4,
+          "numerator": 4,
+          "population": "P2"
+        }
+      ],
+      "denominator": 4,
+      "name": "deflection",
+      "numerator": 4,
+      "rate": 1.0,
+      "safety": false
+    },
+    "false_escalate": {
+      "by_population": [
+        {
+          "counts_toward_rate": true,
+          "denominator": 4,
+          "numerator": 0,
+          "population": "P2"
+        }
+      ],
+      "denominator": 4,
+      "name": "false_escalate",
+      "numerator": 0,
+      "rate": 0.0,
+      "safety": false
+    },
+    "false_resolve": {
+      "by_population": [
+        {
+          "counts_toward_rate": false,
+          "denominator": 3,
+          "numerator": 0,
+          "population": "P1a"
+        },
+        {
+          "counts_toward_rate": false,
+          "denominator": 4,
+          "numerator": 0,
+          "population": "P1b"
+        },
+        {
+          "counts_toward_rate": true,
+          "denominator": 3,
+          "numerator": 3,
+          "population": "P3"
+        }
+      ],
+      "denominator": 3,
+      "name": "false_resolve",
+      "numerator": 3,
+      "rate": 1.0,
+      "safety": true
+    }
+  },
+  "e7_p1a": {
+    "cleared_gate": [],
+    "decisions": [
+      {
+        "correct": true,
+        "decision": "escalate",
+        "draft_calls": 0,
+        "expected": "escalate",
+        "gate_reason": "weak: empty_results",
+        "gate_strong": false,
+        "judge_calls": 0,
+        "n_cleared": 0,
+        "n_results": 0,
+        "question_id": "e7-p1a-01",
+        "top1_cosine": null
+      },
+      {
+        "correct": true,
+        "decision": "escalate",
+        "draft_calls": 0,
+        "expected": "escalate",
+        "gate_reason": "weak: no_vector_cosine",
+        "gate_strong": false,
+        "judge_calls": 0,
+        "n_cleared": 0,
+        "n_results": 1,
+        "question_id": "e7-p1a-02",
+        "top1_cosine": null
+      },
+      {
+        "correct": true,
+        "decision": "escalate",
+        "draft_calls": 0,
+        "expected": "escalate",
+        "gate_reason": "weak: top1_cosine 0.3878 < tau_sim 0.4000",
+        "gate_strong": false,
+        "judge_calls": 0,
+        "n_cleared": 5,
+        "n_results": 5,
+        "question_id": "e7-p1a-03",
+        "top1_cosine": 0.387791236707764
+      }
+    ],
+    "label": "no_context",
+    "match_threshold": 0.3,
+    "n_min": 2,
+    "n_questions": 3,
+    "passed": true,
+    "population": "P1a",
+    "tau_sim": 0.4,
+    "total_draft_calls": 0,
+    "total_judge_calls": 0
+  },
+  "e7_p1b": {
+    "cleared_gate": [],
+    "decisions": [
+      {
+        "correct": true,
+        "decision": "draft",
+        "draft_calls": 0,
+        "expected": "escalate",
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "gold_stable_ids": [
+          "warranty-terms:0"
+        ],
+        "judge_calls": 0,
+        "leaked_gold_ids": [],
+        "n_cleared": 2,
+        "n_results": 5,
+        "question_id": "e7-p2-01",
+        "returned_stable_ids": [
+          "warranty-terms:1",
+          "returns-process:1",
+          "product-catalog:1",
+          "shipping-faq:0",
+          "product-catalog:0"
+        ],
+        "top1_cosine": 0.554640144895612
+      },
+      {
+        "correct": true,
+        "decision": "draft",
+        "draft_calls": 0,
+        "expected": "escalate",
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "gold_stable_ids": [
+          "shipping-faq:0"
+        ],
+        "judge_calls": 0,
+        "leaked_gold_ids": [],
+        "n_cleared": 4,
+        "n_results": 5,
+        "question_id": "e7-p2-02",
+        "returned_stable_ids": [
+          "returns-process:0",
+          "shipping-faq:1",
+          "warranty-terms:1",
+          "returns-process:1",
+          "refund-policy:0"
+        ],
+        "top1_cosine": 0.448176855099941
+      },
+      {
+        "correct": true,
+        "decision": "draft",
+        "draft_calls": 0,
+        "expected": "escalate",
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "gold_stable_ids": [
+          "refund-policy:0"
+        ],
+        "judge_calls": 0,
+        "leaked_gold_ids": [],
+        "n_cleared": 5,
+        "n_results": 5,
+        "question_id": "e7-p2-03",
+        "returned_stable_ids": [
+          "returns-process:0",
+          "shipping-faq:0",
+          "warranty-terms:0",
+          "warranty-terms:1",
+          "returns-process:1"
+        ],
+        "top1_cosine": 0.43043489779829
+      },
+      {
+        "correct": true,
+        "decision": "escalate",
+        "draft_calls": 0,
+        "expected": "escalate",
+        "gate_reason": "weak: top1_cosine 0.3587 < tau_sim 0.4000",
+        "gate_strong": false,
+        "gold_stable_ids": [
+          "returns-process:0",
+          "returns-process:1"
+        ],
+        "judge_calls": 0,
+        "leaked_gold_ids": [],
+        "n_cleared": 3,
+        "n_results": 5,
+        "question_id": "e7-p2-04",
+        "returned_stable_ids": [
+          "refund-policy:0",
+          "product-catalog:1",
+          "refund-policy:1",
+          "shipping-faq:0",
+          "api-error-reference:0"
+        ],
+        "top1_cosine": 0.358684795864374
+      }
+    ],
+    "match_threshold": 0.3,
+    "n_min": 2,
+    "n_questions": 4,
+    "passed": true,
+    "population": "P1b",
+    "source_label": "answerable_faithful",
+    "tau_sim": 0.4,
+    "total_draft_calls": 0,
+    "total_judge_calls": 0
+  },
+  "e7_p1b_non_disclosure": {
+    "assertion": "p1b_customer_output == p1a_customer_output (byte-for-byte)",
+    "leaks": [],
+    "n_leaks": 0,
+    "n_p1b": 4,
+    "p1a_reference": "Thanks for reaching out. I don't have enough information to answer this confidently, so I've passed it along to our team \u2014 a human will follow up with you.",
+    "p1a_reference_bytes": 157,
+    "passed": true
+  },
+  "e7_p2": {
+    "decisions": [
+      {
+        "correct": true,
+        "decision": "auto_resolve",
+        "draft": "Electronics carry a 12-month limited warranty against manufacturing defects, starting on the order's `shipped_at` date.",
+        "draft_calls": 1,
+        "escalate_leg": null,
+        "expected": "auto_resolve",
+        "faithful": true,
+        "faithfulness_judge_min": 4,
+        "faithfulness_score": 5,
+        "false_escalate": false,
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "helpfulness_score": 5,
+        "judge_calls": 1,
+        "n_cleared": 3,
+        "n_results": 5,
+        "question_id": "e7-p2-01",
+        "top1_cosine": 0.554640144895612
+      },
+      {
+        "correct": true,
+        "decision": "auto_resolve",
+        "draft": "Standard domestic shipping takes 3\u20135 business days within the contiguous US. Rural ZIP codes may add 1\u20132 days.",
+        "draft_calls": 1,
+        "escalate_leg": null,
+        "expected": "auto_resolve",
+        "faithful": true,
+        "faithfulness_judge_min": 4,
+        "faithfulness_score": 5,
+        "false_escalate": false,
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "helpfulness_score": 5,
+        "judge_calls": 1,
+        "n_cleared": 5,
+        "n_results": 5,
+        "question_id": "e7-p2-02",
+        "top1_cosine": 0.454304661800268
+      },
+      {
+        "correct": true,
+        "decision": "auto_resolve",
+        "draft": "You may request a refund within 30 days of the order's `shipped_at` date.",
+        "draft_calls": 1,
+        "escalate_leg": null,
+        "expected": "auto_resolve",
+        "faithful": true,
+        "faithfulness_judge_min": 4,
+        "faithfulness_score": 5,
+        "false_escalate": false,
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "helpfulness_score": 5,
+        "judge_calls": 1,
+        "n_cleared": 5,
+        "n_results": 5,
+        "question_id": "e7-p2-03",
+        "top1_cosine": 0.522658656656556
+      },
+      {
+        "correct": true,
+        "decision": "auto_resolve",
+        "draft": "The return shipping fee for an item between 5 and 20 pounds that you changed your mind about is $14.95.",
+        "draft_calls": 1,
+        "escalate_leg": null,
+        "expected": "auto_resolve",
+        "faithful": true,
+        "faithfulness_judge_min": 4,
+        "faithfulness_score": 5,
+        "false_escalate": false,
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "helpfulness_score": 4,
+        "judge_calls": 1,
+        "n_cleared": 5,
+        "n_results": 5,
+        "question_id": "e7-p2-04",
+        "top1_cosine": 0.506029824804942
+      }
+    ],
+    "deflection_rate": 1.0,
+    "faithfulness_judge_min": 4,
+    "false_escalate_rate": 0.0,
+    "false_escalates": [],
+    "judge_model": "claude-haiku-4-5",
+    "label": "answerable_faithful",
+    "match_threshold": 0.3,
+    "n_auto_resolved": 4,
+    "n_false_escalate": 0,
+    "n_min": 2,
+    "n_questions": 4,
+    "passed": true,
+    "population": "P2",
+    "tau_sim": 0.4,
+    "total_draft_calls": 4,
+    "total_judge_calls": 4
+  },
+  "e7_p3": {
+    "decisions": [
+      {
+        "correct": false,
+        "decision": "auto_resolve",
+        "draft": "I don't have that information.",
+        "draft_calls": 1,
+        "escalate_leg": null,
+        "expected": "escalate",
+        "faithful": true,
+        "faithfulness_judge_min": 4,
+        "faithfulness_score": 5,
+        "false_resolve": true,
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "helpfulness_score": 5,
+        "judge_calls": 1,
+        "mislabeled": false,
+        "n_cleared": 2,
+        "n_results": 5,
+        "question_id": "e7-p3-01",
+        "top1_cosine": 0.460665467665936
+      },
+      {
+        "correct": false,
+        "decision": "auto_resolve",
+        "draft": "I don't have that information.",
+        "draft_calls": 1,
+        "escalate_leg": null,
+        "expected": "escalate",
+        "faithful": true,
+        "faithfulness_judge_min": 4,
+        "faithfulness_score": 5,
+        "false_resolve": true,
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "helpfulness_score": 5,
+        "judge_calls": 1,
+        "mislabeled": false,
+        "n_cleared": 3,
+        "n_results": 5,
+        "question_id": "e7-p3-02",
+        "top1_cosine": 0.421396968387195
+      },
+      {
+        "correct": false,
+        "decision": "auto_resolve",
+        "draft": "For delivery delay cases, a partial refund is typically provided, which is set at the agent's discretion within a range of 10% to 80% of the order total. The exact refund amount will depend on the specifics of your situation and the agent's assessment.",
+        "draft_calls": 1,
+        "escalate_leg": null,
+        "expected": "escalate",
+        "faithful": true,
+        "faithfulness_judge_min": 4,
+        "faithfulness_score": 5,
+        "false_resolve": true,
+        "gate_reason": "strong",
+        "gate_strong": true,
+        "helpfulness_score": 2,
+        "judge_calls": 1,
+        "mislabeled": false,
+        "n_cleared": 5,
+        "n_results": 5,
+        "question_id": "e7-p3-03",
+        "top1_cosine": 0.429843137185828
+      }
+    ],
+    "faithfulness_judge_min": 4,
+    "false_resolve_rate": 1.0,
+    "false_resolves": [
+      "e7-p3-01",
+      "e7-p3-02",
+      "e7-p3-03"
+    ],
+    "judge_model": "claude-haiku-4-5",
+    "label": "should_escalate",
+    "match_threshold": 0.3,
+    "mislabel_ratio": 0.0,
+    "mislabeled": [],
+    "n_escalated_at_faithfulness": 0,
+    "n_false_resolve": 3,
+    "n_min": 2,
+    "n_mislabeled": 0,
+    "n_questions": 3,
+    "passed": true,
+    "population": "P3",
+    "tau_sim": 0.4,
+    "total_draft_calls": 3,
+    "total_judge_calls": 3
+  },
+  "e7_sweep": {
+    "ceiling": 0.05,
+    "curve": [
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 12,
+        "n_min": 1,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 13,
+        "n_min": 1,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 14,
+        "n_min": 2,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 15,
+        "n_min": 2,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 16,
+        "n_min": 3,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 17,
+        "n_min": 3,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 0.6666666666666666,
+        "feasible": false,
+        "index": 4,
+        "n_min": 3,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 0.6666666666666666,
+        "feasible": false,
+        "index": 5,
+        "n_min": 3,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 0.6666666666666666,
+        "feasible": false,
+        "index": 10,
+        "n_min": 3,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 0.6666666666666666,
+        "feasible": false,
+        "index": 11,
+        "n_min": 3,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 0,
+        "n_min": 1,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 1,
+        "n_min": 1,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 2,
+        "n_min": 2,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 3,
+        "n_min": 2,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 6,
+        "n_min": 1,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 7,
+        "n_min": 1,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 8,
+        "n_min": 2,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 9,
+        "n_min": 2,
+        "tau_sim": 0.4
+      }
+    ],
+    "faithfulness_cutoff": 0.7,
+    "judge_model": "claude-haiku-4-5",
+    "knee": {
+      "deflection": 0.75,
+      "faithfulness_judge_min": 4,
+      "false_escalate": 0.25,
+      "false_resolve": 0.0,
+      "feasible": true,
+      "index": 12,
+      "metrics": {
+        "deflection": {
+          "by_population": [
+            {
+              "counts_toward_rate": true,
+              "denominator": 4,
+              "numerator": 3,
+              "population": "P2"
+            }
+          ],
+          "denominator": 4,
+          "name": "deflection",
+          "numerator": 3,
+          "rate": 0.75,
+          "safety": false
+        },
+        "false_escalate": {
+          "by_population": [
+            {
+              "counts_toward_rate": true,
+              "denominator": 4,
+              "numerator": 1,
+              "population": "P2"
+            }
+          ],
+          "denominator": 4,
+          "name": "false_escalate",
+          "numerator": 1,
+          "rate": 0.25,
+          "safety": false
+        },
+        "false_resolve": {
+          "by_population": [
+            {
+              "counts_toward_rate": false,
+              "denominator": 3,
+              "numerator": 0,
+              "population": "P1a"
+            },
+            {
+              "counts_toward_rate": true,
+              "denominator": 3,
+              "numerator": 0,
+              "population": "P3"
+            }
+          ],
+          "denominator": 3,
+          "name": "false_resolve",
+          "numerator": 0,
+          "rate": 0.0,
+          "safety": true
+        }
+      },
+      "n_min": 1,
+      "tau_sim": 0.5
+    },
+    "knee_reason": "ok",
+    "match_threshold": 0.3,
+    "n_questions": 10,
+    "points": [
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 0,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 1,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 3,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 3,
+            "rate": 1.0,
+            "safety": true
+          }
+        },
+        "n_min": 1,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 1,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 1,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 3,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 3,
+            "rate": 1.0,
+            "safety": true
+          }
+        },
+        "n_min": 1,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 2,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 1,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 3,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 3,
+            "rate": 1.0,
+            "safety": true
+          }
+        },
+        "n_min": 2,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 3,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 1,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 3,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 3,
+            "rate": 1.0,
+            "safety": true
+          }
+        },
+        "n_min": 2,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 0.6666666666666666,
+        "feasible": false,
+        "index": 4,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 1,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 2,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 2,
+            "rate": 0.6666666666666666,
+            "safety": true
+          }
+        },
+        "n_min": 3,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 0.6666666666666666,
+        "feasible": false,
+        "index": 5,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 1,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 2,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 2,
+            "rate": 0.6666666666666666,
+            "safety": true
+          }
+        },
+        "n_min": 3,
+        "tau_sim": 0.3
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 6,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 3,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 3,
+            "rate": 1.0,
+            "safety": true
+          }
+        },
+        "n_min": 1,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 7,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 3,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 3,
+            "rate": 1.0,
+            "safety": true
+          }
+        },
+        "n_min": 1,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 8,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 3,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 3,
+            "rate": 1.0,
+            "safety": true
+          }
+        },
+        "n_min": 2,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 1.0,
+        "feasible": false,
+        "index": 9,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 3,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 3,
+            "rate": 1.0,
+            "safety": true
+          }
+        },
+        "n_min": 2,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.0,
+        "false_resolve": 0.6666666666666666,
+        "feasible": false,
+        "index": 10,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 2,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 2,
+            "rate": 0.6666666666666666,
+            "safety": true
+          }
+        },
+        "n_min": 3,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 1.0,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.0,
+        "false_resolve": 0.6666666666666666,
+        "feasible": false,
+        "index": 11,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 4,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 4,
+            "rate": 1.0,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 0,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 2,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 2,
+            "rate": 0.6666666666666666,
+            "safety": true
+          }
+        },
+        "n_min": 3,
+        "tau_sim": 0.4
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 12,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 3,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 3,
+            "rate": 0.75,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 1,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 1,
+            "rate": 0.25,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": true
+          }
+        },
+        "n_min": 1,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 13,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 3,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 3,
+            "rate": 0.75,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 1,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 1,
+            "rate": 0.25,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": true
+          }
+        },
+        "n_min": 1,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 14,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 3,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 3,
+            "rate": 0.75,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 1,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 1,
+            "rate": 0.25,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": true
+          }
+        },
+        "n_min": 2,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 15,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 3,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 3,
+            "rate": 0.75,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 1,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 1,
+            "rate": 0.25,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": true
+          }
+        },
+        "n_min": 2,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 4,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 16,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 3,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 3,
+            "rate": 0.75,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 1,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 1,
+            "rate": 0.25,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": true
+          }
+        },
+        "n_min": 3,
+        "tau_sim": 0.5
+      },
+      {
+        "deflection": 0.75,
+        "faithfulness_judge_min": 5,
+        "false_escalate": 0.25,
+        "false_resolve": 0.0,
+        "feasible": true,
+        "index": 17,
+        "metrics": {
+          "deflection": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 3,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "deflection",
+            "numerator": 3,
+            "rate": 0.75,
+            "safety": false
+          },
+          "false_escalate": {
+            "by_population": [
+              {
+                "counts_toward_rate": true,
+                "denominator": 4,
+                "numerator": 1,
+                "population": "P2"
+              }
+            ],
+            "denominator": 4,
+            "name": "false_escalate",
+            "numerator": 1,
+            "rate": 0.25,
+            "safety": false
+          },
+          "false_resolve": {
+            "by_population": [
+              {
+                "counts_toward_rate": false,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P1a"
+              },
+              {
+                "counts_toward_rate": true,
+                "denominator": 3,
+                "numerator": 0,
+                "population": "P3"
+              }
+            ],
+            "denominator": 3,
+            "name": "false_resolve",
+            "numerator": 0,
+            "rate": 0.0,
+            "safety": true
+          }
+        },
+        "n_min": 3,
+        "tau_sim": 0.5
+      }
+    ],
+    "recommended_config": {
+      "ESCALATION_N_MIN": 1,
+      "ESCALATION_TAU_SIM": 0.5,
+      "faithfulness_judge_min_offline_1_5": 4
+    }
+  },
+  "generated_at": "2026-07-31T00:21:22+00:00"
+}
