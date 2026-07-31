@@ -161,6 +161,7 @@ from evals.retrieval.e7_runner import (  # noqa: E402
     get_p3_mislabel_ratio_max,
     render_e7_false_resolve_ceiling_section,
     render_e7_p1b_non_disclosure_section,
+    render_e7_sweep_section,
     run_e7_p1a,
     run_e7_p1b,
     run_e7_p2,
@@ -1694,7 +1695,9 @@ def test_sweep_to_dict_shape() -> None:
     _check(len(d["points"]) == 8, "all grid points are serialized")
     pt = d["points"][0]
     for key in ("index", "tau_sim", "n_min", "faithfulness_judge_min", "deflection",
-                "false_resolve", "false_escalate", "feasible", "metrics"):
+                "false_resolve", "false_escalate", "feasible", "metrics",
+                "p3_n_questions", "p3_n_exercised", "p3_n_mislabeled",
+                "p3_mislabel_ratio", "p3_vacuous"):
         _check(key in pt, f"sweep point dict missing {key!r}")
     # the embedded per-point metrics reuse the US-055 consolidation shape
     for name in ("deflection", "false_resolve", "false_escalate"):
@@ -1702,6 +1705,76 @@ def test_sweep_to_dict_shape() -> None:
     _check(d["knee"]["tau_sim"] == 0.60, "the serialized knee carries its knobs")
     _check(isinstance(sweep.points[0], SweepPoint), "points are SweepPoint instances")
     print("ok: the sweep to_dict carries the curve, per-point metrics, knee, and recommended config")
+
+
+def test_sweep_reports_p3_exercise_per_point() -> None:
+    """A swept false-resolve of 0% earned by DRIVING P3 rows out of the faithfulness
+    gate must be distinguishable, in the snapshot, from one earned by the pipeline
+    actually being safe (AGENTS.md invariant 12).
+
+    `_sweep_scenario`'s P3 rows are MID — strong at τ_sim 0.40, weak at 0.60 — so
+    the τ_sim=0.60 points score false-resolve 0/2 having never run the faithfulness
+    gate ONCE. That is exactly the vacuous shape `e7_pinned_invariants_failed`'s P3
+    positive control exits non-zero on for the main leg, and it is the point
+    `_select_knee` picks. Each point therefore carries its own P3 exercise stats,
+    and the render flags a vacuous knee in the committed report.
+
+    This is REPORTING, not enforcement: the same knee is still selected (pinned
+    below), so a later decision to gate on it is a separate, visible change.
+    """
+    questions, rows, scores = _sweep_scenario()
+    sweep, _, _, _ = _run_sweep(
+        questions, rows,
+        tau_sims=[0.40, 0.60], n_mins=[1, 2], faithfulness_mins=[4, 5],
+        ceiling=0.05, scores_by_question=scores,
+    )
+
+    measured = [p for p in sweep.points if p.tau_sim == 0.40]
+    vacuous = [p for p in sweep.points if p.tau_sim == 0.60]
+    _check(len(measured) == 4 and len(vacuous) == 4, "2x2 points per τ_sim")
+
+    for p in measured:
+        _check(p.p3_n_questions == 2 and p.p3_n_exercised == 2,
+               f"τ_sim=0.40 exercises both P3 rows, got {p.p3_n_exercised}/{p.p3_n_questions}")
+        _check(p.p3_n_mislabeled == 0 and p.p3_mislabel_ratio == 0.0,
+               f"τ_sim=0.40 mislabels none, got {p.p3_n_mislabeled}/{p.p3_mislabel_ratio}")
+        _check(p.p3_vacuous is False, "a point that ran the faithfulness gate is not vacuous")
+        _check(p.false_resolve == 1.0, "and its false-resolve 1.0 is a real measurement")
+
+    for p in vacuous:
+        _check(p.p3_n_exercised == 0 and p.p3_n_mislabeled == 2,
+               f"τ_sim=0.60 drives every P3 row out of the gate, got {p.p3_n_exercised} exercised")
+        _check(p.p3_mislabel_ratio == 1.0, f"mislabel ratio 1.0 expected, got {p.p3_mislabel_ratio}")
+        _check(p.p3_vacuous is True, "a point where no P3 row reached the gate is vacuous")
+        _check(p.false_resolve == 0.0 and p.feasible,
+               "its 0% still reads feasible — which is exactly why it must be labeled")
+
+    # Failure indicator: the vacuous points and the measured ones agree on
+    # deflection AND on feasibility, so before these fields existed nothing in the
+    # snapshot separated "safe" from "stopped measuring".
+    _check(
+        {p.deflection for p in vacuous} == {p.deflection for p in measured}
+        and all(p.feasible for p in vacuous),
+        "vacuous and measured points are indistinguishable on deflection/feasibility",
+    )
+
+    knee = sweep.knee
+    assert knee is not None
+    _check(knee.tau_sim == 0.60, "knee selection is UNCHANGED by this reporting")
+    _check(knee.p3_vacuous is True, "and the selected knee is the vacuous one — the finding")
+
+    md = "\n".join(render_e7_sweep_section(sweep))
+    _check("P3 exercised" in md, "the curve table gains a P3-exercised column")
+    _check("0/2 ⚠️ vacuous" in md, f"vacuous points are flagged in the table, got:\n{md}")
+    _check("2/2" in md, "measured points show their exercised count")
+    _check("The knee is vacuous" in md,
+           f"a vacuous knee carries an explicit warning in the report, got:\n{md}")
+
+    d = sweep.to_dict()
+    vac = [p for p in d["points"] if p["tau_sim"] == 0.60]
+    _check(all(p["p3_vacuous"] is True and p["p3_n_exercised"] == 0 for p in vac),
+           "the JSON snapshot carries the vacuity flag too (not just the markdown)")
+    print("ok: each sweep point reports whether its P3 leg actually ran the faithfulness gate")
 
 
 # --- US-057 P1b no-access replay fixtures + tests -------------------------
@@ -2101,6 +2174,7 @@ def main() -> int:
         test_sweep_no_point_under_ceiling_is_reported,
         test_sweep_deflection_blind_is_reported,
         test_sweep_to_dict_shape,
+        test_sweep_reports_p3_exercise_per_point,
         test_p1b_no_gold_in_result_passes,
         test_p1b_nongold_strong_is_not_a_leak,
         test_p1b_gold_in_result_is_a_leak,

@@ -2108,6 +2108,23 @@ class SweepPoint:
     `false_resolve` / `false_escalate` properties are read straight off the
     embedded `E7Metrics` (US-055), so a swept rate is computed by the exact same
     consolidation code a single-point run uses.
+
+    `p3_n_exercised` / `p3_n_mislabeled` / `p3_mislabel_ratio` carry the P3 leg's
+    exercise stats AT THIS POINT, and they are the difference between a swept
+    false-resolve that is a measurement and one that is an artefact. Raising τ_sim
+    makes P3 rows escalate at the RETRIEVAL gate, where they are `mislabeled` — the
+    faithfulness gate never runs, so they can never be tallied a false-resolve and
+    the rate falls toward 0 without the pipeline having got any safer. At the
+    extreme (`p3_n_exercised == 0`) the point's false-resolve 0% measured NOTHING,
+    which is precisely what `e7_pinned_invariants_failed`'s P3 positive control and
+    the issue-#26 mislabel-ratio guard refuse to accept on the main leg (AGENTS.md
+    invariant 12) — so without these fields the sweep could recommend an operating
+    point the runner's own pinned invariants would exit 1 on.
+
+    These are REPORTED, not enforced: `feasible` and `_select_knee` are unchanged,
+    so the knee is still selected on false-resolve ≤ ceiling alone. A reader (or a
+    later gate) can now tell which points earned their number and which merely
+    stopped measuring — previously indistinguishable in the snapshot.
     """
 
     index: int
@@ -2116,6 +2133,17 @@ class SweepPoint:
     faithfulness_judge_min: int
     metrics: E7Metrics
     feasible: bool
+    p3_n_questions: int = 0
+    p3_n_exercised: int = 0
+    p3_n_mislabeled: int = 0
+    p3_mislabel_ratio: float | None = None
+
+    @property
+    def p3_vacuous(self) -> bool:
+        """True when the P3 leg was PRESENT but NO row reached the faithfulness
+        gate, so this point's false-resolve rate is not a measurement at all.
+        Mirrors the main leg's positive control (`E7P3Result.passed`)."""
+        return self.p3_n_questions > 0 and self.p3_n_exercised == 0
 
     @property
     def deflection(self) -> float | None:
@@ -2139,6 +2167,11 @@ class SweepPoint:
             "false_resolve": self.false_resolve,
             "false_escalate": self.false_escalate,
             "feasible": self.feasible,
+            "p3_n_questions": self.p3_n_questions,
+            "p3_n_exercised": self.p3_n_exercised,
+            "p3_n_mislabeled": self.p3_n_mislabeled,
+            "p3_mislabel_ratio": self.p3_mislabel_ratio,
+            "p3_vacuous": self.p3_vacuous,
             "metrics": self.metrics.to_dict(),
         }
 
@@ -2355,6 +2388,10 @@ async def run_e7_sweep(
                 faithfulness_judge_min=faith_min,
                 metrics=metrics,
                 feasible=(fr is not None and fr <= ceiling),
+                p3_n_questions=len(p3.decisions),
+                p3_n_exercised=len(p3.exercised),
+                p3_n_mislabeled=len(p3.mislabeled),
+                p3_mislabel_ratio=p3.mislabel_ratio,
             )
         )
 
@@ -2384,9 +2421,17 @@ def render_e7_sweep_section(sweep: E7Sweep) -> list[str]:
         "ceiling) — not maximize accuracy. LLM-judged → scheduled/weekly, never a "
         "per-PR block (US-059).",
         "",
+        "`P3 exercised` is how many P3 rows actually reached the faithfulness gate "
+        "at that point (the rest escalated at the retrieval gate — `mislabeled`, so "
+        "they can never be tallied a false-resolve). **Read the false-resolve column "
+        "together with it:** raising τ_sim drives rows out of the gate rather than "
+        "making the pipeline safer, so a point marked ⚠️ vacuous measured nothing "
+        "and its 0% is not a result. Reported, not enforced — the knee is still "
+        "selected on false-resolve ≤ ceiling alone.",
+        "",
         "| τ_sim | N_min | faith≥ | deflection | false-resolve | false-escalate "
-        "| ≤ ceiling |",
-        "|---|---|---|---|---|---|---|",
+        "| P3 exercised | ≤ ceiling |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     knee = sweep.knee
     for p in sweep.points:
@@ -2394,13 +2439,38 @@ def render_e7_sweep_section(sweep: E7Sweep) -> list[str]:
         fr = "—" if p.false_resolve is None else f"{p.false_resolve:.0%}"
         fe = "—" if p.false_escalate is None else f"{p.false_escalate:.0%}"
         feas = "✅" if p.feasible else "✗"
+        exercised = f"{p.p3_n_exercised}/{p.p3_n_questions}"
+        if p.p3_vacuous:
+            exercised += " ⚠️ vacuous"
         mark = " ⭐ knee" if knee is not None and p.index == knee.index else ""
         lines.append(
             f"| {p.tau_sim} | {p.n_min} | {p.faithfulness_judge_min}/5 | {defl} | "
-            f"{fr} | {fe} | {feas}{mark} |"
+            f"{fr} | {fe} | {exercised} | {feas}{mark} |"
         )
 
     lines.append("")
+    if knee is not None and knee.p3_vacuous:
+        lines.append(
+            "> ⚠️ **The knee is vacuous.** No P3 row reached the faithfulness gate "
+            "at this operating point, so its false-resolve rate measured nothing "
+            "and must not be read as evidence the point is safe. The main leg's P3 "
+            "positive control would exit the runner non-zero on this config. Treat "
+            "the recommendation below as unusable until the P3 population has rows "
+            "that stay above this τ_sim."
+        )
+        lines.append("")
+    elif knee is not None and knee.p3_mislabel_ratio is not None and (
+        knee.p3_mislabel_ratio > DEFAULT_P3_MISLABEL_RATIO_MAX
+    ):
+        lines.append(
+            f"> ⚠️ **The knee is majority-mislabeled** "
+            f"({knee.p3_n_mislabeled}/{knee.p3_n_questions} P3 rows escalated "
+            f"before the faithfulness gate, above the issue-#26 ceiling "
+            f"{DEFAULT_P3_MISLABEL_RATIO_MAX:.0%}). Its false-resolve rate rests on "
+            f"a heavily diluted sample; the main leg's mislabel-ratio guard would "
+            f"flag this config."
+        )
+        lines.append("")
     if sweep.knee_reason == "ok" and knee is not None:
         defl = "—" if knee.deflection is None else f"{knee.deflection:.0%}"
         fr = "—" if knee.false_resolve is None else f"{knee.false_resolve:.0%}"

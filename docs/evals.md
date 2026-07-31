@@ -287,6 +287,16 @@ Both the gated `false_resolve_rate` and the surfaced `mislabel_ratio` (additive 
 The dilution a heavily-mislabeled leg creates is therefore handled by the ratio guard, not by shrinking the denominator.
 This mirrors the P1a/P1b/non-disclosure blindness guards, so the safety ceiling can never be disarmed by a P3 population that drifts out from under it. The exit-code decision lives in `e7_pinned_invariants_failed` (a pure function over the scored legs, unit-tested directly).
 
+**Neither guard applies inside the knob sweep, so read its curve with the `P3 exercised` column.**
+Both guards above govern the *main leg* — the single operating point the run is scored at.
+The US-056 sweep re-runs the legs at every grid point, and `_select_knee` filters only on `false_resolve <= ceiling` then maximizes deflection; it never consults the positive control or the mislabel ratio.
+That matters because τ_sim is the knob most able to fake a good number: raising it pushes P3 rows below the retrieval gate, where they are `mislabeled` and can no longer be tallied a false-resolve, so the rate falls toward 0 without the faithfulness gate having improved at all.
+A grid point whose P3 rows *all* fall out is the vacuous 0% the main leg's positive control exits non-zero on — which means the sweep can recommend an operating point the runner's own pinned invariants would then reject.
+Each `SweepPoint` therefore carries `p3_n_exercised` / `p3_n_mislabeled` / `p3_mislabel_ratio` / `p3_vacuous`, rendered as a `P3 exercised` column in the weekly report, and a vacuous or majority-mislabeled knee is called out explicitly above the recommendation.
+This is **reporting, not enforcement** — the knee is still selected on the ceiling alone, so gating on it would be a separate, visible change.
+The authoring-side counterpart is in `docs/golden-set-authoring.md`: a P3 population clustered below the top of the swept τ_sim grid cannot falsify a τ_sim recommendation, so keep P3 rows spanning the grid.
+Pinned by `test_sweep_reports_p3_exercise_per_point` in `evals/retrieval/test_e7_runner.py`.
+
 ### A scheduled run has three outcomes, not two: green, red, and UNMEASURED
 
 Every guard above assumes the run got far enough to score something.

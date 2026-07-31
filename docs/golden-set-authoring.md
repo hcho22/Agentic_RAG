@@ -150,6 +150,16 @@ Add one `escalation` label per question in `evals/retrieval/escalation_gold.yaml
 P2-vs-P3 is the single judgment that cannot be derived: "does a faithful answer actually exist from these chunks?" is a human call.
 Everything else in the escalation suite (the P1b no-access replay, the leak checks) is derived from the gold you already labeled.
 
+**Author your P3 rows to span the swept τ_sim grid, not to cluster below it.**
+A P3 row only proves something about the *faithfulness* gate if it first *clears* the *retrieval* gate: a row that escalates earlier is scored `mislabeled` and can never be tallied a false-resolve.
+So a P3 population whose retrieval similarity all sits below the top of the τ_sim grid makes the false-resolve rate fall to a clean-looking 0% at high τ_sim purely because nothing is being measured there — see `docs/evals.md` §6 for the guards that catch this on the main leg, and the `P3 exercised` column that exposes it per grid point in the sweep.
+The practical rule when authoring: phrase some P3 questions in the corpus's **own register** — short, using the corpus's vocabulary, mirroring the phrasing of your strongest P2 rows — so they retrieve *strongly* while still having no faithful grounded answer.
+Those are the rows that make a τ_sim recommendation falsifiable, because raising τ_sim cannot silence them.
+The shipped set does this deliberately: `e7-p3-04` through `e7-p3-09` are register-matched twins of the P2 rows, and `e7-p3-09` is the corpus-register restatement of `e7-p3-01` specifically so the two can be compared.
+
+The richest P3 rows are the ones where the retrieved chunk offers a **grounded-looking wrong answer** — the corpus states a fact adjacent to the question (the new-unit warranty period, the un-escalated refund cap) while the fact actually asked for is absent.
+A row whose answer is merely missing tests less than one whose answer is missing *next to* something that reads like it.
+
 A knowledge-assistant-only buyer **omits this layer entirely**.
 A base-only golden set with no `escalation` labels loads and runs the base plus derived-for-free layers without error; a support golden set additionally runs the escalation suite.
 A present-but-typo'd label is still rejected fail-closed.
