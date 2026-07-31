@@ -1,6 +1,6 @@
 # US-008: weekly RAGAS-eval workflow. Runs the four canonical RAGAS metrics
 # (Faithfulness, Answer Relevancy, Context Precision, Context Recall) over the
-# 50-question golden set on the two hybrid pre_filter cells, on a weekly
+# 60-question golden set on the two hybrid pre_filter cells, on a weekly
 # schedule (Sundays 04:00 UTC) and on manual `workflow_dispatch`. It keeps its
 # own concurrency group and snapshot directory so it never tangles with the
 # daily nightly retrieval workflow.

@@ -33,7 +33,7 @@ The Module 11 correctness eval proves the security property holds and
 characterises the recall trade-off; the section 5 tables embed the
 eval's output verbatim. The headline collapse from this math doesn't
 appear in either of v0's empirical tables — the correctness eval's
-14-chunk corpus is too small for ranking competition, and the scale
+16-chunk corpus is too small for ranking competition, and the scale
 benchmark's 10k-chunk corpus is small enough that the Postgres planner
 sidesteps HNSW altogether (section 5b walks through what `EXPLAIN`
 shows). The math above is what the post-filter approach *would* look
@@ -262,9 +262,9 @@ curve.
 
 ### 5a. Correctness eval (US-042) — security, recall trade-off, non-regression
 
-50 questions × 3 modes × 3 viewer setups × 2 filter strategies, run
-against the 14-chunk Acme corpus. The recall trade-off table shows
-+0.000 deltas everywhere — expected on a 14-chunk corpus, where the
+60 questions × 3 modes × 3 viewer setups × 2 filter strategies, run
+against the 8-doc / 16-chunk Acme corpus. The recall trade-off table shows
++0.000 deltas everywhere — expected on a 16-chunk corpus, where the
 visible set is large enough that gold rarely gets pushed below top-5.
 The eval's load-bearing claim here is **security**, not recall
 differentiation: the section 5b note explains why the recall collapse

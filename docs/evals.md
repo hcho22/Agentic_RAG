@@ -299,6 +299,8 @@ Each `SweepPoint` therefore carries `p3_n_exercised` / `p3_n_mislabeled` / `p3_m
 The same fields ride in the JSON snapshot - on each point, on the `curve_points` list, and on `recommended_defaults` - so a script promoting the knee's knobs straight off the JSON sees the same warning the markdown prose carries.
 This is **reporting, not enforcement** — the knee is still selected on the ceiling alone, so gating on it would be a separate, visible change.
 The authoring-side counterpart is in `docs/golden-set-authoring.md`: a P3 population clustered below the top of the swept τ_sim grid cannot falsify a τ_sim recommendation, so keep P3 rows spanning the grid.
+The already-published `docs/escalation-weekly/2026-07-31.{md,json}` predates both halves and is the worked example: it recommends τ_sim=0.5 on a false-resolve 0% that no P3 row was measured at.
+Published snapshots are generated artifacts and are never hand-edited, so that correction is filed as a dated erratum in `docs/escalation-weekly/README.md`; the `P3 exercised` column appears from the next weekly run onward.
 Pinned by `test_sweep_reports_p3_exercise_per_point` in `evals/retrieval/test_e7_runner.py`.
 
 ### A scheduled run has three outcomes, not two: green, red, and UNMEASURED

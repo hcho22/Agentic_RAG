@@ -1,4 +1,4 @@
-# US-035: PR retrieval-eval workflow. Runs the 50-question golden set
+# US-035: PR retrieval-eval workflow. Runs the 60-question golden set
 # (US-033) against PR head AND main, then posts a delta-vs-main markdown
 # comment on the PR. The delta comment is advisory — it never fails the build,
 # regardless of delta sign, and updates an existing bot comment in place across
@@ -73,7 +73,7 @@
 # The nightly workflow (retrieval-eval-nightly.yml) is where rerankers
 # eventually land once the runner gains reranker support.
 #
-# US-042: the runner now walks 50 questions × 3 modes × 3 viewers ×
+# US-042: the runner now walks 60 questions × 3 modes × 3 viewers ×
 # 2 filter strategies, so the wall-clock budget grows ~3× (each viewer
 # adds an extra match_chunks round-trip per question per mode; post-
 # filter re-uses the owner ranking). Both PR and main are run, so the
