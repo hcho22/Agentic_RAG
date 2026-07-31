@@ -171,8 +171,11 @@ DEFAULT_FAITHFULNESS_JUDGE_MIN = 4
 # only fails the run when EVERY row is mislabeled (zero exercised); this ceiling
 # governs the PARTIAL case: when the mislabeled FRACTION over the full presented P3
 # population exceeds it, the leg is failed/flagged low-confidence so heavy gold drift
-# trips the gate instead of quietly diluting the false-resolve rate (latent today at
-# the 3-row gold, a real masking path as the P3 gold grows). Default 0.5 (a majority-
+# trips the gate instead of quietly diluting the false-resolve rate. That path is LIVE,
+# not hypothetical: the 9-row P3 gold has 5 rows measuring below 0.5 (e7-p3-01/02/03 in
+# the 0.42–0.47 band, e7-p3-07 at 0.4234, e7-p3-09 at 0.4570), so any τ_sim=0.5 point
+# mislabels 5/9 = 56% — over this ceiling — even though the main leg's default τ_sim of
+# 0.4 currently leaves all 9 above the retrieval gate. Default 0.5 (a majority-
 # mislabeled P3 leg is a gold defect); override via E7_P3_MISLABEL_RATIO_MAX or
 # --p3-mislabel-ratio-max. The denominator is the full presented population
 # (`n_questions`), matching the false-resolve rate's — NOT `len(exercised)`.
@@ -2245,7 +2248,13 @@ class E7Sweep:
         """The deflection-vs-false-resolve curve as plottable points, sorted by
         false-resolve ascending then deflection descending — the operating curve
         the knee sits on. Points whose deflection or false-resolve is blind (None)
-        are omitted (they are not on the curve)."""
+        are omitted (they are not on the curve).
+
+        Each point carries `p3_n_exercised` / `p3_vacuous` alongside its rates: a
+        consumer plotting this curve straight off the snapshot must be able to
+        tell a false-resolve 0% that was MEASURED from one earned by driving every
+        P3 row out of the retrieval gate, which is otherwise the same number here.
+        """
         plottable = [
             p for p in self.points
             if p.false_resolve is not None and p.deflection is not None
@@ -2265,6 +2274,8 @@ class E7Sweep:
                 "n_min": p.n_min,
                 "faithfulness_judge_min": p.faithfulness_judge_min,
                 "feasible": p.feasible,
+                "p3_n_exercised": p.p3_n_exercised,
+                "p3_vacuous": p.p3_vacuous,
                 "index": p.index,
             }
             for p in plottable
@@ -2278,6 +2289,11 @@ class E7Sweep:
         The offline 1-5 faithfulness floor is reported as guidance only: the
         runtime `ESCALATION_FAITHFULNESS_CUTOFF` lives on a DIFFERENT [0,1] scale
         (US-048/050) and is tuned separately, so it is not promoted verbatim.
+
+        `p3_vacuous` / `p3_n_exercised` ride along so a SCRIPT promoting these
+        defaults sees the same warning the markdown prose carries: a vacuous knee's
+        false-resolve rate measured nothing, so these knobs are not safe to promote
+        on the strength of it.
         """
         k = self.knee
         if k is None:
@@ -2286,6 +2302,8 @@ class E7Sweep:
             "ESCALATION_TAU_SIM": k.tau_sim,
             "ESCALATION_N_MIN": k.n_min,
             "faithfulness_judge_min_offline_1_5": k.faithfulness_judge_min,
+            "p3_n_exercised": k.p3_n_exercised,
+            "p3_vacuous": k.p3_vacuous,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -2673,8 +2691,9 @@ def e7_pinned_invariants_failed(
     # positive control above. That control fails closed only when EVERY P3 row is
     # mislabeled (zero exercised); a leg that is heavily but not entirely mislabeled
     # still exercises ≥1 row (so `passed` is True) yet runs the false-resolve ceiling
-    # over a shrunken sample — latent today at the 3-row gold, a real masking path as
-    # the P3 gold grows. Gated on `passed` so the empty / all-mislabeled cases stay
+    # over a shrunken sample — a live masking path now that the P3 gold is 9 rows, 5 of
+    # which measure below 0.5 and so mislabel together (56%) at any τ_sim=0.5 point.
+    # Gated on `passed` so the empty / all-mislabeled cases stay
     # owned by the positive control above (one clear failure reason each); fires only
     # when the mislabeled FRACTION over the full presented population STRICTLY exceeds
     # the ceiling. Inert per-PR (p3_result is None → no P3 leg).

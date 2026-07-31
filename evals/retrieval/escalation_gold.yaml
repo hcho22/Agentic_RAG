@@ -93,16 +93,19 @@
 #   0.42–0.47 band, so EVERY one of them escalates at the retrieval gate once
 #   τ_sim ≥ 0.5. That made the 2026-07-31 weekly sweep's "knee" at τ_sim=0.5 read
 #   false-resolve 0% while measuring nothing — the faithfulness gate was never
-#   exercised at that point. The above-0.5 coverage is carried by the MEASURED set
-#   e7-p3-04/05/10/11 (0.53–0.58): each asks what its chunk is already about and
-#   merely varies a parameter the corpus never covers, so a meaningful fraction of
-#   the P3 population stays ABOVE 0.5 and keeps exercising the faithfulness gate
-#   across the whole swept grid. The other shipped P3 rows do NOT carry it —
-#   e7-p3-01/02/03 and e7-p3-09 measured mid-band (0.42–0.47) and e7-p3-07 is
-#   UNSCREENED — and e7-p3-06/08 were retired for measuring weak (see the
-#   retirement block below). Keep this property when adding P3 rows: a P3
-#   population clustered below the top of the τ_sim grid cannot falsify a τ_sim
-#   recommendation, and only a MEASURED row may be counted toward the claim.
+#   exercised at that point. The above-0.5 coverage is carried by four rows, each
+#   with its OWN measured top-1 cosine — e7-p3-05 (0.5800), e7-p3-11 (0.5605),
+#   e7-p3-04 (0.5339) and e7-p3-10 (0.5288): each asks what its chunk is already
+#   about and merely varies a parameter the corpus never covers, so a meaningful
+#   fraction of the P3 population stays ABOVE 0.5 and keeps exercising the
+#   faithfulness gate across the whole swept grid. The other shipped P3 rows do
+#   NOT carry it — e7-p3-01/02/03 measured in the 0.42–0.47 band, and e7-p3-09
+#   (0.4570) and e7-p3-07 (0.4234) measured mid-band too — and e7-p3-06 (0.3556) /
+#   e7-p3-08 (0.3539) were retired for measuring weak (see the retirement block
+#   below). Keep this property when adding P3 rows: a P3 population clustered
+#   below the top of the τ_sim grid cannot falsify a τ_sim recommendation, and
+#   only a row with its own recorded measurement may be counted toward the claim —
+#   never an aggregate range standing in for a per-row number.
 
 questions:
   # ── no_context / P1a (genuinely off-topic — no gold chunk) ───────────────
@@ -216,11 +219,13 @@ questions:
   # ── should_escalate / P3, high-cosine band (see "P3 COSINE COVERAGE" above) ──
   # Authored to ask what the chunk is already about so retrieval stays strong ABOVE
   # the top of the swept τ_sim grid. The rows that MEASURED that property —
-  # e7-p3-04/05 here and e7-p3-10/11 below — are what makes a τ_sim recommendation
-  # falsifiable: raising τ_sim cannot silence them, so whatever false-resolve they
-  # produce is attributable to the faithfulness gate, not to the retrieval gate.
-  # e7-p3-07 and e7-p3-09 sit in this block by intent only; neither measured above
-  # 0.5, so neither counts toward that coverage.
+  # e7-p3-04 (0.5339) and e7-p3-05 (0.5800) here, e7-p3-10 (0.5288) and e7-p3-11
+  # (0.5605) below — are what makes a τ_sim recommendation falsifiable: raising
+  # τ_sim cannot silence them, so whatever false-resolve they produce is
+  # attributable to the faithfulness gate, not to the retrieval gate. e7-p3-07
+  # (0.4234) and e7-p3-09 (0.4570) sit in this block by authoring intent only;
+  # both MEASURED mid-band, so neither counts toward that coverage and both are
+  # mislabeled at τ_sim=0.5.
 
   - id: e7-p3-04
     escalation: should_escalate
@@ -230,12 +235,13 @@ questions:
         doc: warranty-terms
     reference: The warranty terms cover electronics generally but never address refurbished units, so no warranty period for a refurbished item can be grounded in the corpus; this should be escalated to a human rather than answered by reusing the new-unit 12-month figure.
     notes: >-
-      HIGH-COSINE PROBE. Deliberately mirrors e7-p2-01 ("How long is the
-      electronics warranty?", which scores 0.5546) with one adjective added, so it
-      should clear a τ_sim of 0.5. warranty-terms:0 states the 12-month period for
-      electronics and separately voids coverage on any unit "opened by anyone other
-      than an authorized Acme repair partner" (same chunk, so one anchor covers
-      both) — refurbished units are never mentioned either way. The trap is that a
+      HIGH-COSINE PROBE, MEASURED 0.5339 (warranty-terms:0). Deliberately mirrors
+      e7-p2-01 ("How long is the electronics warranty?", which scores 0.5546) with
+      one adjective added; the adjective costs ~0.02 and the row still clears
+      τ_sim=0.5. warranty-terms:0 states the 12-month period for electronics and
+      separately voids coverage on any unit "opened by anyone other than an
+      authorized Acme repair partner" (same chunk, so one anchor covers both) —
+      refurbished units are never mentioned either way. The trap is that a
       grounded-LOOKING answer ("12 months") is available verbatim in the retrieved
       chunk while being wrong for the question asked: exactly the Risk #3 shape the
       faithfulness gate is supposed to catch and the retrieval gate cannot.
@@ -248,12 +254,14 @@ questions:
         doc: returns-process
     reference: The returns process quotes over-20-lbs return shipping per case rather than publishing a fee, so no amount can be grounded in the corpus; this should be escalated to a human who can quote the case rather than answered with one of the published under-20-lbs figures.
     notes: >-
-      HIGH-COSINE PROBE. The short, register-matched form of e7-p2-04 (whose much
-      longer phrasing already scores 0.5060 against the same document), so it
-      should clear τ_sim=0.5. "quoted per-case for returns over 20 lbs" is the
-      doc-defers-to-a-human flavour of P3: the fee exists but only a human can
-      produce it. STRADDLE anchor (US-107) — the fee sentence sits in the chunker's
-      overlap block, so it resolves to returns-process:{0,1}, like e7-p2-04.
+      HIGH-COSINE PROBE, MEASURED 0.5800 (returns-process:1) — the STRONGEST
+      retrieval of any P3 row in the set. The short, register-matched form of
+      e7-p2-04 (whose much longer phrasing scores 0.5060 against the same
+      document), and the shortening is worth ~0.07. "quoted per-case for returns
+      over 20 lbs" is the doc-defers-to-a-human flavour of P3: the fee exists but
+      only a human can produce it. STRADDLE anchor (US-107) — the fee sentence
+      sits in the chunker's overlap block, so it resolves to returns-process:{0,1},
+      like e7-p2-04.
 
   - id: e7-p3-07
     escalation: should_escalate
@@ -263,20 +271,21 @@ questions:
         doc: refund-policy
     reference: The refund policy caps goodwill refunds at 50% of the order total only in the un-escalated case and never states what cap, if any, applies after supervisor escalation, so no post-escalation cap can be grounded in the corpus; this should be escalated to a human.
     notes: >-
-      UNSCREENED — its top-1 cosine was never measured, so it carries NO band
-      claim and must not be counted toward the above-0.5 coverage in "P3 COSINE
-      COVERAGE". It was authored on the intuition that "goodwill refund",
-      "capped", "order total" and "escalated to a supervisor" are all verbatim
-      refund-policy vocabulary; that is exactly the intuition that produced the
-      retired e7-p3-06/08, and refund-policy:0's dominant theme is the refund
-      schedule rather than supervisor escalation, so it may well sit mid-band.
-      Screen it (embed with text-embedding-3-small, take max(1 - distance) over
-      the corpus) when API credentials are available, then either record the
-      measured value and promote it or retire it under a fresh id. Do not
-      estimate the number. The row itself is a valid P3: the corpus states the
-      cap ONLY for the un-escalated branch and says nothing about the escalated
-      one, so the retrieved chunk offers a grounded-looking wrong answer ("50%")
-      — the retrieval gate has no way to tell, which is the point.
+      MEASURED 0.4234 (refund-policy:0) — mid-band, it does NOT clear τ_sim=0.5,
+      so at the top of the swept grid it escalates at the retrieval gate as
+      `mislabeled` and DILUTES the exercised fraction there. It must not be
+      counted toward the above-0.5 coverage in "P3 COSINE COVERAGE". It was
+      authored on the intuition that "goodwill refund", "capped", "order total"
+      and "escalated to a supervisor" are all verbatim refund-policy vocabulary;
+      the measurement disproves that intuition exactly as it disproved the
+      retired e7-p3-06/08 — refund-policy:0's dominant theme is the refund
+      SCHEDULE, not supervisor escalation, and embeddings are whole-chunk, so
+      matching the vocabulary of one buried sentence bought nothing. Kept because
+      a mid-band P3 row is still a real row, and the row itself is a valid P3: the
+      corpus states the cap ONLY for the un-escalated branch and says nothing
+      about the escalated one, so the retrieved chunk offers a grounded-looking
+      wrong answer ("50%") — the retrieval gate has no way to tell, which is the
+      point.
 
   - id: e7-p3-09
     escalation: should_escalate
@@ -294,7 +303,8 @@ questions:
       landed marginally LOWER, falsifying the "e7-p3-01 is a phrasing artefact"
       hypothesis it was authored to test. Kept because a mid-band P3 row is still a
       real row, but do not cite it as evidence for the register effect; that effect
-      is carried by e7-p3-04/05/10/11, which measured 0.53–0.58.
+      is carried by the rows that each measured above 0.5 — e7-p3-04 (0.5339),
+      e7-p3-05 (0.5800), e7-p3-10 (0.5288) and e7-p3-11 (0.5605).
 
   # ids e7-p3-06 and e7-p3-08 are RETIRED and must never be reused (see "Field
   # semantics" above). Both were authored as high-cosine probes and both MEASURED
@@ -315,10 +325,26 @@ questions:
   # FEE against a return-shipping section) ask what the chunk is already about and
   # merely vary a parameter the corpus never covers.
   #
-  # Screen candidates by MEASURING, not by intuition: embed the candidate with
-  # text-embedding-3-small and take max(1 - (chunk.embedding <=> q)) over the
-  # corpus — the same quantity the retrieval gate thresholds. Of 14 candidates
-  # screened that way only 5 cleared 0.50; of the six authored by intuition, two.
+  # Screen candidates by MEASURING, not by intuition. The screening method, so the
+  # next author can reproduce it: embed the candidate with text-embedding-3-small
+  # (the `embedding_config` singleton confirms model text-embedding-3-small / dim
+  # 1536 — the same embedder the seeder used) and take
+  # max(1 - (chunk.embedding <=> q)) over the corpus, computed by pgvector itself
+  # against public.chunks on the local Supabase Postgres (127.0.0.1:54322),
+  # restricted to the 8 support-corpus slugs (api-error-reference,
+  # customer-service-sop, loyalty-program, product-catalog, refund-policy,
+  # returns-process, shipping-faq, warranty-terms; wikipedia chunks excluded).
+  # That is exactly the top-1 cosine the retrieval gate thresholds against τ_sim.
+  # The method is CONTROL-VALIDATED: re-running it on five rows whose values were
+  # already recorded here reproduced every one to 4 decimal places (delta 0.0000)
+  # — e7-p3-09 0.4570, e7-p3-10 0.5288, e7-p3-11 0.5605, e7-p2-01 0.5546,
+  # e7-p2-04 0.5060.
+  #
+  # Of 14 candidates screened that way only 5 cleared 0.50; of the six authored by
+  # intuition (e7-p3-04/05/06/07/08/09), two — e7-p3-04 (0.5339) and e7-p3-05
+  # (0.5800) — while e7-p3-06 (0.3556), e7-p3-07 (0.4234), e7-p3-08 (0.3539) and
+  # e7-p3-09 (0.4570) did not. Every one of those six numbers is recorded in this
+  # file, so the tally is checkable rather than asserted.
 
   - id: e7-p3-10
     escalation: should_escalate
@@ -344,8 +370,9 @@ questions:
     reference: The warranty terms give books a 30-day printing-defect warranty and place anything beyond 30 days at the discretion of customer service, so no warranty period past 30 days can be grounded in the corpus; this must be escalated to a human — the decision-maker the document itself names.
     notes: >-
       HIGH-COSINE PROBE, MEASURED 0.5605 (warranty-terms:0) BEFORE authoring — the
-      strongest retrieval of any P3 row bar e7-p3-05. Replaces the retired
-      e7-p3-08 in the "the document defers to a human" role, and carries it better:
+      strongest retrieval of any P3 row bar e7-p3-05, which measured 0.5800.
+      Replaces the retired e7-p3-08 in the "the document defers to a human" role,
+      and carries it better:
       e7-p3-08 tried to hang that flavour on an internal SOP instruction written
       for agents, which embedded weakly; this asks a customer-shaped question about
       a warranty period against a warranty document, where the deferral ("at the

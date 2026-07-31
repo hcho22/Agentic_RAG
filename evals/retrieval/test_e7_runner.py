@@ -1600,7 +1600,9 @@ def test_sweep_curve_and_knee() -> None:
 
     # The knee's knobs are reported as recommended US-050 defaults.
     rec = sweep.recommended_config()
-    _check(rec == {"ESCALATION_TAU_SIM": 0.60, "ESCALATION_N_MIN": 1, "faithfulness_judge_min_offline_1_5": 4},
+    _check(rec == {"ESCALATION_TAU_SIM": 0.60, "ESCALATION_N_MIN": 1,
+                   "faithfulness_judge_min_offline_1_5": 4,
+                   "p3_n_exercised": 0, "p3_vacuous": True},
            f"recommended config must report the knee knobs, got {rec}")
     print("ok: the sweep emits the curve and picks the highest-deflection knee under the ceiling")
 
@@ -1774,6 +1776,23 @@ def test_sweep_reports_p3_exercise_per_point() -> None:
     vac = [p for p in d["points"] if p["tau_sim"] == 0.60]
     _check(all(p["p3_vacuous"] is True and p["p3_n_exercised"] == 0 for p in vac),
            "the JSON snapshot carries the vacuity flag too (not just the markdown)")
+
+    # The two JSON views a downstream consumer actually reads must carry it too:
+    # the plottable curve (deflection-vs-false-resolve) and the promotable config.
+    _check(len(d["curve"]) == 8, f"every point is on the curve, got {len(d['curve'])}")
+    for c in d["curve"]:
+        _check("p3_n_exercised" in c and "p3_vacuous" in c,
+               f"a curve point must carry its P3 exercise stats, got {sorted(c)}")
+    curve_vac = [c for c in d["curve"] if c["tau_sim"] == 0.60]
+    _check(all(c["p3_vacuous"] is True and c["p3_n_exercised"] == 0 for c in curve_vac),
+           "a plotted false-resolve 0% is distinguishable from one that measured nothing")
+    _check(all(c["p3_vacuous"] is False and c["p3_n_exercised"] == 2
+               for c in d["curve"] if c["tau_sim"] == 0.40),
+           "and the measured points on the curve say so")
+    _check(d["recommended_config"]["p3_vacuous"] is True
+           and d["recommended_config"]["p3_n_exercised"] == 0,
+           f"a script promoting the recommended knobs sees the vacuity marker, "
+           f"got {d['recommended_config']}")
     print("ok: each sweep point reports whether its P3 leg actually ran the faithfulness gate")
 
 
