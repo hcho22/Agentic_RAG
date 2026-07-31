@@ -11,11 +11,9 @@ Raw OpenAI SDK + Pydantic (no LLM frameworks), FastAPI backend,
 React/Vite/Tailwind frontend, Supabase (Postgres + pgvector + Auth +
 Storage + Realtime), LangSmith observability.
 
-![Granting-principal badges in the chat UI](docs/img/granting-principal-badges.png)
-
-*Tool-call attribution renders a per-chunk badge — "via owner" / "via direct
-grant" / "via {group}" — so the viewer can see exactly which ACL rule
-granted them access to each retrieved chunk.*
+Tool-call attribution renders a per-chunk badge in the chat UI - "via
+owner" / "via direct grant" / "via {group}" - so the viewer can see
+exactly which ACL rule granted them access to each retrieved chunk.
 
 ## The permissions story, in numbers
 
