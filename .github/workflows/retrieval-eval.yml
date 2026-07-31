@@ -112,6 +112,11 @@ on:
       - 'backend/permissions.py'
       - 'backend/test_au4_auth_attacks.py'
       - 'evals/retrieval/**'
+      # Invariant 12's two guard tests live under evals/retrieval/ and
+      # evals/permissions_scale/ and are enforced by the eval-harness-guards job
+      # below. The permissions-scale half has no other per-PR gate, so it is
+      # listed here for that job alone.
+      - 'evals/permissions_scale/**'
       - 'db_seed/corpus/**'
       - 'db_seed/corpus_seed.py'
       - 'supabase/migrations/**'
@@ -142,6 +147,7 @@ jobs:
     outputs:
       retrieval: ${{ steps.filter.outputs.retrieval }}
       au4: ${{ steps.filter.outputs.au4 }}
+      guards: ${{ steps.filter.outputs.guards }}
     steps:
       - name: Checkout PR head
         uses: actions/checkout@v4
@@ -168,6 +174,55 @@ jobs:
               - 'supabase/migrations/**'
               - 'backend/test_au4_auth_attacks.py'
               - '.github/workflows/retrieval-eval.yml'
+            guards:
+              - 'evals/retrieval/**'
+              - 'evals/permissions_scale/**'
+              - '.github/workflows/retrieval-eval.yml'
+
+  # Invariant 12 ("measured nothing must never be reportable as a measurement")
+  # is pinned by two offline test modules - one per half: derived gold
+  # (evals/permissions_scale/test_degenerate_guard.py) and authored gold
+  # (evals/retrieval/test_empty_gold_guard.py). Until now neither was executed by
+  # any workflow, so the guard against a silently-green harness was itself
+  # enforced only by a command in a markdown file.
+  #
+  # Both are offline by construction - no DB, no secrets, no network, inputs
+  # built in-process - which is what lets this job gate a PR without the Supabase
+  # stack the two jobs below pay for. It is deliberately its own job so it still
+  # reports on a permissions-scale-only change, where `retrieval-eval` is skipped.
+  eval-harness-guards:
+    name: Eval-harness guards (offline, deterministic, may block)
+    needs: changes
+    if: needs.changes.outputs.guards == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: evals/retrieval/requirements-ci.txt
+
+      - name: Install Python deps
+        run: |
+          # Same slim install as the eval job: both guard modules import only
+          # what requirements-ci.txt already covers (asyncpg / httpx / openai /
+          # pyyaml / pyjwt), never the ML stack.
+          python -m pip install --upgrade pip
+          pip install -r evals/retrieval/requirements-ci.txt
+
+      - name: Run the invariant-12 guard tests
+        # No `|| true`, no skip-on-unset-env: these two modules must always run
+        # and a non-zero exit must block the merge. A guard that can go quiet is
+        # the failure mode it exists to catch.
+        run: |
+          python -m evals.retrieval.test_empty_gold_guard
+          python -m evals.permissions_scale.test_degenerate_guard
 
   retrieval-eval:
     name: PR vs main

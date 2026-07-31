@@ -29,6 +29,14 @@ Design (why this shape):
   matches no current chunk raises `ZeroResolveError` naming the question id and
   the offending anchor text, and fails the run — never a silent `recall=0`.
 
+- **An EMPTY gold set is a hard error too, one layer down.** `EmptyGoldError`
+  (below) is this module's second refusal: it covers every other route by which
+  a question can reach a scorer with nothing to score against, and the E4/E6
+  scorers raise it instead of reporting `0.000` for a cell that measured
+  nothing. It lives here, beside `ZeroResolveError`, because both answer the
+  same question - "is this gold label actually scoreable?" - at different
+  depths. See AGENTS.md invariant 12.
+
 - **Optional stable-document scope.** An anchor may be `{text, doc}` where `doc`
   is a `filename_slug` (the stable document identity that survives re-chunking);
   resolution is then restricted to that document's chunks. The scope IS the
@@ -71,6 +79,37 @@ class ZeroResolveError(RuntimeError):
             f"{anchor_text!r}. The quoted span appears in no current chunk — "
             f"fix the anchor text or its `doc` scope (the resolver does not "
             f"fuzzy-match around a content edit)."
+        )
+
+
+class EmptyGoldError(RuntimeError):
+    """A metric was asked to score against an EMPTY gold set. Refuses to return 0.0.
+
+    Recall / nDCG over an empty gold set has no defined value, and the historical
+    `return 0.0` in the scorers published one anyway - so "we measured nothing"
+    reached the gate wearing the exact shape of "we retrieved the wrong things".
+    Those two must never collapse into the same reportable number: a golden-set
+    authoring error then scores as a retrieval regression, drags the gated E4/E6
+    mean down, and is indistinguishable from the real thing in the summary table.
+
+    `ZeroResolveError` above already fails the run when a single *anchor* matches
+    no chunk. This is the same refusal one layer down, covering every other route
+    by which a gold set can arrive empty at a scorer: a question that resolved to
+    nothing, a Workspace-B copy that never received a question's gold chunks (E6),
+    or any caller that hand-builds a gold set and filters it down to nothing.
+
+    Callers pass a `context` naming the cell (question / mode / viewer / filter)
+    so the refusal is diagnosable from the CI log alone, without a re-run.
+    """
+
+    def __init__(self, context: str, remedy: str = "") -> None:
+        self.context = context
+        self.remedy = remedy
+        tail = f" {remedy}" if remedy else ""
+        super().__init__(
+            f"empty gold set for {context} - there is nothing to score, so no "
+            f"number is reportable. Refusing to report 0.000 for a cell that "
+            f"measured nothing.{tail}"
         )
 
 
