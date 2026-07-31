@@ -74,11 +74,42 @@
 #   notes           — authoring rationale (P2-vs-P3 is the only human judgment);
 #                     not consumed by the loader
 #
-# Anchored against the 7-doc / 14-chunk e-commerce support corpus
+# Anchored against the 8-doc / 16-chunk e-commerce support corpus
 # (db_seed/corpus): shipping-faq, warranty-terms, refund-policy, returns-process,
-# loyalty-program, product-catalog, customer-service-sop — 2 chunks each. The
-# anchor spans are copied verbatim from those chunks (and re-use the exact spans
-# `retrieval_gold.yaml` already proves resolve), then verified by the resolver.
+# loyalty-program, product-catalog, customer-service-sop, api-error-reference —
+# 2 chunks each. The anchor spans are copied verbatim from those chunks (and
+# re-use the exact spans `retrieval_gold.yaml` already proves resolve), then
+# verified by the resolver.
+#
+# P3 COSINE COVERAGE (why the P3 population spans the τ_sim grid):
+#   The US-056 knob sweep grids τ_sim over {0.3, 0.4, 0.5}. A P3 row only proves
+#   anything about the FAITHFULNESS gate if it CLEARS the retrieval gate at the
+#   τ_sim being swept — a row that escalates earlier is `mislabeled`, and a P3 leg
+#   that is entirely mislabeled reports a vacuous false-resolve 0% that never
+#   breaches the ceiling (the disarm path `e7_pinned_invariants_failed` and the
+#   issue-#26 mislabel-ratio guard exist to catch).
+#
+#   The original three P3 rows each measured below 0.5 — e7-p3-01 (0.4607),
+#   e7-p3-03 (0.4298) and e7-p3-02 (0.4214) — so EVERY one of them escalates at
+#   the retrieval gate once τ_sim ≥ 0.5.
+#   That made the 2026-07-31 weekly sweep's "knee" at τ_sim=0.5 read
+#   false-resolve 0% while measuring nothing — the faithfulness gate was never
+#   exercised at that point. The above-0.5 coverage is carried by four rows, each
+#   with its OWN measured top-1 cosine — e7-p3-05 (0.5800), e7-p3-11 (0.5605),
+#   e7-p3-04 (0.5339) and e7-p3-10 (0.5288): each asks what its chunk is already
+#   about and merely varies a parameter the corpus never covers, so a meaningful
+#   fraction of the P3 population stays ABOVE 0.5 and keeps exercising the
+#   faithfulness gate across the whole swept grid. The other shipped P3 rows do
+#   NOT carry it — e7-p3-01 (0.4607), e7-p3-09 (0.4570), e7-p3-03 (0.4298),
+#   e7-p3-07 (0.4234) and e7-p3-02 (0.4214) each measured mid-band — and
+#   e7-p3-06 (0.3556) / e7-p3-08 (0.3539) were retired for measuring weak (see the
+#   retirement block below). Those five mid-band rows are also why a τ_sim promoted
+#   to 0.5 would take the main leg's mislabel ratio to AT LEAST 5/9 ≈ 56%, over the
+#   issue-#26 ceiling; at today's default τ_sim of 0.4 all nine clear, so that guard
+#   is dormant. Keep this property when adding P3 rows: a P3 population clustered
+#   below the top of the τ_sim grid cannot falsify a τ_sim recommendation, and
+#   only a row with its own recorded measurement may be counted toward the claim —
+#   never an aggregate range standing in for a per-row number.
 
 questions:
   # ── no_context / P1a (genuinely off-topic — no gold chunk) ───────────────
@@ -160,10 +191,12 @@ questions:
         doc: warranty-terms
     reference: The warranty policy covers Electronics, Apparel, and Home Goods but does not list jewelry, so no warranty period for jewelry can be grounded in the corpus; this should be escalated to a human rather than answered with an invented period.
     notes: >-
-      strong retrieval of the warranty doc (anchored on its by-category intro), but
-      its categories are Electronics / Apparel / Home Goods / Books / Food — jewelry
-      is not covered, so no faithful answer exists and the row must escalate (not
-      invent a period).
+      MEASURED 0.4607 (warranty-terms:0) — mid-band, clears τ_sim=0.4 but NOT 0.5,
+      so it is `mislabeled` at the top of the swept grid and must not be counted
+      toward the above-0.5 coverage claim. Retrieval of the warranty doc is
+      topically strong (anchored on its by-category intro), but its categories are
+      Electronics / Apparel / Home Goods / Books / Food — jewelry is not covered, so
+      no faithful answer exists and the row must escalate (not invent a period).
 
   - id: e7-p3-02
     escalation: should_escalate
@@ -173,9 +206,11 @@ questions:
         doc: shipping-faq
     reference: The shipping FAQ gives the standard delivery window only for the contiguous US and never addresses Hawaii, so no specific Hawaii timeline can be grounded in the corpus; this should be escalated to a human rather than answered with a guessed number of days.
     notes: >-
-      shipping-faq:0 states the standard window only for the *contiguous* US;
-      Hawaii (non-contiguous) is never addressed, so the specific timeline is
-      absent — topically strong retrieval, no grounded answer.
+      MEASURED 0.4214 (shipping-faq:1) — mid-band, clears τ_sim=0.4 but NOT 0.5, so
+      it is `mislabeled` at the top of the swept grid and must not be counted toward
+      the above-0.5 coverage claim. shipping-faq:0 states the standard window only
+      for the *contiguous* US; Hawaii (non-contiguous) is never addressed, so the
+      specific timeline is absent — topically strong retrieval, no grounded answer.
 
   - id: e7-p3-03
     escalation: should_escalate
@@ -185,6 +220,180 @@ questions:
         doc: refund-policy
     reference: The refund policy places delivery-delay cases on a partial refund of 10–80% at the agent's discretion, so no exact refund amount can be grounded in the corpus; this should be escalated to a human rather than auto-resolved with a fabricated figure.
     notes: >-
-      refund-policy:0 places delivery-delay cases on a partial refund of 10–80%
-      "at the agent's discretion" — no fixed amount exists in the corpus, so the
-      exact-amount question must escalate to a human rather than auto-resolve.
+      MEASURED 0.4298 (refund-policy:0) — mid-band, clears τ_sim=0.4 but NOT 0.5, so
+      it is `mislabeled` at the top of the swept grid and must not be counted toward
+      the above-0.5 coverage claim. refund-policy:0 places delivery-delay cases on a
+      partial refund of 10–80% "at the agent's discretion" — no fixed amount exists
+      in the corpus, so the exact-amount question must escalate to a human rather
+      than auto-resolve.
+
+  # ── should_escalate / P3, high-cosine band (see "P3 COSINE COVERAGE" above) ──
+  # Authored to ask what the chunk is already about so retrieval stays strong ABOVE
+  # the top of the swept τ_sim grid. The rows that MEASURED that property —
+  # e7-p3-04 (0.5339) and e7-p3-05 (0.5800) here, e7-p3-10 (0.5288) and e7-p3-11
+  # (0.5605) below — are what makes a τ_sim recommendation falsifiable: raising
+  # τ_sim cannot silence them, so whatever false-resolve they produce is
+  # attributable to the faithfulness gate, not to the retrieval gate. e7-p3-07
+  # (0.4234) and e7-p3-09 (0.4570) sit in this block by authoring intent only;
+  # both MEASURED mid-band, so neither counts toward that coverage and both are
+  # mislabeled at τ_sim=0.5.
+
+  - id: e7-p3-04
+    escalation: should_escalate
+    question: How long is the warranty on a refurbished electronics item?
+    gold_anchors:
+      - text: Electronics carry a 12-month limited warranty against manufacturing defects
+        doc: warranty-terms
+    reference: The warranty terms cover electronics generally but never address refurbished units, so no warranty period for a refurbished item can be grounded in the corpus; this should be escalated to a human rather than answered by reusing the new-unit 12-month figure.
+    notes: >-
+      HIGH-COSINE PROBE, MEASURED 0.5339 (warranty-terms:0). Deliberately mirrors
+      e7-p2-01 ("How long is the electronics warranty?", which scores 0.5546) with
+      one adjective added; the adjective costs ~0.02 and the row still clears
+      τ_sim=0.5. warranty-terms:0 states the 12-month period for electronics and
+      separately voids coverage on any unit "opened by anyone other than an
+      authorized Acme repair partner" (same chunk, so one anchor covers both) —
+      refurbished units are never mentioned either way. The trap is that a
+      grounded-LOOKING answer ("12 months") is available verbatim in the retrieved
+      chunk while being wrong for the question asked: exactly the Risk #3 shape the
+      faithfulness gate is supposed to catch and the retrieval gate cannot.
+
+  - id: e7-p3-05
+    escalation: should_escalate
+    question: What is the return shipping fee for a return over 20 lbs?
+    gold_anchors:
+      - text: quoted per-case for returns over 20 lbs
+        doc: returns-process
+    reference: The returns process quotes over-20-lbs return shipping per case rather than publishing a fee, so no amount can be grounded in the corpus; this should be escalated to a human who can quote the case rather than answered with one of the published under-20-lbs figures.
+    notes: >-
+      HIGH-COSINE PROBE, MEASURED 0.5800 (returns-process:1) — the STRONGEST
+      retrieval of any P3 row in the set. The short, register-matched form of
+      e7-p2-04 (whose much longer phrasing scores 0.5060 against the same
+      document), and the shortening is worth ~0.07. "quoted per-case for returns
+      over 20 lbs" is the doc-defers-to-a-human flavour of P3: the fee exists but
+      only a human can produce it. STRADDLE anchor (US-107) — the fee sentence
+      sits in the chunker's overlap block, so it resolves to returns-process:{0,1},
+      like e7-p2-04.
+
+  - id: e7-p3-07
+    escalation: should_escalate
+    question: What is the goodwill refund cap once the case is escalated to a supervisor?
+    gold_anchors:
+      - text: Goodwill refunds are capped at 50% of the order total unless escalated to a supervisor
+        doc: refund-policy
+    reference: The refund policy caps goodwill refunds at 50% of the order total only in the un-escalated case and never states what cap, if any, applies after supervisor escalation, so no post-escalation cap can be grounded in the corpus; this should be escalated to a human.
+    notes: >-
+      MEASURED 0.4234 (refund-policy:0) — mid-band, it does NOT clear τ_sim=0.5,
+      so at the top of the swept grid it escalates at the retrieval gate as
+      `mislabeled` and DILUTES the exercised fraction there. It must not be
+      counted toward the above-0.5 coverage in "P3 COSINE COVERAGE". It was
+      authored on the intuition that "goodwill refund", "capped", "order total"
+      and "escalated to a supervisor" are all verbatim refund-policy vocabulary;
+      the measurement disproves that intuition exactly as it disproved the
+      retired e7-p3-06/08 — refund-policy:0's dominant theme is the refund
+      SCHEDULE, not supervisor escalation, and embeddings are whole-chunk, so
+      matching the vocabulary of one buried sentence bought nothing. Kept because
+      a mid-band P3 row is still a real row, and the row itself is a valid P3: the
+      corpus states the cap ONLY for the un-escalated branch and says nothing
+      about the escalated one, so the retrieved chunk offers a grounded-looking
+      wrong answer ("50%") — the retrieval gate has no way to tell, which is the
+      point.
+
+  - id: e7-p3-09
+    escalation: should_escalate
+    question: What is the annual spend threshold for Diamond tier?
+    gold_anchors:
+      - text: 'There are four tiers: Bronze, Silver, Gold, and Platinum'
+        doc: loyalty-program
+    reference: The loyalty program has exactly four tiers — Bronze, Silver, Gold and Platinum — and no Diamond tier exists, so no spend threshold for it can be grounded in the corpus; this should be escalated to a human rather than answered by extrapolating above the Platinum threshold.
+    notes: >-
+      MEASURED 0.4570 — mid-band, does NOT clear τ_sim=0.5, so it escalates at the
+      retrieval gate as `mislabeled` at the top of the swept grid and DILUTES the
+      exercised fraction there; it must not be counted toward the above-0.5 coverage
+      claim. It was AUTHORED on the expectation that retrieval would be strong —
+      "annual spend threshold" and "tier" are loyalty-program vocabulary and the
+      tier-threshold list sits in the same chunk — as the structurally identical
+      false-premise shape to e7-p3-01 (jewelry warranty) expressed in the corpus's
+      register rather than a customer's. The measurement disproved that expectation:
+      0.4570 against e7-p3-01's 0.4607 — it landed marginally LOWER, falsifying the
+      "e7-p3-01 is a phrasing artefact"
+      hypothesis it was authored to test. Kept because a mid-band P3 row is still a
+      real row, but do not cite it as evidence for the register effect; that effect
+      is carried by the rows that each measured above 0.5 — e7-p3-04 (0.5339),
+      e7-p3-05 (0.5800), e7-p3-10 (0.5288) and e7-p3-11 (0.5605).
+
+  # ids e7-p3-06 and e7-p3-08 are RETIRED and must never be reused (see "Field
+  # semantics" above). Both were authored as high-cosine probes and both MEASURED
+  # weak — 0.3556 (standard shipping cost under $50) and 0.3539 (escalated-case
+  # resolution timeline) — the two lowest similarities in the whole P3 set, below
+  # even τ_sim=0.4, so they escalated at the retrieval gate as `mislabeled` and
+  # measured nothing. They are replaced by e7-p3-10/11 below rather than edited in
+  # place because their ids already appear in a scored run.
+  #
+  # The lesson, recorded so the next author does not repeat it: matching the
+  # corpus's REGISTER is not sufficient — the question must match the DOMINANT
+  # THEME of the chunk. Embeddings are whole-chunk, so a question aimed at a single
+  # sentence buried in a chunk about something else retrieves weakly no matter how
+  # well its vocabulary matches. shipping-faq:0 is overwhelmingly about DURATIONS,
+  # so a shipping COST question lands ~0.36; customer-service-sop:0 is written in
+  # internal agent-instruction register, which sits far from any customer question
+  # form. The rows that work (a warranty PERIOD against a warranty doc, a return
+  # FEE against a return-shipping section) ask what the chunk is already about and
+  # merely vary a parameter the corpus never covers.
+  #
+  # Screen candidates by MEASURING, not by intuition. The screening method, so the
+  # next author can reproduce it: embed the candidate with text-embedding-3-small
+  # (the `embedding_config` singleton confirms model text-embedding-3-small / dim
+  # 1536 — the same embedder the seeder used) and take
+  # max(1 - (chunk.embedding <=> q)) over the corpus, computed by pgvector itself
+  # against public.chunks on the local Supabase Postgres (127.0.0.1:54322),
+  # restricted to the 8 support-corpus slugs (api-error-reference,
+  # customer-service-sop, loyalty-program, product-catalog, refund-policy,
+  # returns-process, shipping-faq, warranty-terms; wikipedia chunks excluded).
+  # That is exactly the top-1 cosine the retrieval gate thresholds against τ_sim.
+  # The method is CONTROL-VALIDATED: re-running it on five rows whose values were
+  # already recorded here reproduced every one to 4 decimal places (delta 0.0000)
+  # — e7-p3-09 0.4570, e7-p3-10 0.5288, e7-p3-11 0.5605, e7-p2-01 0.5546,
+  # e7-p2-04 0.5060. The three original rows' values (e7-p3-01 0.4607, e7-p3-02
+  # 0.4214, e7-p3-03 0.4298) are independently corroborated by the committed
+  # docs/escalation-weekly/2026-07-31.json snapshot, which records the same top-1
+  # cosines the pipeline itself observed for them.
+  #
+  # Of 14 candidates screened that way only 5 cleared 0.50; of the six authored by
+  # intuition (e7-p3-04/05/06/07/08/09), two — e7-p3-04 (0.5339) and e7-p3-05
+  # (0.5800) — while e7-p3-06 (0.3556), e7-p3-07 (0.4234), e7-p3-08 (0.3539) and
+  # e7-p3-09 (0.4570) did not. Every one of those six numbers is recorded in this
+  # file, so the tally is checkable rather than asserted.
+
+  - id: e7-p3-10
+    escalation: should_escalate
+    question: What is the return shipping fee for an international return?
+    gold_anchors:
+      - text: international returns are at the customer's expense unless the return is for a wrong-item-shipped or damaged-in-transit case
+        doc: returns-process
+    reference: The returns process states only that international returns are at the customer's expense and never publishes a fee for them — the $7.95 / $14.95 / per-case schedule applies to the pre-paid-label US domestic flow — so no international return shipping fee can be grounded in the corpus; this should be escalated to a human.
+    notes: >-
+      HIGH-COSINE PROBE, MEASURED 0.5288 (returns-process:0) BEFORE authoring.
+      Replaces the retired e7-p3-06 in the "amount absent, grounded-looking wrong
+      figures sitting right next to it" role: returns-process publishes a concrete
+      fee schedule ($7.95 under 5 lbs, $14.95 for 5–20 lbs) that a draft is likely
+      to reach for, but that schedule is scoped to the pre-paid-label DOMESTIC
+      flow, and the international branch states only who pays, never how much.
+
+  - id: e7-p3-11
+    escalation: should_escalate
+    question: What is the warranty period for a book with a printing defect after 30 days?
+    gold_anchors:
+      - text: Beyond 30 days, book warranty claims are at the discretion of customer service
+        doc: warranty-terms
+    reference: The warranty terms give books a 30-day printing-defect warranty and place anything beyond 30 days at the discretion of customer service, so no warranty period past 30 days can be grounded in the corpus; this must be escalated to a human — the decision-maker the document itself names.
+    notes: >-
+      HIGH-COSINE PROBE, MEASURED 0.5605 (warranty-terms:0) BEFORE authoring — the
+      strongest retrieval of any P3 row bar e7-p3-05, which measured 0.5800.
+      Replaces the retired e7-p3-08 in the "the document defers to a human" role,
+      and carries it better:
+      e7-p3-08 tried to hang that flavour on an internal SOP instruction written
+      for agents, which embedded weakly; this asks a customer-shaped question about
+      a warranty period against a warranty document, where the deferral ("at the
+      discretion of customer service") IS the customer-facing fact. The 30-day
+      figure sits verbatim in the same chunk as the near-miss a draft will reach
+      for.

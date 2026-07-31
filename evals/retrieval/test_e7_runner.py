@@ -161,6 +161,7 @@ from evals.retrieval.e7_runner import (  # noqa: E402
     get_p3_mislabel_ratio_max,
     render_e7_false_resolve_ceiling_section,
     render_e7_p1b_non_disclosure_section,
+    render_e7_sweep_section,
     run_e7_p1a,
     run_e7_p1b,
     run_e7_p2,
@@ -1599,7 +1600,9 @@ def test_sweep_curve_and_knee() -> None:
 
     # The knee's knobs are reported as recommended US-050 defaults.
     rec = sweep.recommended_config()
-    _check(rec == {"ESCALATION_TAU_SIM": 0.60, "ESCALATION_N_MIN": 1, "faithfulness_judge_min_offline_1_5": 4},
+    _check(rec == {"ESCALATION_TAU_SIM": 0.60, "ESCALATION_N_MIN": 1,
+                   "faithfulness_judge_min_offline_1_5": 4,
+                   "p3_n_exercised": 0, "p3_vacuous": True},
            f"recommended config must report the knee knobs, got {rec}")
     print("ok: the sweep emits the curve and picks the highest-deflection knee under the ceiling")
 
@@ -1694,7 +1697,9 @@ def test_sweep_to_dict_shape() -> None:
     _check(len(d["points"]) == 8, "all grid points are serialized")
     pt = d["points"][0]
     for key in ("index", "tau_sim", "n_min", "faithfulness_judge_min", "deflection",
-                "false_resolve", "false_escalate", "feasible", "metrics"):
+                "false_resolve", "false_escalate", "feasible", "metrics",
+                "p3_n_questions", "p3_n_exercised", "p3_n_mislabeled",
+                "p3_mislabel_ratio", "p3_vacuous"):
         _check(key in pt, f"sweep point dict missing {key!r}")
     # the embedded per-point metrics reuse the US-055 consolidation shape
     for name in ("deflection", "false_resolve", "false_escalate"):
@@ -1702,6 +1707,230 @@ def test_sweep_to_dict_shape() -> None:
     _check(d["knee"]["tau_sim"] == 0.60, "the serialized knee carries its knobs")
     _check(isinstance(sweep.points[0], SweepPoint), "points are SweepPoint instances")
     print("ok: the sweep to_dict carries the curve, per-point metrics, knee, and recommended config")
+
+
+def test_sweep_reports_p3_exercise_per_point() -> None:
+    """A swept false-resolve of 0% earned by DRIVING P3 rows out of the faithfulness
+    gate must be distinguishable, in the snapshot, from one earned by the pipeline
+    actually being safe (AGENTS.md invariant 12).
+
+    `_sweep_scenario`'s P3 rows are MID — strong at τ_sim 0.40, weak at 0.60 — so
+    the τ_sim=0.60 points score false-resolve 0/2 having never run the faithfulness
+    gate ONCE. That is exactly the vacuous shape `e7_pinned_invariants_failed`'s P3
+    positive control exits non-zero on for the main leg, and it is the point
+    `_select_knee` picks. Each point therefore carries its own P3 exercise stats,
+    and the render flags a vacuous knee in the committed report.
+
+    This is REPORTING, not enforcement: the same knee is still selected (pinned
+    below), so a later decision to gate on it is a separate, visible change.
+    """
+    questions, rows, scores = _sweep_scenario()
+    sweep, _, _, _ = _run_sweep(
+        questions, rows,
+        tau_sims=[0.40, 0.60], n_mins=[1, 2], faithfulness_mins=[4, 5],
+        ceiling=0.05, scores_by_question=scores,
+    )
+
+    measured = [p for p in sweep.points if p.tau_sim == 0.40]
+    vacuous = [p for p in sweep.points if p.tau_sim == 0.60]
+    _check(len(measured) == 4 and len(vacuous) == 4, "2x2 points per τ_sim")
+
+    for p in measured:
+        _check(p.p3_n_questions == 2 and p.p3_n_exercised == 2,
+               f"τ_sim=0.40 exercises both P3 rows, got {p.p3_n_exercised}/{p.p3_n_questions}")
+        _check(p.p3_n_mislabeled == 0 and p.p3_mislabel_ratio == 0.0,
+               f"τ_sim=0.40 mislabels none, got {p.p3_n_mislabeled}/{p.p3_mislabel_ratio}")
+        _check(p.p3_vacuous is False, "a point that ran the faithfulness gate is not vacuous")
+        _check(p.false_resolve == 1.0, "and its false-resolve 1.0 is a real measurement")
+
+    for p in vacuous:
+        _check(p.p3_n_exercised == 0 and p.p3_n_mislabeled == 2,
+               f"τ_sim=0.60 drives every P3 row out of the gate, got {p.p3_n_exercised} exercised")
+        _check(p.p3_mislabel_ratio == 1.0, f"mislabel ratio 1.0 expected, got {p.p3_mislabel_ratio}")
+        _check(p.p3_vacuous is True, "a point where no P3 row reached the gate is vacuous")
+        _check(p.false_resolve == 0.0 and p.feasible,
+               "its 0% still reads feasible — which is exactly why it must be labeled")
+
+    # Failure indicator: the vacuous points and the measured ones agree on
+    # deflection AND on feasibility, so before these fields existed nothing in the
+    # snapshot separated "safe" from "stopped measuring".
+    _check(
+        {p.deflection for p in vacuous} == {p.deflection for p in measured}
+        and all(p.feasible for p in vacuous),
+        "vacuous and measured points are indistinguishable on deflection/feasibility",
+    )
+
+    knee = sweep.knee
+    assert knee is not None
+    _check(knee.tau_sim == 0.60, "knee selection is UNCHANGED by this reporting")
+    _check(knee.p3_vacuous is True, "and the selected knee is the vacuous one — the finding")
+
+    md = "\n".join(render_e7_sweep_section(sweep))
+    _check("P3 exercised" in md, "the curve table gains a P3-exercised column")
+    _check("0/2 ⚠️ vacuous" in md, f"vacuous points are flagged in the table, got:\n{md}")
+    _check("2/2" in md, "measured points show their exercised count")
+    _check("The knee is vacuous" in md,
+           f"a vacuous knee carries an explicit warning in the report, got:\n{md}")
+
+    d = sweep.to_dict()
+    vac = [p for p in d["points"] if p["tau_sim"] == 0.60]
+    _check(all(p["p3_vacuous"] is True and p["p3_n_exercised"] == 0 for p in vac),
+           "the JSON snapshot carries the vacuity flag too (not just the markdown)")
+
+    # The two JSON views a downstream consumer actually reads must carry it too:
+    # the plottable curve (deflection-vs-false-resolve) and the promotable config.
+    _check(len(d["curve"]) == 8, f"every point is on the curve, got {len(d['curve'])}")
+    for c in d["curve"]:
+        _check("p3_n_exercised" in c and "p3_vacuous" in c,
+               f"a curve point must carry its P3 exercise stats, got {sorted(c)}")
+    curve_vac = [c for c in d["curve"] if c["tau_sim"] == 0.60]
+    _check(all(c["p3_vacuous"] is True and c["p3_n_exercised"] == 0 for c in curve_vac),
+           "a plotted false-resolve 0% is distinguishable from one that measured nothing")
+    _check(all(c["p3_vacuous"] is False and c["p3_n_exercised"] == 2
+               for c in d["curve"] if c["tau_sim"] == 0.40),
+           "and the measured points on the curve say so")
+    _check(d["recommended_config"]["p3_vacuous"] is True
+           and d["recommended_config"]["p3_n_exercised"] == 0,
+           f"a script promoting the recommended knobs sees the vacuity marker, "
+           f"got {d['recommended_config']}")
+    print("ok: each sweep point reports whether its P3 leg actually ran the faithfulness gate")
+
+
+def test_sweep_majority_mislabel_callout_tracks_the_configured_ceiling() -> None:
+    """The majority-mislabeled callout must compare against the mislabel ceiling
+    ACTUALLY in force, not the module default.
+
+    The callout claims "the main leg's mislabel-ratio guard would flag this
+    config". `--p3-mislabel-ratio-max` / `E7_P3_MISLABEL_RATIO_MAX` moves that
+    guard, so a hardcoded 0.5 makes the claim false in BOTH directions: silent on
+    a config the guard fails, and shouting on one it passes.
+    """
+    # P3: 2 STRONG rows (exercised at every swept τ_sim, faithfulness 2 -> they
+    # escalate, so no false-resolve) + 3 MID rows that drop out at τ_sim 0.60.
+    # -> the feasible point is τ_sim=0.60: false-resolve 0/2, mislabel ratio 3/5.
+    questions = [
+        _p2("m-p2-a", "mq-p2-a"),
+        _p2("m-p2-b", "mq-p2-b"),
+        _p3("m-p3-hi-a", "mq-p3-hi-a"),
+        _p3("m-p3-hi-b", "mq-p3-hi-b"),
+        _p3("m-p3-mid-a", "mq-p3-mid-a"),
+        _p3("m-p3-mid-b", "mq-p3-mid-b"),
+        _p3("m-p3-mid-c", "mq-p3-mid-c"),
+    ]
+    rows = {
+        "mq-p2-a": STRONG,
+        "mq-p2-b": STRONG,
+        "mq-p3-hi-a": STRONG,
+        "mq-p3-hi-b": STRONG,
+        "mq-p3-mid-a": MID,
+        "mq-p3-mid-b": MID,
+        "mq-p3-mid-c": MID,
+    }
+    scores = {
+        "mq-p2-a": {"faithfulness": 5, "helpfulness": 5},
+        "mq-p2-b": {"faithfulness": 5, "helpfulness": 5},
+        "mq-p3-hi-a": {"faithfulness": 2, "helpfulness": 2},
+        "mq-p3-hi-b": {"faithfulness": 2, "helpfulness": 2},
+        "mq-p3-mid-a": {"faithfulness": 5, "helpfulness": 5},
+        "mq-p3-mid-b": {"faithfulness": 5, "helpfulness": 5},
+        "mq-p3-mid-c": {"faithfulness": 5, "helpfulness": 5},
+    }
+    sweep, _, _, _ = _run_sweep(
+        questions, rows,
+        tau_sims=[0.40, 0.60], n_mins=[1], faithfulness_mins=[4],
+        ceiling=0.05, scores_by_question=scores,
+    )
+
+    knee = sweep.knee
+    assert knee is not None
+    _check(knee.tau_sim == 0.60, f"the feasible point is τ_sim=0.60, got {knee.tau_sim}")
+    _check(knee.p3_vacuous is False, "the knee still exercises the gate — not vacuous")
+    _check(
+        knee.p3_n_mislabeled == 3 and knee.p3_n_questions == 5
+        and knee.p3_mislabel_ratio == 0.6,
+        f"knee mislabel ratio 3/5 expected, got "
+        f"{knee.p3_n_mislabeled}/{knee.p3_n_questions} = {knee.p3_mislabel_ratio}",
+    )
+
+    default_md = "\n".join(render_e7_sweep_section(sweep))
+    _check("The knee is majority-mislabeled" in default_md,
+           f"ratio 0.6 breaches the default 0.5 ceiling, got:\n{default_md}")
+    _check("ceiling 50%" in default_md,
+           f"the default callout prints the default ceiling, got:\n{default_md}")
+
+    # Failure indicator: with the ceiling raised above the measured ratio the main
+    # leg's guard PASSES, so the report must not claim it would flag the config.
+    loose_md = "\n".join(
+        render_e7_sweep_section(sweep, p3_mislabel_ratio_max=0.8)
+    )
+    _check("majority-mislabeled" not in loose_md,
+           f"ratio 0.6 is under a ceiling of 0.8 — no callout, got:\n{loose_md}")
+
+    # ...and with it lowered the guard FAILS, so the callout must fire and quote
+    # the ceiling actually in force rather than the module default.
+    strict_md = "\n".join(
+        render_e7_sweep_section(sweep, p3_mislabel_ratio_max=0.2)
+    )
+    _check("The knee is majority-mislabeled" in strict_md,
+           f"ratio 0.6 breaches a ceiling of 0.2, got:\n{strict_md}")
+    _check("ceiling 20%" in strict_md and "ceiling 50%" not in strict_md,
+           f"the callout quotes the ceiling in force (20%), got:\n{strict_md}")
+    print("ok: the majority-mislabeled callout tracks the configured mislabel ceiling")
+
+
+def test_sweep_flags_an_empty_p3_population_as_vacuous() -> None:
+    """The EMPTY-gold half of AGENTS.md invariant 12, inside the sweep.
+
+    `E7P3Result.passed` is `len(exercised) > 0`, which is False for a population
+    that is empty just as much as for one that is entirely `mislabeled` — both
+    measured nothing. `SweepPoint.p3_vacuous` must mirror that exactly, otherwise a
+    gold carrying zero `should_escalate` rows renders `0/0` with no marker and emits
+    `p3_vacuous: false`, i.e. "measured nothing" reported as if it were fine.
+
+    Failure indicator: before this, every point of a P3-less sweep claimed
+    `p3_vacuous: false`.
+    """
+    questions = [
+        _p1a("e-p1a-a", "eq-p1a-a"),
+        _p2("e-p2-a", "eq-p2-a"),
+        _p2("e-p2-b", "eq-p2-b"),
+    ]
+    rows = {"eq-p1a-a": WEAK, "eq-p2-a": STRONG, "eq-p2-b": STRONG}
+    scores = {
+        "eq-p2-a": {"faithfulness": 5, "helpfulness": 5},
+        "eq-p2-b": {"faithfulness": 5, "helpfulness": 5},
+    }
+    sweep, _, _, _ = _run_sweep(
+        questions, rows,
+        tau_sims=[0.40, 0.60], n_mins=[1], faithfulness_mins=[4],
+        ceiling=0.05, scores_by_question=scores,
+    )
+
+    for p in sweep.points:
+        _check(p.p3_n_questions == 0 and p.p3_n_exercised == 0,
+               f"no P3 rows were presented, got {p.p3_n_exercised}/{p.p3_n_questions}")
+        _check(p.p3_vacuous is True,
+               "a point that presented zero P3 rows measured nothing — vacuous")
+        _check(p.p3_absent is True, "and the cause is an absent population, not drift")
+        _check(p.false_resolve is None,
+               f"the false-resolve rate is unmeasured, got {p.false_resolve}")
+        _check(p.feasible is False, "so no point can clear the ceiling")
+
+    _check(sweep.knee is None and sweep.knee_reason == "no_point_under_ceiling",
+           f"an unmeasured sweep recommends nothing, got {sweep.knee_reason}")
+
+    d = sweep.to_dict()
+    _check(all(p["p3_vacuous"] is True for p in d["points"]),
+           "the JSON snapshot says every point measured nothing")
+    _check(all(c["p3_vacuous"] is True for c in d["curve"]),
+           "and so does the plottable curve")
+
+    md = "\n".join(render_e7_sweep_section(sweep))
+    _check("0/0 ⚠️ no P3 population" in md,
+           f"the table names the empty population rather than staying quiet, got:\n{md}")
+    _check("nothing was measured" in md,
+           f"and the no-knee verdict says the run measured nothing, got:\n{md}")
+    print("ok: a sweep with no P3 population reports vacuity instead of a clean 0/0")
 
 
 # --- US-057 P1b no-access replay fixtures + tests -------------------------
@@ -2101,6 +2330,9 @@ def main() -> int:
         test_sweep_no_point_under_ceiling_is_reported,
         test_sweep_deflection_blind_is_reported,
         test_sweep_to_dict_shape,
+        test_sweep_reports_p3_exercise_per_point,
+        test_sweep_majority_mislabel_callout_tracks_the_configured_ceiling,
+        test_sweep_flags_an_empty_p3_population_as_vacuous,
         test_p1b_no_gold_in_result_passes,
         test_p1b_nongold_strong_is_not_a_leak,
         test_p1b_gold_in_result_is_a_leak,
