@@ -1,5 +1,5 @@
 # US-111: "Ship green out of the box." The kit's day-zero promise is that a
-# fresh `seed → eval` on the SHIPPED artifacts — the default 7-doc / 14-chunk
+# fresh `seed → eval` on the SHIPPED artifacts — the default 8-doc / 16-chunk
 # e-commerce corpus (`db_seed/corpus/`), its content-anchored golden set
 # (`evals/retrieval/retrieval_gold.yaml`, US-107), and the default gate
 # (`evals/gate/gate.yaml`, US-103) — reproduces the 1.000 E4 no-leak security
@@ -120,7 +120,7 @@ jobs:
           CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # A CLEAN seed of the shipped 7-doc corpus through the production
+          # A CLEAN seed of the shipped 8-doc corpus through the production
           # chunk_text + embed_texts paths — exactly what a buyer runs day-zero,
           # no edits. This is the "no buyer authoring" half of AC2.
           python -m db_seed.corpus_seed
