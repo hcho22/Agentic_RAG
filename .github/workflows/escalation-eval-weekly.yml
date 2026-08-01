@@ -212,13 +212,28 @@ jobs:
           SNAPSHOT: ${{ steps.snapshot.outputs.present }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # Resolve open issues carrying a label via the REST issues endpoint,
+          # NOT `gh issue list --label`. `gh issue list` queries the GraphQL
+          # SEARCH index, which is only eventually consistent with the labels on
+          # an issue — it silently omitted the freshly-labelled harness issue #94
+          # for over a day, so the snapshot-producing run that should have
+          # auto-closed it (the whole point of the "measuring again" branch)
+          # listed zero matches and closed nothing, wedging a false UNMEASURED
+          # alarm open forever. The `repos/:owner/:repo/issues?labels=` endpoint
+          # filters against the primary store and is strongly consistent, so the
+          # retract-the-alarm path can no longer go quiet. `?labels=` also returns
+          # PRs (a PR is an issue in the API), so drop anything with a
+          # `pull_request` key — these labels only ever land on issues, but a
+          # same-labelled PR must not be mistaken for the finding.
+          open_issue_numbers() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=$1&state=open&per_page=100" \
+              --jq '.[] | select(.pull_request == null) | .number'
+          }
           HARNESS_LABEL=e7-weekly-harness-failure
           if [ "${SNAPSHOT}" != "true" ]; then
             gh label create "${HARNESS_LABEL}" --color B60205 \
               --description "E7 weekly harness died before producing a snapshot" --force || true
-            open=$(gh issue list --label "${HARNESS_LABEL}" --state open \
-              --json number --jq 'length')
-            if [ "${open}" = "0" ]; then
+            if [ -z "$(open_issue_numbers "${HARNESS_LABEL}")" ]; then
               gh issue create --label "${HARNESS_LABEL}" \
                 --title "E7 weekly: no snapshot produced — the safety invariants are UNMEASURED" \
                 --body "$(printf '%s\n' \
@@ -250,8 +265,7 @@ jobs:
           # exact miscaption this step exists to remove.
           gh label create "${HARNESS_LABEL}" --color B60205 \
             --description "E7 weekly harness died before producing a snapshot" --force || true
-          for num in $(gh issue list --label "${HARNESS_LABEL}" --state open \
-            --json number --jq '.[].number' || true); do
+          for num in $(open_issue_numbers "${HARNESS_LABEL}" || true); do
             gh issue close "${num}" \
               --comment "Auto-closed: the E7 weekly harness produced a snapshot again (${RUN_URL}), so the safety invariants are being measured."
             echo "auto-closed harness-failure issue #${num}"
@@ -290,8 +304,7 @@ jobs:
             body="${body}"$'\n\n'"${footer}"
             gh label create "${LABEL}" --color B60205 \
               --description "E7 weekly escalation gate finding" --force || true
-            open=$(gh issue list --label "${LABEL}" --state open --json number --jq 'length')
-            if [ "${open}" = "0" ]; then
+            if [ -z "$(open_issue_numbers "${LABEL}")" ]; then
               gh issue create --label "${LABEL}" \
                 --title "E7 weekly escalation gate: pinned safety invariant fired" \
                 --body "${body}"
@@ -303,8 +316,7 @@ jobs:
             # Green scheduled run: auto-close stale gate issues. Only a scheduled
             # run auto-closes — a manual dispatch may be a partial re-run and must
             # not clear a still-real finding.
-            for num in $(gh issue list --label "${LABEL}" --state open \
-              --json number --jq '.[].number'); do
+            for num in $(open_issue_numbers "${LABEL}"); do
               gh issue close "${num}" \
                 --comment "Auto-closed: the scheduled weekly E7 sweep was green (no pinned safety invariant fired)."
               echo "auto-closed issue #${num}"
