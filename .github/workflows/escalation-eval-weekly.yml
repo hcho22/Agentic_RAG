@@ -233,7 +233,12 @@ jobs:
           if [ "${SNAPSHOT}" != "true" ]; then
             gh label create "${HARNESS_LABEL}" --color B60205 \
               --description "E7 weekly harness died before producing a snapshot" --force || true
-            if [ -z "$(open_issue_numbers "${HARNESS_LABEL}")" ]; then
+            # A transient gh api blip yields empty here, so err toward filing a
+            # possibly-duplicate (self-healing) issue rather than aborting and
+            # leaving the UNMEASURED alarm unshouted (invariant 12: the path that
+            # should shout must never go quiet).
+            existing=$(open_issue_numbers "${HARNESS_LABEL}" || true)
+            if [ -z "${existing}" ]; then
               gh issue create --label "${HARNESS_LABEL}" \
                 --title "E7 weekly: no snapshot produced — the safety invariants are UNMEASURED" \
                 --body "$(printf '%s\n' \
@@ -304,7 +309,12 @@ jobs:
             body="${body}"$'\n\n'"${footer}"
             gh label create "${LABEL}" --color B60205 \
               --description "E7 weekly escalation gate finding" --force || true
-            if [ -z "$(open_issue_numbers "${LABEL}")" ]; then
+            # A transient gh api blip yields empty here, so err toward filing a
+            # possibly-duplicate (self-healing) gate issue rather than aborting and
+            # leaving the gate finding unshouted (invariant 12: the path that
+            # should shout must never go quiet).
+            existing=$(open_issue_numbers "${LABEL}" || true)
+            if [ -z "${existing}" ]; then
               gh issue create --label "${LABEL}" \
                 --title "E7 weekly escalation gate: pinned safety invariant fired" \
                 --body "${body}"
