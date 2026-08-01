@@ -178,13 +178,31 @@ jobs:
           SNAPSHOT: ${{ steps.snapshot.outputs.present }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # Resolve open issues carrying a label via the REST issues endpoint,
+          # NOT `gh issue list --label`. `gh issue list` queries the GraphQL
+          # SEARCH index, which is only eventually consistent with the labels on
+          # an issue — it silently omitted a freshly-labelled harness issue for
+          # over a day (see #94 in the sibling E7 weekly), so the snapshot-
+          # producing run that should have auto-closed it listed zero matches and
+          # closed nothing, wedging a false UNMEASURED alarm open forever. The
+          # `repos/:owner/:repo/issues?labels=` endpoint filters against the
+          # primary store and is strongly consistent, so the retract-the-alarm
+          # path can no longer go quiet. `?labels=` also returns PRs (a PR is an
+          # issue in the API), so drop anything with a `pull_request` key.
+          open_issue_numbers() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=$1&state=open&per_page=100" \
+              --jq '.[] | select(.pull_request == null) | .number'
+          }
           HARNESS_LABEL=ragas-weekly-harness-failure
           if [ "${SNAPSHOT}" != "true" ]; then
             gh label create "${HARNESS_LABEL}" --color B60205 \
               --description "RAGAS weekly harness died before producing a snapshot" --force || true
-            open=$(gh issue list --label "${HARNESS_LABEL}" --state open \
-              --json number --jq 'length')
-            if [ "${open}" = "0" ]; then
+            # A transient gh api blip yields empty here, so err toward filing a
+            # possibly-duplicate (self-healing) issue rather than aborting and
+            # leaving the UNMEASURED alarm unshouted (invariant 12: the path that
+            # should shout must never go quiet).
+            existing=$(open_issue_numbers "${HARNESS_LABEL}" || true)
+            if [ -z "${existing}" ]; then
               gh issue create --label "${HARNESS_LABEL}" \
                 --title "RAGAS weekly: no snapshot produced — the gates are UNMEASURED" \
                 --body "$(printf '%s\n' \
@@ -215,8 +233,7 @@ jobs:
           # exact miscaption this step exists to remove.
           gh label create "${HARNESS_LABEL}" --color B60205 \
             --description "RAGAS weekly harness died before producing a snapshot" --force || true
-          for num in $(gh issue list --label "${HARNESS_LABEL}" --state open \
-            --json number --jq '.[].number' || true); do
+          for num in $(open_issue_numbers "${HARNESS_LABEL}" || true); do
             gh issue close "${num}" \
               --comment "Auto-closed: the RAGAS weekly harness produced a snapshot again (${RUN_URL}), so the gates are being measured."
             echo "auto-closed harness-failure issue #${num}"
@@ -230,9 +247,12 @@ jobs:
             for tag in ${tags}; do
               gh label create "${tag}" --color B60205 \
                 --description "RAGAS weekly gate finding" --force || true
-              open=$(gh issue list --label "${tag}" --state open \
-                --json number --jq 'length')
-              if [ "${open}" = "0" ]; then
+              # A transient gh api blip yields empty here, so err toward filing a
+              # possibly-duplicate (self-healing) gate issue rather than aborting
+              # and leaving the gate finding unshouted (invariant 12: the path
+              # that should shout must never go quiet).
+              existing=$(open_issue_numbers "${tag}" || true)
+              if [ -z "${existing}" ]; then
                 body=$(jq -r --arg t "${tag}" '.ragas.gate_findings
                   | map(select(.tag == $t))
                   | map("- " + .message) | join("\n")' /tmp/ragas-weekly.json)
@@ -249,8 +269,7 @@ jobs:
             # scheduled run auto-closes — a manual dispatch may be a partial
             # re-run and must not clear a still-real finding.
             for tag in coverage-pipeline-failure coverage-operational-failure; do
-              for num in $(gh issue list --label "${tag}" --state open \
-                --json number --jq '.[].number'); do
+              for num in $(open_issue_numbers "${tag}" || true); do
                 gh issue close "${num}" \
                   --comment "Auto-closed: the scheduled weekly RAGAS run was green (no ${tag})."
                 echo "auto-closed issue #${num} (${tag})"
