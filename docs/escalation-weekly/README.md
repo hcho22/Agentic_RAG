@@ -7,6 +7,21 @@ The full treatment of what the snapshots contain and which numbers are pinned li
 
 ## Errata
 
+### 2026-07-31 - the main leg's `false-resolve 100% (3/3)` was an eval artifact, not a live pipeline breach (issue #96)
+
+The `2026-07-31.md` main leg (τ_sim=0.4) reads **false-resolve 100% (3/3)** and the ceiling gate reads **BREACH**, and the erratum immediately below calls that breach "manifestly measured."
+It *was* measured - but it measured the **eval**, not the pipeline. The E7 P2/P3 legs modeled only the runtime **faithfulness** gate; they did not model the runtime **answer-completeness** gate (issue #97), even though the live deflection pipeline had gated the send path on BOTH since that change.
+
+Every one of the three P3 rows is a "topic on-corpus, specific fact absent" question (jewelry warranty, Hawaii shipping, exact delay refund), and the drafter (`escalation.draft_support_answer`) is *instructed* to say it does not have the information rather than guess.
+So each draft is a **grounded deferral**: faithful (the offline judge scored all three 5/5, zero unsupported claims) yet answering nothing.
+The runtime pipeline escalates every one of those at the answer gate; the E7 leg, seeing only the faithfulness verdict, scored each as an **auto-resolve** and therefore a false-resolve.
+The 100% was three correct escalations mislabeled - the pipeline was never auto-sending answers to unanswerable questions.
+
+Fixed forward from the **next** weekly run onward (this snapshot predates it and is kept as the historical record): `_run_judged_leg` now runs a second OFFLINE cross-family judge, `runner.judge_answering`, on the would-be-answered path (after a draft clears faithfulness), mirroring `escalation.run_deflection_pipeline`.
+A P3 grounded deferral now escalates at the new `answer` leg and is scored a **correct** content-gate escalation, not a false-resolve; only a draft that is faithful **and** answers auto-resolves.
+The P3 result JSON gains `answered` / `answer_judge_calls` / `total_answer_judge_calls` and renames `n_escalated_at_faithfulness` → `n_escalated_at_content_gate`.
+See `docs/evals.md` § 6 and the `_run_judged_leg` docstring in `evals/retrieval/e7_runner.py`.
+
 ### 2026-07-31 - the recommended knee's `false-resolve 0%` measured nothing
 
 The sweep table in `2026-07-31.md` selects a knee at τ_sim=0.5 / N_min=1 / faithfulness≥4/5 reading **false-resolve 0%**, and prints it as **"Recommended US-050 defaults: `ESCALATION_TAU_SIM=0.5`, `ESCALATION_N_MIN=1`"**.

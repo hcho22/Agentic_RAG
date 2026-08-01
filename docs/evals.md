@@ -244,7 +244,9 @@ The reason these limitations are listed prominently rather than buried at the bo
 ## 6. E7 escalation eval: per-PR tripwire vs weekly sweep (ADR-0003, US-059)
 
 The **E7** eval scores the support-face *deflection pipeline* (escalate-vs-answer), not raw retrieval recall.
-It runs the escalation golden set (`evals/retrieval/escalation_gold.yaml`) through `python -m evals.retrieval.e7_runner` over three hand-authored populations — **P1a** (genuinely no context), **P2** (answerable + faithful), **P3** (strong retrieval but no faithful answer, the moat) — plus the derived **P1b** (a P2 question replayed under a no-access viewer).
+It runs the escalation golden set (`evals/retrieval/escalation_gold.yaml`) through `python -m evals.retrieval.e7_runner` over three hand-authored populations — **P1a** (genuinely no context), **P2** (answerable + faithful), **P3** (strong retrieval but no grounded answer that answers the question, the moat) — plus the derived **P1b** (a P2 question replayed under a no-access viewer).
+
+The P2/P3 legs mirror the runtime deflection pipeline's **two** content gates (`_run_judged_leg`), not one: after the retrieval gate and draft, an offline cross-family Claude judge scores **faithfulness** (`runner.judge_answer`) and, on the would-be-answered path, **answer-completeness** (`runner.judge_answering`, the issue-#97 gate). A P3 draft is caught by whichever content gate it fails: an ungrounded draft trips the faithfulness leg, and a grounded-but-non-answering draft — a faithful "the corpus doesn't cover jewelry" deferral, which the drafter is *instructed* to produce rather than guess — trips the answer leg. Both are the moat working; only a draft that is faithful **and** answers auto-resolves. Modeling the answer leg is the **issue-#96 fix**: before it, every grounded P3 deferral scored 5/5 faithful and auto-resolved as a false-resolve, so the P3 leg read a spurious 100% false-resolve and breached the ceiling even though the runtime pipeline (post issue #97) correctly escalates every one of those drafts.
 
 This golden set is the **support-face layer** of the one layered format (§2.2, US-108): each row carries one `escalation` label, and the P2/P3 gold is authored as **US-107 content anchors** (`gold_anchors`, bare span or `{text, doc}`) on the same primitive as the base retrieval gold — not the legacy `gold_stable_ids` chunk-index list. `e7.resolve_escalation_gold` resolves those anchors to the current chunk `stable_id`(s) at eval time (fail-loud on zero-resolve) in the `--include-p1b` path, so the no-access P1b replay revokes exactly the resolved gold and a `chunk_size`/overlap re-seed needs zero re-labeling here too. A `no_context` (P1a) row carries no anchor by definition.
 
@@ -254,7 +256,7 @@ The legs split sharply on **determinism**, and that split decides where each run
 |---|---|---|---|---|
 | P1a retrieval gate | pure arithmetic on the pre-fusion cosine | deterministic | **per-PR tripwire** | **yes** |
 | P1b no-access replay + US-058 non-disclosure byte-equality | retrieval gate + byte comparison | deterministic | **per-PR tripwire** | **yes** |
-| P2 / P3 deflection scoring + the knob sweep | the OFFLINE cross-family Claude faithfulness judge | LLM-judged | **weekly sweep** | no (files an issue) |
+| P2 / P3 deflection scoring + the knob sweep | the OFFLINE cross-family Claude faithfulness **and** answer-completeness judges | LLM-judged | **weekly sweep** | no (files an issue) |
 
 ### Per-PR tripwire (deterministic, may block merge)
 
