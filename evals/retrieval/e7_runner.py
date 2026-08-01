@@ -12,25 +12,30 @@ module owns the runner's three hand-authored legs:
   pipeline should **auto-resolve** them. A P2 that escalates is a
   **false-escalate** (an annoyance cost, not a safety failure); and
 * the **P3 population** (US-054) — the moat case: questions with *strong*
-  retrieval but **no faithful grounded answer** (the topic is on-corpus, the
-  specific fact is not, or the doc defers to a human). A P3 must clear the
-  retrieval gate, draft, and then be caught by the *faithfulness* leg → escalate.
-  A P3 that **auto-resolves is a false-resolve** — the Risk #3 safety failure the
-  false-resolve ceiling governs (US-055/059). A P3 that escalates at the
-  *retrieval* gate is **mislabeled** (its retrieval was not actually strong, so it
-  never exercised the faithfulness gate the row exists to prove).
+  retrieval but **no grounded answer that actually answers them** (the topic is
+  on-corpus, the specific fact is not, or the doc defers to a human). A P3 must
+  clear the retrieval gate, draft, and then be caught by a *content* gate →
+  escalate: the *faithfulness* leg (an ungrounded draft) or the issue-#97 *answer*
+  leg (a grounded draft that does not answer — a faithful "the corpus doesn't
+  cover this" deferral). Both are correct. A P3 that **auto-resolves is a
+  false-resolve** — the Risk #3 safety failure the false-resolve ceiling governs
+  (US-055/059). A P3 that escalates at the *retrieval* gate is **mislabeled** (its
+  retrieval was not actually strong, so it never exercised the content gates the
+  row exists to prove).
 
 The legs differ sharply on determinism and CI placement (US-059):
 
 * **P1a is deterministic** — pure arithmetic on cosine scores, no LLM — so it is
   the per-PR tripwire and may hard-block a merge.
-* **P2 and P3 are LLM-judged** — they draft an answer and score that draft's
-  faithfulness with the **OFFLINE cross-family Claude judge** (`runner.judge_answer`,
-  the same judge the E4 generation table uses), NOT the runtime one-call
-  faithfulness gate (`escalation.faithfulness_gate`). The offline judge is a
-  cross-family observation (Claude grading gpt-4o-mini drafts), so it does not
-  share the same-model bias the runtime gate would, and it is free to be
-  slower/multi-pass off the latency path. Because they are LLM-judged, the P2/P3
+* **P2 and P3 are LLM-judged** — they draft an answer and score that draft with
+  TWO **OFFLINE cross-family Claude judges**: faithfulness (`runner.judge_answer`,
+  the same judge the E4 generation table uses) and, on the would-be-answered path,
+  answer-completeness (`runner.judge_answering`, the issue-#97 gate) — NOT the
+  runtime one-call gates (`escalation.faithfulness_gate` / `escalation.answer_gate`).
+  The offline judges are a cross-family observation (Claude grading gpt-4o-mini
+  drafts), so they do not share the same-model bias the runtime gates would, and
+  are free to be slower/multi-pass off the latency path. Because they are
+  LLM-judged, the P2/P3
   legs are **scheduled (weekly)** artifacts; their deflection / false-escalate /
   false-resolve numbers feed the US-055 consolidated rates and the E8 gate
   (US-059). No P2/P3 leg *individually* hard-blocks a merge — the per-PR exit
@@ -42,10 +47,12 @@ The legs differ sharply on determinism and CI placement (US-059):
   an accepted up-to-a-week detection latency).
 
 P2 and P3 run the **identical** pipeline traversal — `retrieve → retrieval_gate →
-[if strong] draft → offline faithfulness judge → auto-resolve-or-escalate`
-(`_run_judged_leg`) — and differ ONLY in how they *label* the outcome: a P2
-auto-resolve is correct (deflection) while a P3 auto-resolve is a false-resolve;
-a P2 escalation is a false-escalate while a P3 faithfulness-leg escalation is the
+[if strong] draft → offline faithfulness judge → [if faithful] offline
+answer-completeness judge → auto-resolve-or-escalate` (`_run_judged_leg`, mirroring
+the runtime `run_deflection_pipeline` including the issue-#97 answer gate) — and
+differ ONLY in how they *label* the outcome: a P2 auto-resolve is correct
+(deflection) while a P3 auto-resolve is a false-resolve; a P2 escalation is a
+false-escalate while a P3 content-gate escalation (faithfulness OR answer) is the
 correct, moat-proving outcome.
 
 Why P1a is special
@@ -217,10 +224,17 @@ Retrieve = Callable[[str], Awaitable[list[SearchDocumentsResult]]]
 #   Draft: (question, chunks) -> drafted answer text.
 #   Judge: (question, reference, chunks, draft) -> {"faithfulness", "helpfulness"}
 #          integer 1-5 scores from the OFFLINE cross-family Claude judge.
+#   AnswerJudge: (question, draft) -> bool — whether the draft ANSWERS the
+#          question, the OFFLINE mirror of the runtime `escalation.answer_gate`
+#          (issue #97). Orthogonal to faithfulness: a grounded "I don't have that
+#          information" is faithful yet answers nothing, so a faithful P3 draft
+#          that does not answer must escalate at THIS gate, not auto-resolve
+#          (issue #96). Sees only the question + draft, like the runtime gate.
 Draft = Callable[[str, list[SearchDocumentsResult]], Awaitable[str]]
 Judge = Callable[
     [str, str, list[SearchDocumentsResult], str], Awaitable[dict[str, int]]
 ]
+AnswerJudge = Callable[[str, str], Awaitable[bool]]
 
 # The P1b (US-057) no-access retrieval callable: it takes the FULL question dict
 # (not just the text) because replaying a P2 question as the no-access viewer must
@@ -447,24 +461,35 @@ class _JudgedLeg:
 
     P2 (US-053) and P3 (US-054) run the same deflection pipeline and differ only
     in labeling, so this is the pre-labeling result both consume. `decision` is
-    ``"auto_resolve"`` (cleared the gate AND drafted a faithful answer) or
-    ``"escalate"``; `escalate_leg` records where an escalation happened —
-    ``"retrieval"`` (weak gate, 0 draft/0 judge), ``"draft"`` (empty draft, 1
-    draft/0 judge), or ``"faithfulness"`` (judge below the floor, 1 draft/1 judge)
-    — and is ``None`` on an auto-resolve. The score / call-count fields carry the
-    OFFLINE judge's 1-5 integers and the actual LLM calls made.
+    ``"auto_resolve"`` (cleared the retrieval gate, drafted a faithful answer, AND
+    that answer actually ANSWERS the question) or ``"escalate"``; `escalate_leg`
+    records where an escalation happened — ``"retrieval"`` (weak gate, 0 draft/0
+    faith-judge/0 answer-judge), ``"draft"`` (empty draft, 1 draft/0/0),
+    ``"faithfulness"`` (faithfulness judge below the floor, 1 draft/1 faith-judge/0
+    answer-judge), or ``"answer"`` (faithful but the answer-completeness judge said
+    the draft does not answer — issue #97 — 1 draft/1 faith-judge/1 answer-judge) —
+    and is ``None`` on an auto-resolve. The score / call-count fields carry the
+    OFFLINE judges' outputs and the actual LLM calls made.
+
+    `answered` is the OFFLINE answer-completeness verdict (``None`` when the row
+    escalated before reaching that gate — i.e. at retrieval, draft, or the
+    faithfulness leg); `answer_judge_calls` is the actual answer-judge calls made
+    (only ever 0 or 1), tracked separately from `judge_calls` (the faithfulness
+    judge) so each gate's LLM cost stays independently auditable.
     """
 
     decision: Literal["auto_resolve", "escalate"]
-    escalate_leg: Literal["retrieval", "draft", "faithfulness"] | None
+    escalate_leg: Literal["retrieval", "draft", "faithfulness", "answer"] | None
     gate: RetrievalGateDecision
     faithfulness_score: int | None
     helpfulness_score: int | None
     faithful: bool | None
+    answered: bool | None
     draft: str | None
     n_results: int
     draft_calls: int
     judge_calls: int
+    answer_judge_calls: int
 
 
 async def _run_judged_leg(
@@ -473,26 +498,41 @@ async def _run_judged_leg(
     retrieve: Retrieve,
     draft: Draft,
     judge: Judge,
+    answer_judge: AnswerJudge,
     config: EscalationConfig,
     match_threshold: float,
     faithfulness_judge_min: int,
 ) -> _JudgedLeg:
-    """Run one question through the deflection pipeline + offline faithfulness
-    judge, returning the raw (pre-labeling) `_JudgedLeg` shared by the P2/P3 legs:
+    """Run one question through the deflection pipeline + offline faithfulness AND
+    answer-completeness judges, returning the raw (pre-labeling) `_JudgedLeg`
+    shared by the P2/P3 legs. Mirrors the runtime `escalation.run_deflection_pipeline`
+    control flow, including the issue-#97 answer gate:
 
         retrieve once → retrieval_gate
-            → weak   ⇒ escalate (escalate_leg="retrieval"), ZERO draft/judge calls
+            → weak   ⇒ escalate (escalate_leg="retrieval"), 0 draft/0 judge/0 answer
             → strong ⇒ draft → [empty?] escalate (escalate_leg="draft", 0 judge)
-                            → else offline judge faithfulness
-                                → >= floor ⇒ AUTO-RESOLVE
-                                → else     ⇒ escalate (escalate_leg="faithfulness")
+                            → else offline faithfulness judge
+                                → < floor  ⇒ escalate (escalate_leg="faithfulness")
+                                → >= floor ⇒ offline answer-completeness judge
+                                    → answers     ⇒ AUTO-RESOLVE
+                                    → non-answer  ⇒ escalate (escalate_leg="answer")
+
+    The answer gate is the issue-#97 fix: a faithful draft that does not ANSWER
+    (a grounded "I don't have that information") is not a deflection — it answered
+    nothing — so the runtime escalates it and the E7 legs must too, or every
+    grounded P3 deferral scores 5/5 faithful and auto-resolves as a false-resolve
+    (issue #96). Faithfulness and answering are ORTHOGONAL and both gate the
+    send path.
 
     Reuses the REAL backend `retrieval_gate` + `draft_support_answer` (injected as
-    `draft`) so a regression in either shows up in BOTH legs; the `judge` callable
-    is the OFFLINE Claude judge (`runner.judge_answer`), which receives the row's
-    `reference` gold answer (validated by `e7.load_escalation_questions`) — the
-    runtime one-call gate never sees a reference. Call counts are pinned per branch
-    so the LLM cost stays auditable.
+    `draft`) so a regression in either shows up in BOTH legs; `judge` /
+    `answer_judge` are the OFFLINE cross-family Claude judges (`runner.judge_answer`
+    / `runner.judge_answering`), NOT the runtime one-call gates — so the E7
+    measurement stays independent of the gates it validates. Only the faithfulness
+    judge receives the row's `reference` gold answer (validated by
+    `e7.load_escalation_questions`); the answer judge, like its runtime mirror,
+    compares the question against the draft only. Call counts are pinned per branch
+    so each gate's LLM cost stays auditable.
     """
     rows = await retrieve(q["question"])
     gate = retrieval_gate(rows, config.tau_sim, config.n_min, match_threshold)
@@ -502,7 +542,8 @@ async def _run_judged_leg(
         return _JudgedLeg(
             decision="escalate", escalate_leg="retrieval", gate=gate,
             faithfulness_score=None, helpfulness_score=None, faithful=None,
-            draft=None, n_results=len(rows), draft_calls=0, judge_calls=0,
+            answered=None, draft=None, n_results=len(rows),
+            draft_calls=0, judge_calls=0, answer_judge_calls=0,
         )
 
     draft_text = await draft(q["question"], rows)
@@ -512,24 +553,43 @@ async def _run_judged_leg(
         return _JudgedLeg(
             decision="escalate", escalate_leg="draft", gate=gate,
             faithfulness_score=None, helpfulness_score=None, faithful=None,
-            draft=draft_text, n_results=len(rows), draft_calls=1, judge_calls=0,
+            answered=None, draft=draft_text, n_results=len(rows),
+            draft_calls=1, judge_calls=0, answer_judge_calls=0,
         )
 
     scores = await judge(q["question"], q["reference"], rows, draft_text)
     faithfulness_score = int(scores["faithfulness"])
     helpfulness_score = int(scores["helpfulness"])
     faithful = faithfulness_score >= faithfulness_judge_min
+    if not faithful:
+        # The faithfulness gate caught an ungrounded draft — escalate before the
+        # answer gate (mirrors runtime: the answer gate runs ONLY on the
+        # would-be-answered path, after the draft clears faithfulness).
+        return _JudgedLeg(
+            decision="escalate", escalate_leg="faithfulness", gate=gate,
+            faithfulness_score=faithfulness_score,
+            helpfulness_score=helpfulness_score, faithful=faithful,
+            answered=None, draft=draft_text, n_results=len(rows),
+            draft_calls=1, judge_calls=1, answer_judge_calls=0,
+        )
+
+    # Issue #97: a faithful draft still may not ANSWER — a grounded deferral is
+    # trivially faithful. The answer gate is the second, orthogonal operand on the
+    # send path; a non-answer escalates rather than auto-resolving.
+    answered = await answer_judge(q["question"], draft_text)
     return _JudgedLeg(
-        decision="auto_resolve" if faithful else "escalate",
-        escalate_leg=None if faithful else "faithfulness",
+        decision="auto_resolve" if answered else "escalate",
+        escalate_leg=None if answered else "answer",
         gate=gate,
         faithfulness_score=faithfulness_score,
         helpfulness_score=helpfulness_score,
         faithful=faithful,
+        answered=answered,
         draft=draft_text,
         n_results=len(rows),
         draft_calls=1,
         judge_calls=1,
+        answer_judge_calls=1,
     )
 
 
@@ -546,18 +606,23 @@ async def _run_judged_leg(
 class P2Decision:
     """One P2 row's end-to-end outcome — pure data for the result JSON.
 
-    `decision` is ``"auto_resolve"`` when the row cleared the retrieval gate AND
-    its draft scored faithful (`faithfulness_score >= faithfulness_judge_min`) —
-    the only correct P2 outcome, counted toward deflection — or ``"escalate"``
-    otherwise (a **false-escalate**). `escalate_leg` records where it escalated:
-    ``"retrieval"`` (weak gate — no draft/judge call), ``"draft"`` (the drafter
-    produced nothing — no judge call), or ``"faithfulness"`` (the offline judge
-    scored the draft below the floor). It is ``None`` on an auto-resolve.
+    `decision` is ``"auto_resolve"`` when the row cleared the retrieval gate, its
+    draft scored faithful (`faithfulness_score >= faithfulness_judge_min`) AND the
+    answer-completeness judge said the draft ANSWERS the question — the only
+    correct P2 outcome, counted toward deflection — or ``"escalate"`` otherwise (a
+    **false-escalate**). `escalate_leg` records where it escalated: ``"retrieval"``
+    (weak gate — no draft/judge call), ``"draft"`` (the drafter produced nothing —
+    no judge call), ``"faithfulness"`` (the offline judge scored the draft below
+    the floor), or ``"answer"`` (faithful but the answer-completeness judge said it
+    does not answer — issue #97). It is ``None`` on an auto-resolve.
 
     `faithfulness_score` / `helpfulness_score` are the OFFLINE Claude judge's 1-5
-    integers (`None` when the row escalated before a judge call). `draft_calls` /
-    `judge_calls` are the actual calls this row made (0/0 at the retrieval gate,
-    1/0 on an empty draft, 1/1 once judged) so the LLM cost is auditable.
+    integers (`None` when the row escalated before a faithfulness-judge call);
+    `answered` is the OFFLINE answer-completeness verdict (`None` when the row
+    escalated before that gate). `draft_calls` / `judge_calls` / `answer_judge_calls`
+    are the actual calls this row made (0/0/0 at the retrieval gate, 1/0/0 on an
+    empty draft, 1/1/0 on a faithfulness escalation, 1/1/1 once fully judged) so the
+    LLM cost is auditable.
     """
 
     question_id: str
@@ -565,7 +630,7 @@ class P2Decision:
     expected: Literal["auto_resolve"]
     correct: bool
     false_escalate: bool
-    escalate_leg: Literal["retrieval", "draft", "faithfulness"] | None
+    escalate_leg: Literal["retrieval", "draft", "faithfulness", "answer"] | None
     gate_strong: bool
     top1_cosine: float | None
     n_cleared: int
@@ -574,10 +639,12 @@ class P2Decision:
     helpfulness_score: int | None
     faithfulness_judge_min: int
     faithful: bool | None
+    answered: bool | None
     n_results: int
     draft: str | None
     draft_calls: int
     judge_calls: int
+    answer_judge_calls: int
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -638,6 +705,10 @@ class E7P2Result:
         return sum(d.judge_calls for d in self.decisions)
 
     @property
+    def total_answer_judge_calls(self) -> int:
+        return sum(d.answer_judge_calls for d in self.decisions)
+
+    @property
     def passed(self) -> bool:
         """Structural validity only: a non-empty P2 population was scored. An
         empty population is NOT a pass — a deflection rate over zero answerable
@@ -665,6 +736,7 @@ class E7P2Result:
             "false_escalate_rate": self.false_escalate_rate,
             "total_draft_calls": self.total_draft_calls,
             "total_judge_calls": self.total_judge_calls,
+            "total_answer_judge_calls": self.total_answer_judge_calls,
             "false_escalates": [d.question_id for d in self.false_escalates],
             "passed": self.passed,
             "decisions": [d.to_dict() for d in self.decisions],
@@ -677,6 +749,7 @@ async def run_e7_p2(
     retrieve: Retrieve,
     draft: Draft,
     judge: Judge,
+    answer_judge: AnswerJudge,
     config: EscalationConfig,
     match_threshold: float,
     judge_model: str,
@@ -686,15 +759,17 @@ async def run_e7_p2(
 
     For each P2 row the leg runs the shared deflection-pipeline traversal
     (`_run_judged_leg`) — retrieve → retrieval gate → [if strong] draft → OFFLINE
-    faithfulness judge → auto-resolve-or-escalate — then labels the outcome with
-    P2 semantics: an auto-resolve is correct (deflection), any escalation is a
-    false-escalate (`escalate_leg` records whether it was the retrieval gate, an
-    empty draft, or the faithfulness judge).
+    faithfulness judge → [if faithful] OFFLINE answer-completeness judge →
+    auto-resolve-or-escalate — then labels the outcome with P2 semantics: an
+    auto-resolve is correct (deflection), any escalation is a false-escalate
+    (`escalate_leg` records whether it was the retrieval gate, an empty draft, the
+    faithfulness judge, or the answer-completeness judge).
 
     Reuses the real backend `retrieval_gate` + `draft_support_answer` (injected as
-    `draft`) so a regression in either shows up here; the `judge` callable is the
-    offline Claude judge (`runner.judge_answer`). Each P2 row carries a `reference`
-    gold answer (validated by `e7.load_escalation_questions`) the judge scores
+    `draft`) so a regression in either shows up here; the `judge` / `answer_judge`
+    callables are the offline Claude judges (`runner.judge_answer` /
+    `runner.judge_answering`). Each P2 row carries a `reference` gold answer
+    (validated by `e7.load_escalation_questions`) the faithfulness judge scores
     against. This leg makes live LLM calls, so it is NOT deterministic and is a
     scheduled/weekly artifact (US-059). Non-P2 rows in `questions` are ignored.
     """
@@ -715,6 +790,7 @@ async def run_e7_p2(
             retrieve=retrieve,
             draft=draft,
             judge=judge,
+            answer_judge=answer_judge,
             config=config,
             match_threshold=match_threshold,
             faithfulness_judge_min=faithfulness_judge_min,
@@ -735,10 +811,12 @@ async def run_e7_p2(
                 helpfulness_score=leg.helpfulness_score,
                 faithfulness_judge_min=faithfulness_judge_min,
                 faithful=leg.faithful,
+                answered=leg.answered,
                 n_results=leg.n_results,
                 draft=leg.draft,
                 draft_calls=leg.draft_calls,
                 judge_calls=leg.judge_calls,
+                answer_judge_calls=leg.answer_judge_calls,
             )
         )
     return result
@@ -774,20 +852,23 @@ def render_e7_p2_section(result: E7P2Result) -> list[str]:
         f"match_threshold={result.match_threshold} · "
         f"faithfulness≥{result.faithfulness_judge_min}/5 "
         f"(offline judge `{result.judge_model}`). Every P2 question has a faithful "
-        "grounded answer, so the pipeline should **auto-resolve** it; an escalation "
-        "is a false-escalate. Quality metric — not a per-PR hard block (US-059).",
+        "grounded answer that actually answers it, so the pipeline should "
+        "**auto-resolve** it (it must clear BOTH the faithfulness gate AND the "
+        "issue-#97 answer-completeness gate); an escalation is a false-escalate. "
+        "Quality metric — not a per-PR hard block (US-059).",
         "",
-        "| Question | Decision | top1_cosine | faithfulness | leg |",
-        "|---|---|---|---|---|",
+        "| Question | Decision | top1_cosine | faithfulness | answers | leg |",
+        "|---|---|---|---|---|---|",
     ]
     for d in result.decisions:
         cosine = "—" if d.top1_cosine is None else f"{d.top1_cosine:.4f}"
         faith = "—" if d.faithfulness_score is None else f"{d.faithfulness_score}/5"
+        answers = "—" if d.answered is None else ("yes" if d.answered else "no")
         leg = "—" if d.escalate_leg is None else d.escalate_leg
         flag = "" if d.correct else " ⚠️"
         lines.append(
             f"| `{d.question_id}` | {d.decision}{flag} | {cosine} | "
-            f"{faith} | {leg} |"
+            f"{faith} | {answers} | {leg} |"
         )
     lines += ["", f"**Verdict:** {verdict}"]
     return lines
@@ -796,20 +877,30 @@ def render_e7_p2_section(result: E7P2Result) -> list[str]:
 # ---------------------------------------------------------------------------
 # US-054: P3 (should-escalate) — the moat case.
 #
-# A P3 row has STRONG retrieval but NO faithful grounded answer (the topic is
-# on-corpus, the specific fact is not, or the doc defers to a human). It runs the
-# SAME shared pipeline traversal as P2 (`_run_judged_leg`) but with the OPPOSITE
-# expectation: the only correct P3 outcome is to clear the retrieval gate, draft,
-# and then be caught by the FAITHFULNESS leg → escalate. The labeling therefore
-# flips relative to P2:
+# A P3 row has STRONG retrieval but NO grounded answer that actually answers it
+# (the topic is on-corpus, the specific fact is not, or the doc defers to a
+# human). It runs the SAME shared pipeline traversal as P2 (`_run_judged_leg`) but
+# with the OPPOSITE expectation: the only correct P3 outcome is to clear the
+# retrieval gate, draft, and then be caught by a CONTENT gate → escalate. A P3
+# draft can fail either content gate: an ungrounded draft trips the FAITHFULNESS
+# leg, and a grounded-but-non-answering draft (a "the corpus doesn't cover
+# jewelry" deferral, faithful 5/5 yet answering nothing) trips the issue-#97
+# ANSWER leg. Both are the moat working. The labeling therefore flips relative
+# to P2:
 #
-#   * escalate at the faithfulness leg ⇒ CORRECT (the moat working);
+#   * escalate at the faithfulness OR answer leg ⇒ CORRECT (the moat working —
+#     the draft was caught by a content gate after clearing retrieval);
 #   * auto-resolve                     ⇒ FALSE-RESOLVE — the Risk #3 safety
 #     failure the false-resolve ceiling governs (US-055/059), NOT a false-escalate;
 #   * escalate at the retrieval/draft leg ⇒ MISLABELED — the row escalated (the
-#     safe direction) but never exercised the faithfulness gate it exists to
+#     safe direction) but never exercised the content gates it exists to
 #     prove, so its retrieval was not actually strong (a gold-authoring defect),
 #     not a pipeline result.
+#
+# Modeling the answer leg is the issue-#96 fix: before it, a grounded P3 deferral
+# scored 5/5 faithful and AUTO-RESOLVED as a false-resolve, so the whole P3 leg
+# read 100% false-resolve and breached the ceiling even though the runtime
+# pipeline (post issue #97) correctly escalates every one of those drafts.
 #
 # Like P2 this leg is LLM-judged (offline cross-family Claude judge), so it is a
 # scheduled/weekly artifact and only REPORTS here — the false-resolve RATE vs the
@@ -825,21 +916,24 @@ class P3Decision:
     `decision` is ``"escalate"`` (the expected outcome) or ``"auto_resolve"``.
     The three booleans are mutually exclusive and capture the P3 taxonomy:
 
-    * `correct` — escalated at the FAITHFULNESS leg (the moat working): strong
-      retrieval, a draft, and the offline judge scoring it below the floor.
-    * `false_resolve` — auto-resolved: the draft scored faithful and the pipeline
-      WOULD have auto-sent an answer to an unanswerable question. This is the
-      Risk #3 safety failure (US-055/059), tallied toward the false-resolve rate.
+    * `correct` — escalated at a CONTENT gate (the moat working): strong
+      retrieval, a draft, and then caught by either the faithfulness leg (offline
+      judge scored it below the floor) OR the issue-#97 answer leg (faithful but
+      the answer judge said the grounded draft does not answer the question).
+    * `false_resolve` — auto-resolved: the draft scored faithful AND answered, so
+      the pipeline WOULD have auto-sent an answer to an unanswerable question.
+      This is the Risk #3 safety failure (US-055/059), tallied toward the rate.
     * `mislabeled` — escalated at the retrieval or draft leg, so it never reached
-      the faithfulness judge. It escalated (the safe direction, so NOT a
-      false-resolve) but did not exercise the gate the row exists to prove —
+      the content judges. It escalated (the safe direction, so NOT a
+      false-resolve) but did not exercise the gates the row exists to prove —
       surfaced so the gold row can be re-authored.
 
     `escalate_leg` records where an escalation happened (``None`` on an
     auto-resolve); `faithfulness_score` / `helpfulness_score` are the OFFLINE
-    judge's 1-5 integers (``None`` when the row escalated before a judge call);
-    `draft_calls` / `judge_calls` are the actual calls made so the LLM cost is
-    auditable.
+    judge's 1-5 integers (``None`` when the row escalated before a faithfulness-judge
+    call); `answered` is the OFFLINE answer-completeness verdict (``None`` when the
+    row escalated before that gate); `draft_calls` / `judge_calls` /
+    `answer_judge_calls` are the actual calls made so the LLM cost is auditable.
     """
 
     question_id: str
@@ -848,7 +942,7 @@ class P3Decision:
     correct: bool
     false_resolve: bool
     mislabeled: bool
-    escalate_leg: Literal["retrieval", "draft", "faithfulness"] | None
+    escalate_leg: Literal["retrieval", "draft", "faithfulness", "answer"] | None
     gate_strong: bool
     top1_cosine: float | None
     n_cleared: int
@@ -857,10 +951,12 @@ class P3Decision:
     helpfulness_score: int | None
     faithfulness_judge_min: int
     faithful: bool | None
+    answered: bool | None
     n_results: int
     draft: str | None
     draft_calls: int
     judge_calls: int
+    answer_judge_calls: int
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -887,8 +983,9 @@ class E7P3Result:
     decisions: list[P3Decision] = field(default_factory=list)
 
     @property
-    def escalated_at_faithfulness(self) -> list[P3Decision]:
-        """P3 rows that escalated at the faithfulness leg — the moat working."""
+    def escalated_at_content_gate(self) -> list[P3Decision]:
+        """P3 rows that escalated at a CONTENT gate — the faithfulness leg OR the
+        issue-#97 answer leg — after clearing retrieval. The moat working."""
         return [d for d in self.decisions if d.correct]
 
     @property
@@ -900,20 +997,22 @@ class E7P3Result:
 
     @property
     def mislabeled(self) -> list[P3Decision]:
-        """P3 rows that escalated WITHOUT exercising the faithfulness gate
+        """P3 rows that escalated WITHOUT exercising the content gates
         (retrieval/draft leg) — a gold-authoring defect, not a pipeline result."""
         return [d for d in self.decisions if d.mislabeled]
 
     @property
     def exercised(self) -> list[P3Decision]:
-        """P3 rows that actually REACHED and were judged by the faithfulness gate:
+        """P3 rows that actually REACHED and were judged by the content gates:
         cleared retrieval, produced a non-empty draft, and got a faithfulness
-        verdict (whether the judge scored it below the floor → `correct`, or at/above
-        it → `false_resolve`). The complement of `mislabeled` (rows that escalated at
-        the retrieval/draft leg, never reaching the gate). The false-resolve ceiling
-        is only meaningful over a population with ≥1 exercised row — a population that
-        is empty OR entirely mislabeled never exercises the gate, so its measured rate
-        is vacuous (`None` or a 0/n that proves nothing)."""
+        verdict — then either escalated at the faithfulness leg (below the floor →
+        `correct`), escalated at the issue-#97 answer leg (faithful but a non-answer
+        → `correct`), or cleared both (faithful AND answers → `false_resolve`). The
+        complement of `mislabeled` (rows that escalated at the retrieval/draft leg,
+        never reaching the gates). The false-resolve ceiling is only meaningful over
+        a population with ≥1 exercised row — a population that is empty OR entirely
+        mislabeled never exercises the gates, so its measured rate is vacuous
+        (`None` or a 0/n that proves nothing)."""
         return [d for d in self.decisions if not d.mislabeled]
 
     @property
@@ -962,11 +1061,15 @@ class E7P3Result:
         return sum(d.judge_calls for d in self.decisions)
 
     @property
+    def total_answer_judge_calls(self) -> int:
+        return sum(d.answer_judge_calls for d in self.decisions)
+
+    @property
     def passed(self) -> bool:
         """Positive control for the false-resolve ceiling, which is fed SOLELY by
-        this leg (US-059). True iff ≥1 P3 row actually EXERCISED the faithfulness
-        gate (see `exercised`). A population that is empty OR entirely `mislabeled`
-        (every row escalated at the retrieval/draft leg) never reaches the gate, so
+        this leg (US-059). True iff ≥1 P3 row actually EXERCISED the content gates
+        (see `exercised`). A population that is empty OR entirely `mislabeled`
+        (every row escalated at the retrieval/draft leg) never reaches the gates, so
         its measured false-resolve rate is vacuous — `None` over zero rows, or a
         0/n that proves nothing — and the ceiling is structurally blind. Neither is
         a clean pass (mirrors P1a/P2's positive control: a zero must be a real zero).
@@ -987,13 +1090,14 @@ class E7P3Result:
             "faithfulness_judge_min": self.faithfulness_judge_min,
             "judge_model": self.judge_model,
             "n_questions": self.n_questions,
-            "n_escalated_at_faithfulness": len(self.escalated_at_faithfulness),
+            "n_escalated_at_content_gate": len(self.escalated_at_content_gate),
             "n_false_resolve": len(self.false_resolves),
             "n_mislabeled": len(self.mislabeled),
             "mislabel_ratio": self.mislabel_ratio,
             "false_resolve_rate": self.false_resolve_rate,
             "total_draft_calls": self.total_draft_calls,
             "total_judge_calls": self.total_judge_calls,
+            "total_answer_judge_calls": self.total_answer_judge_calls,
             "false_resolves": [d.question_id for d in self.false_resolves],
             "mislabeled": [d.question_id for d in self.mislabeled],
             "passed": self.passed,
@@ -1007,6 +1111,7 @@ async def run_e7_p3(
     retrieve: Retrieve,
     draft: Draft,
     judge: Judge,
+    answer_judge: AnswerJudge,
     config: EscalationConfig,
     match_threshold: float,
     judge_model: str,
@@ -1016,16 +1121,20 @@ async def run_e7_p3(
 
     For each P3 row the leg runs the SAME shared deflection-pipeline traversal as
     P2 (`_run_judged_leg`) but labels the outcome with P3 semantics: the only
-    correct outcome is to clear the retrieval gate, draft, and be caught by the
-    FAITHFULNESS leg → escalate. An auto-resolve is a **false-resolve** (the Risk
-    #3 safety failure); an escalation at the retrieval/draft leg is **mislabeled**
-    (the row never exercised the faithfulness gate, so its gold retrieval was not
-    actually strong).
+    correct outcome is to clear the retrieval gate, draft, and be caught by a
+    CONTENT gate → escalate. That content gate is the FAITHFULNESS leg (an
+    ungrounded draft) OR the issue-#97 ANSWER leg (a grounded draft that does not
+    answer — a "the corpus doesn't cover this" deferral, faithful yet unhelpful);
+    both are correct. An auto-resolve is a **false-resolve** (the Risk #3 safety
+    failure); an escalation at the retrieval/draft leg is **mislabeled** (the row
+    never exercised the content gates, so its gold retrieval was not actually
+    strong).
 
     Reuses the real backend `retrieval_gate` + `draft_support_answer`; faithfulness
     is scored by the OFFLINE Claude judge (`runner.judge_answer`) against the row's
     `reference` should-escalate gold (validated by `e7.load_escalation_questions`,
-    US-054). LLM-judged, so NOT deterministic and a scheduled/weekly artifact
+    US-054), and answer-completeness by the OFFLINE `runner.judge_answering`
+    (issue #97). LLM-judged, so NOT deterministic and a scheduled/weekly artifact
     (US-059); the false-resolve rate it records feeds US-055/059, never blocking a
     merge here. Non-P3 rows in `questions` are ignored.
     """
@@ -1046,26 +1155,31 @@ async def run_e7_p3(
             retrieve=retrieve,
             draft=draft,
             judge=judge,
+            answer_judge=answer_judge,
             config=config,
             match_threshold=match_threshold,
             faithfulness_judge_min=faithfulness_judge_min,
         )
-        # P3 labeling: correct iff escalated at the faithfulness leg (the moat);
-        # auto-resolve is the safety failure; any pre-faithfulness escalation is a
-        # mislabeled (under-strong) gold row.
-        escalated_faithfulness = (
-            leg.decision == "escalate" and leg.escalate_leg == "faithfulness"
+        # P3 labeling: correct iff escalated at a CONTENT gate — the faithfulness
+        # leg (ungrounded draft) OR the issue-#97 answer leg (grounded non-answer)
+        # — the moat working; auto-resolve is the safety failure; any escalation
+        # BEFORE the content gates (retrieval/draft) is a mislabeled (under-strong)
+        # gold row that never exercised what it exists to prove.
+        escalated_at_content = (
+            leg.decision == "escalate"
+            and leg.escalate_leg in ("faithfulness", "answer")
         )
         false_resolve = leg.decision == "auto_resolve"
-        mislabeled = (
-            leg.decision == "escalate" and leg.escalate_leg != "faithfulness"
+        mislabeled = leg.decision == "escalate" and leg.escalate_leg in (
+            "retrieval",
+            "draft",
         )
         result.decisions.append(
             P3Decision(
                 question_id=q["id"],
                 decision=leg.decision,
                 expected="escalate",
-                correct=escalated_faithfulness,
+                correct=escalated_at_content,
                 false_resolve=false_resolve,
                 mislabeled=mislabeled,
                 escalate_leg=leg.escalate_leg,
@@ -1077,10 +1191,12 @@ async def run_e7_p3(
                 helpfulness_score=leg.helpfulness_score,
                 faithfulness_judge_min=faithfulness_judge_min,
                 faithful=leg.faithful,
+                answered=leg.answered,
                 n_results=leg.n_results,
                 draft=leg.draft,
                 draft_calls=leg.draft_calls,
                 judge_calls=leg.judge_calls,
+                answer_judge_calls=leg.answer_judge_calls,
             )
         )
     return result
@@ -1095,18 +1211,18 @@ def render_e7_p3_section(result: E7P3Result) -> list[str]:
         )
     else:
         n_fr = len(result.false_resolves)
-        n_ok = len(result.escalated_at_faithfulness)
+        n_ok = len(result.escalated_at_content_gate)
         fr_rate = result.false_resolve_rate or 0.0
         verdict = (
             f"false-resolve {fr_rate:.0%} ({n_fr}/{result.n_questions}); "
-            f"{n_ok} correctly escalated at the faithfulness gate"
+            f"{n_ok} correctly escalated at a content gate (faithfulness or answer)"
         )
         if result.false_resolves:
             verdict += " — FALSE-RESOLVE (safety): " + ", ".join(
                 f"`{d.question_id}`" for d in result.false_resolves
             )
         if result.mislabeled:
-            verdict += " — mislabeled (escalated before the faithfulness gate): " + ", ".join(
+            verdict += " — mislabeled (escalated before the content gates): " + ", ".join(
                 f"`{d.question_id}` ({d.escalate_leg})" for d in result.mislabeled
             )
         verdict += "."
@@ -1119,17 +1235,20 @@ def render_e7_p3_section(result: E7P3Result) -> list[str]:
         f"match_threshold={result.match_threshold} · "
         f"faithfulness≥{result.faithfulness_judge_min}/5 "
         f"(offline judge `{result.judge_model}`). Every P3 question has strong "
-        "retrieval but **no faithful grounded answer**, so the pipeline must clear "
-        "the retrieval gate, draft, and then **escalate at the faithfulness gate**. "
-        "An auto-resolve is a **false-resolve** (the Risk #3 safety failure the "
-        "ceiling governs, US-055/059) — not a per-PR block here (LLM-judged).",
+        "retrieval but **no grounded answer that answers it**, so the pipeline must "
+        "clear the retrieval gate, draft, and then **escalate at a content gate** — "
+        "the faithfulness gate (an ungrounded draft) or the issue-#97 answer gate (a "
+        "grounded draft that defers/does-not-answer). An auto-resolve is a "
+        "**false-resolve** (the Risk #3 safety failure the ceiling governs, "
+        "US-055/059) — not a per-PR block here (LLM-judged).",
         "",
-        "| Question | Decision | top1_cosine | faithfulness | leg | flag |",
-        "|---|---|---|---|---|---|",
+        "| Question | Decision | top1_cosine | faithfulness | answers | leg | flag |",
+        "|---|---|---|---|---|---|---|",
     ]
     for d in result.decisions:
         cosine = "—" if d.top1_cosine is None else f"{d.top1_cosine:.4f}"
         faith = "—" if d.faithfulness_score is None else f"{d.faithfulness_score}/5"
+        answers = "—" if d.answered is None else ("yes" if d.answered else "no")
         leg = "—" if d.escalate_leg is None else d.escalate_leg
         if d.false_resolve:
             flag = "❌ false-resolve"
@@ -1139,7 +1258,7 @@ def render_e7_p3_section(result: E7P3Result) -> list[str]:
             flag = ""
         lines.append(
             f"| `{d.question_id}` | {d.decision} | {cosine} | "
-            f"{faith} | {leg} | {flag} |"
+            f"{faith} | {answers} | {leg} | {flag} |"
         )
     lines += ["", f"**Verdict:** {verdict}"]
     return lines
@@ -2105,6 +2224,24 @@ def _memoize_judge(judge: Judge) -> Judge:
     return cached
 
 
+def _memoize_answer_judge(answer_judge: AnswerJudge) -> AnswerJudge:
+    """Wrap `answer_judge` so each distinct question is answer-scored at most once.
+
+    The draft is fixed per question (memoized) and the answer verdict is a knob-
+    independent boolean (unlike the faithfulness floor, the answer gate has no
+    swept threshold in this grid), so caching on the question text is sufficient
+    and the whole sweep costs one answer-judge call per question.
+    """
+    cache: dict[str, bool] = {}
+
+    async def cached(question: str, draft_text: str) -> bool:
+        if question not in cache:
+            cache[question] = await answer_judge(question, draft_text)
+        return cache[question]
+
+    return cached
+
+
 @dataclass
 class SweepPoint:
     """One grid point's knobs + the consolidated rates it produces (US-056).
@@ -2343,6 +2480,7 @@ async def run_e7_sweep(
     retrieve: Retrieve,
     draft: Draft,
     judge: Judge,
+    answer_judge: AnswerJudge,
     tau_sims: list[float],
     n_mins: list[int],
     faithfulness_mins: list[int],
@@ -2373,6 +2511,7 @@ async def run_e7_sweep(
     mret = _memoize_retrieve(retrieve)
     mdraft = _memoize_draft(draft)
     mjudge = _memoize_judge(judge)
+    manswer_judge = _memoize_answer_judge(answer_judge)
 
     grid = [
         (tau, n_min, faith_min)
@@ -2387,9 +2526,11 @@ async def run_e7_sweep(
             tau_sim=tau,
             n_min=n_min,
             faithfulness_cutoff=faithfulness_cutoff,
-            # The E7 offline legs score with the 1-5 cross-family judge, not the
-            # runtime answer_gate (issue #97), so this carries the default for a
-            # valid config; sweeping it is the separate P3-observability story.
+            # The E7 offline legs model the issue-#97 answer gate with the OFFLINE
+            # cross-family `judge_answering` (a knob-independent boolean), NOT the
+            # runtime answer_gate's [0,1] score+cutoff, so this carries the default
+            # for a valid config; the answer floor is not one of the swept knobs
+            # (τ_sim × N_min × faithfulness floor).
             answer_cutoff=DEFAULT_ANSWER_CUTOFF,
         )
         p1a = await run_e7_p1a(
@@ -2403,6 +2544,7 @@ async def run_e7_sweep(
             retrieve=mret,
             draft=mdraft,
             judge=mjudge,
+            answer_judge=manswer_judge,
             config=config,
             match_threshold=match_threshold,
             judge_model=judge_model,
@@ -2413,6 +2555,7 @@ async def run_e7_sweep(
             retrieve=mret,
             draft=mdraft,
             judge=mjudge,
+            answer_judge=manswer_judge,
             config=config,
             match_threshold=match_threshold,
             judge_model=judge_model,
@@ -3172,12 +3315,22 @@ async def amain() -> int:
                     anthropic_client, question, reference, context, draft_text
                 )
 
+            async def answer_judge(question: str, draft_text: str) -> bool:
+                # The OFFLINE cross-family answer-completeness judge (issue #97) —
+                # NOT the runtime one-call answer_gate. Like its runtime mirror it
+                # compares the question against the draft only (grounding is the
+                # faithfulness judge's job).
+                return await r.judge_answering(
+                    anthropic_client, question, draft_text
+                )
+
             if args.include_p2:
                 p2_result = await run_e7_p2(
                     questions=questions,
                     retrieve=retrieve,
                     draft=draft,
                     judge=judge,
+                    answer_judge=answer_judge,
                     config=config,
                     match_threshold=match_threshold,
                     judge_model=r.JUDGE_MODEL,
@@ -3190,6 +3343,7 @@ async def amain() -> int:
                     retrieve=retrieve,
                     draft=draft,
                     judge=judge,
+                    answer_judge=answer_judge,
                     config=config,
                     match_threshold=match_threshold,
                     judge_model=r.JUDGE_MODEL,
@@ -3198,15 +3352,16 @@ async def amain() -> int:
 
             if args.sweep:
                 # US-056: grid-sweep the knobs + pick the knee. Memoizes
-                # retrieve/draft/judge per question, so the whole grid costs the
-                # same LLM as one operating point. `config.faithfulness_cutoff` is
-                # the runtime [0,1] cutoff carried in each grid config for
+                # retrieve/draft/judge/answer-judge per question, so the whole grid
+                # costs the same LLM as one operating point. `config.faithfulness_cutoff`
+                # is the runtime [0,1] cutoff carried in each grid config for
                 # completeness; the offline legs threshold the swept 1-5 floor.
                 sweep_result = await run_e7_sweep(
                     questions=questions,
                     retrieve=retrieve,
                     draft=draft,
                     judge=judge,
+                    answer_judge=answer_judge,
                     tau_sims=sweep_tau_sims,
                     n_mins=sweep_n_mins,
                     faithfulness_mins=sweep_faith_mins,

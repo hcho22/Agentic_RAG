@@ -481,6 +481,26 @@ class _FakeJudge:
         return self.scores_by_question.get(question, {"faithfulness": 5, "helpfulness": 5})
 
 
+class _FakeAnswerJudge:
+    """Call-counting fake offline `AnswerJudge`: maps question -> answers bool.
+
+    Mirrors the issue-#97 runtime answer gate: sees only the question + draft (no
+    reference, no chunks) so a test can prove the answer leg is orthogonal to
+    faithfulness. Default verdict is `True` (the draft answers) so a faithful P2
+    still auto-resolves; a P3 grounded-deferral test sets `False` to prove the
+    answer leg escalates a faithful-but-non-answering draft (issue #96)."""
+
+    def __init__(self, answers_by_question: dict[str, bool] | None = None) -> None:
+        self.answers_by_question = answers_by_question or {}
+        self.calls = 0
+        self.seen: list[tuple[str, str]] = []
+
+    async def __call__(self, question: str, draft_text: str) -> bool:
+        self.calls += 1
+        self.seen.append((question, draft_text))
+        return self.answers_by_question.get(question, True)
+
+
 def _p2(qid: str, question: str, *, reference: str = "a hand-authored reference") -> dict:
     return {
         "id": qid,
@@ -497,50 +517,56 @@ def _run_p2(
     *,
     drafts_by_question: dict[str, str] | None = None,
     scores_by_question: dict[str, dict[str, int]] | None = None,
+    answers_by_question: dict[str, bool] | None = None,
     faithfulness_judge_min: int = 4,
-) -> tuple[E7P2Result, _FakeRetriever, _FakeAnswerer, _FakeJudge]:
+) -> tuple[E7P2Result, _FakeRetriever, _FakeAnswerer, _FakeJudge, _FakeAnswerJudge]:
     retriever = _FakeRetriever(rows_by_question)
     answerer = _FakeAnswerer(drafts_by_question)
     judge = _FakeJudge(scores_by_question)
+    answer_judge = _FakeAnswerJudge(answers_by_question)
     result = asyncio.run(
         run_e7_p2(
             questions=questions,
             retrieve=retriever,
             draft=answerer,
             judge=judge,
+            answer_judge=answer_judge,
             config=CONFIG,
             match_threshold=THRESH,
             judge_model=JUDGE_MODEL,
             faithfulness_judge_min=faithfulness_judge_min,
         )
     )
-    return result, retriever, answerer, judge
+    return result, retriever, answerer, judge, answer_judge
 
 
 def test_p2_auto_resolves_when_faithful() -> None:
-    """PRD core: a P2 row with strong retrieval + a faithful draft auto-resolves,
-    is counted toward deflection, records the offline faithfulness score, and makes
-    exactly 1 draft + 1 judge call."""
+    """PRD core: a P2 row with strong retrieval + a faithful draft that ANSWERS
+    auto-resolves, is counted toward deflection, records the offline faithfulness
+    score, and makes exactly 1 draft + 1 faithfulness-judge + 1 answer-judge call."""
     q = _p2("e7-p2-01", "How long is the electronics warranty?")
-    result, retriever, answerer, judge = _run_p2(
+    result, retriever, answerer, judge, answer_judge = _run_p2(
         [q], {q["question"]: STRONG}, scores_by_question={q["question"]: {"faithfulness": 5, "helpfulness": 4}}
     )
 
     _check(result.n_questions == 1, f"expected 1 P2 row, got {result.n_questions}")
     _check(retriever.calls == 1 and answerer.calls == 1 and judge.calls == 1,
            f"exactly 1 retrieve/draft/judge call, got {retriever.calls}/{answerer.calls}/{judge.calls}")
+    _check(answer_judge.calls == 1, f"a faithful draft is answer-judged exactly once, got {answer_judge.calls}")
     d = result.decisions[0]
-    _check(d.decision == "auto_resolve", f"a faithful P2 must auto-resolve, got {d.decision}")
+    _check(d.decision == "auto_resolve", f"a faithful P2 that answers must auto-resolve, got {d.decision}")
     _check(d.correct is True and d.false_escalate is False, "auto-resolve is the correct, non-false-escalate P2 outcome")
     _check(d.escalate_leg is None, f"auto-resolve has no escalate leg, got {d.escalate_leg!r}")
     _check(d.faithfulness_score == 5, f"the offline faithfulness score must be recorded, got {d.faithfulness_score}")
     _check(d.helpfulness_score == 4, f"the offline helpfulness score must be recorded, got {d.helpfulness_score}")
     _check(d.faithful is True, "score 5 >= floor 4 -> faithful")
-    _check(d.draft_calls == 1 and d.judge_calls == 1, "per-row 1 draft + 1 judge")
+    _check(d.answered is True, "the answer judge said the draft answers -> auto-resolve")
+    _check(d.draft_calls == 1 and d.judge_calls == 1 and d.answer_judge_calls == 1,
+           "per-row 1 draft + 1 faithfulness-judge + 1 answer-judge")
     _check(result.deflection_rate == 1.0, f"100% deflection, got {result.deflection_rate}")
     _check(result.false_escalate_rate == 0.0, f"0% false-escalate, got {result.false_escalate_rate}")
     _check(result.passed is True, "a non-empty P2 run is structurally valid")
-    print("ok: a faithful P2 row auto-resolves, counts as deflection, 1 draft + 1 judge")
+    print("ok: a faithful P2 row that answers auto-resolves, counts as deflection, 1 draft + 1 faith + 1 answer judge")
 
 
 def test_p2_uses_offline_judge_with_reference() -> None:
@@ -548,7 +574,7 @@ def test_p2_uses_offline_judge_with_reference() -> None:
     runtime one-call gate. The offline judge receives the hand-authored reference
     (the runtime gate never does) and the drafted answer grounded in the chunks."""
     q = _p2("e7-p2-ref", "How long is the electronics warranty?", reference="12 months from shipped_at.")
-    result, _, answerer, judge = _run_p2([q], {q["question"]: STRONG})
+    result, _, answerer, judge, _ = _run_p2([q], {q["question"]: STRONG})
 
     _check(judge.calls == 1, "the offline judge must be invoked once on a strong-retrieval P2")
     seen = judge.seen[0]
@@ -566,7 +592,7 @@ def test_p2_false_escalate_at_retrieval_gate() -> None:
     """A P2 (answerable) row whose retrieval is weak escalates at the retrieval
     gate -> a false-escalate, with ZERO draft and ZERO judge calls."""
     q = _p2("e7-p2-weak", "How long is the electronics warranty?")
-    result, _, answerer, judge = _run_p2([q], {q["question"]: WEAK})
+    result, _, answerer, judge, answer_judge = _run_p2([q], {q["question"]: WEAK})
 
     d = result.decisions[0]
     _check(d.decision == "escalate", f"weak retrieval escalates, got {d.decision}")
@@ -574,8 +600,11 @@ def test_p2_false_escalate_at_retrieval_gate() -> None:
     _check(d.escalate_leg == "retrieval", f"escalated at the retrieval leg, got {d.escalate_leg!r}")
     _check(d.faithfulness_score is None, "no judge call -> no faithfulness score")
     _check(d.faithful is None, "no judge verdict on the retrieval-gate path")
-    _check(d.draft_calls == 0 and d.judge_calls == 0, "weak-gate short-circuit: 0 draft/0 judge")
-    _check(answerer.calls == 0 and judge.calls == 0, "no drafter/judge invoked on the weak path")
+    _check(d.answered is None, "no answer-judge verdict on the retrieval-gate path")
+    _check(d.draft_calls == 0 and d.judge_calls == 0 and d.answer_judge_calls == 0,
+           "weak-gate short-circuit: 0 draft/0 faith-judge/0 answer-judge")
+    _check(answerer.calls == 0 and judge.calls == 0 and answer_judge.calls == 0,
+           "no drafter/judge/answer-judge invoked on the weak path")
     _check(result.false_escalate_rate == 1.0 and result.deflection_rate == 0.0, "the rates reflect the false-escalate")
     _check([d.question_id for d in result.false_escalates] == ["e7-p2-weak"], "the row is tallied as a false-escalate")
     print("ok: a weak-retrieval P2 is a false-escalate at the retrieval gate, 0 draft/0 judge")
@@ -583,9 +612,10 @@ def test_p2_false_escalate_at_retrieval_gate() -> None:
 
 def test_p2_false_escalate_at_faithfulness_leg() -> None:
     """A P2 row that clears retrieval but whose draft the offline judge scores below
-    the floor escalates at the faithfulness leg -> a false-escalate (1 draft, 1 judge)."""
+    the floor escalates at the faithfulness leg -> a false-escalate. The answer gate
+    never runs (1 draft, 1 faith-judge, 0 answer-judge)."""
     q = _p2("e7-p2-unfaithful", "How long is the electronics warranty?")
-    result, _, answerer, judge = _run_p2(
+    result, _, answerer, judge, answer_judge = _run_p2(
         [q], {q["question"]: STRONG},
         scores_by_question={q["question"]: {"faithfulness": 2, "helpfulness": 3}},
     )
@@ -595,24 +625,53 @@ def test_p2_false_escalate_at_faithfulness_leg() -> None:
     _check(d.false_escalate is True, "an escalated P2 is a false-escalate")
     _check(d.escalate_leg == "faithfulness", f"escalated at the faithfulness leg, got {d.escalate_leg!r}")
     _check(d.faithfulness_score == 2 and d.faithful is False, "the sub-floor score is recorded and judged unfaithful")
-    _check(d.draft_calls == 1 and d.judge_calls == 1, "the row was drafted AND judged before escalating")
-    _check(answerer.calls == 1 and judge.calls == 1, "exactly one draft + one judge call")
-    print("ok: a P2 draft scored below the faithfulness floor is a false-escalate at the faithfulness leg")
+    _check(d.answered is None, "an unfaithful draft never reaches the answer gate")
+    _check(d.draft_calls == 1 and d.judge_calls == 1 and d.answer_judge_calls == 0,
+           "the row was drafted AND faithfulness-judged, but the answer gate never ran")
+    _check(answerer.calls == 1 and judge.calls == 1 and answer_judge.calls == 0,
+           "exactly one draft + one faithfulness judge; the answer judge is skipped on the unfaithful path")
+    print("ok: a P2 draft scored below the faithfulness floor is a false-escalate at the faithfulness leg (answer gate skipped)")
+
+
+def test_p2_false_escalate_at_answer_leg() -> None:
+    """Issue #97: a P2 row whose draft is FAITHFUL but the answer-completeness judge
+    says does NOT answer escalates at the answer leg -> a false-escalate (a faithful
+    draft that failed to answer an answerable question is 1 draft/1 faith/1 answer)."""
+    q = _p2("e7-p2-nonanswer", "How long is the electronics warranty?")
+    result, _, answerer, judge, answer_judge = _run_p2(
+        [q], {q["question"]: STRONG},
+        scores_by_question={q["question"]: {"faithfulness": 5, "helpfulness": 3}},
+        answers_by_question={q["question"]: False},
+    )
+
+    d = result.decisions[0]
+    _check(d.decision == "escalate", f"a faithful non-answering draft escalates, got {d.decision}")
+    _check(d.false_escalate is True and d.correct is False, "an escalated P2 is a false-escalate")
+    _check(d.escalate_leg == "answer", f"escalated at the answer leg, got {d.escalate_leg!r}")
+    _check(d.faithful is True and d.faithfulness_score == 5, "the draft cleared the faithfulness gate")
+    _check(d.answered is False, "the answer judge said the draft does not answer")
+    _check(d.draft_calls == 1 and d.judge_calls == 1 and d.answer_judge_calls == 1,
+           "drafted, faithfulness-judged, AND answer-judged before escalating")
+    _check(answerer.calls == 1 and judge.calls == 1 and answer_judge.calls == 1,
+           "the answer gate runs on the would-be-answered path")
+    _check(result.false_escalate_rate == 1.0, f"the row is a false-escalate, got {result.false_escalate_rate}")
+    print("ok: a faithful-but-non-answering P2 is a false-escalate at the issue-#97 answer leg")
 
 
 def test_p2_empty_draft_escalates_without_judge() -> None:
     """A P2 row whose drafter returns an empty/whitespace answer escalates at the
     draft leg with NO judge call (there is no answer to score)."""
     q = _p2("e7-p2-empty", "How long is the electronics warranty?")
-    result, _, answerer, judge = _run_p2(
+    result, _, answerer, judge, answer_judge = _run_p2(
         [q], {q["question"]: STRONG}, drafts_by_question={q["question"]: "   "}
     )
 
     d = result.decisions[0]
     _check(d.decision == "escalate", f"an empty draft escalates, got {d.decision}")
     _check(d.escalate_leg == "draft", f"escalated at the draft leg, got {d.escalate_leg!r}")
-    _check(d.draft_calls == 1 and d.judge_calls == 0, "drafted once, never judged")
-    _check(answerer.calls == 1 and judge.calls == 0, "the judge is not called when there is no draft")
+    _check(d.draft_calls == 1 and d.judge_calls == 0 and d.answer_judge_calls == 0, "drafted once, never judged")
+    _check(answerer.calls == 1 and judge.calls == 0 and answer_judge.calls == 0,
+           "neither judge is called when there is no draft")
     _check(d.faithfulness_score is None, "no judge -> no faithfulness score")
     print("ok: an empty P2 draft is a false-escalate at the draft leg, no judge call")
 
@@ -622,7 +681,7 @@ def test_p2_faithfulness_floor_is_inclusive() -> None:
     (auto-resolve), one below it is a false-escalate."""
     at = _p2("e7-p2-at", "At-floor question.")
     below = _p2("e7-p2-below", "Below-floor question.")
-    result, _, _, _ = _run_p2(
+    result, _, _, _, _ = _run_p2(
         [at, below],
         {at["question"]: STRONG, below["question"]: STRONG},
         scores_by_question={
@@ -642,7 +701,7 @@ def test_p2_empty_population_is_not_a_pass() -> None:
     """A run with no P2 rows is structurally blind for deflection — it must NOT
     pass, and non-P2 rows are ignored by the P2 leg."""
     questions = [_p1a("e7-p1a-1", "An off-topic question.")]
-    result, retriever, answerer, judge = _run_p2(questions, {})
+    result, retriever, answerer, judge, _ = _run_p2(questions, {})
     _check(result.n_questions == 0, f"no P2 rows expected, got {result.n_questions}")
     _check(retriever.calls == 0 and answerer.calls == 0 and judge.calls == 0, "non-P2 rows are not scored")
     _check(result.passed is False, "a P2 run scoring zero answerable rows must not pass")
@@ -654,12 +713,13 @@ def test_p2_to_dict_shape() -> None:
     """The P2 result + decision JSON carry the audited fields (decision, leg,
     offline faithfulness score, rates, call counts)."""
     q = _p2("e7-p2-s", "How long is the electronics warranty?")
-    result, _, _, _ = _run_p2([q], {q["question"]: STRONG})
+    result, _, _, _, _ = _run_p2([q], {q["question"]: STRONG})
     d = result.to_dict()
     for key in ("population", "label", "tau_sim", "n_min", "match_threshold",
                 "faithfulness_judge_min", "judge_model", "n_questions",
                 "n_auto_resolved", "n_false_escalate", "deflection_rate",
                 "false_escalate_rate", "total_draft_calls", "total_judge_calls",
+                "total_answer_judge_calls",
                 "false_escalates", "passed", "decisions"):
         _check(key in d, f"P2 result dict missing {key!r}")
     _check(d["population"] == "P2", f"population must be P2, got {d['population']!r}")
@@ -668,8 +728,8 @@ def test_p2_to_dict_shape() -> None:
     for key in ("question_id", "decision", "expected", "correct", "false_escalate",
                 "escalate_leg", "gate_strong", "top1_cosine", "n_cleared",
                 "gate_reason", "faithfulness_score", "helpfulness_score",
-                "faithfulness_judge_min", "faithful", "n_results", "draft",
-                "draft_calls", "judge_calls"):
+                "faithfulness_judge_min", "faithful", "answered", "n_results", "draft",
+                "draft_calls", "judge_calls", "answer_judge_calls"):
         _check(key in dec, f"P2 decision dict missing {key!r}")
     _check(isinstance(result.decisions[0], P2Decision), "decisions are P2Decision instances")
     print("ok: P2 result/decision to_dict carry the audited fields")
@@ -696,32 +756,36 @@ def _run_p3(
     *,
     drafts_by_question: dict[str, str] | None = None,
     scores_by_question: dict[str, dict[str, int]] | None = None,
+    answers_by_question: dict[str, bool] | None = None,
     faithfulness_judge_min: int = 4,
-) -> tuple[E7P3Result, _FakeRetriever, _FakeAnswerer, _FakeJudge]:
+) -> tuple[E7P3Result, _FakeRetriever, _FakeAnswerer, _FakeJudge, _FakeAnswerJudge]:
     retriever = _FakeRetriever(rows_by_question)
     answerer = _FakeAnswerer(drafts_by_question)
     judge = _FakeJudge(scores_by_question)
+    answer_judge = _FakeAnswerJudge(answers_by_question)
     result = asyncio.run(
         run_e7_p3(
             questions=questions,
             retrieve=retriever,
             draft=answerer,
             judge=judge,
+            answer_judge=answer_judge,
             config=CONFIG,
             match_threshold=THRESH,
             judge_model=JUDGE_MODEL,
             faithfulness_judge_min=faithfulness_judge_min,
         )
     )
-    return result, retriever, answerer, judge
+    return result, retriever, answerer, judge, answer_judge
 
 
 def test_p3_escalates_at_faithfulness_leg() -> None:
     """PRD core: a P3 row with strong retrieval but an UNFAITHFUL draft escalates
     at the faithfulness leg — the moat working. decision=escalate, correct=True,
-    NOT a false-resolve, faithfulness score recorded, exactly 1 draft + 1 judge."""
+    NOT a false-resolve. The answer gate never runs on the unfaithful path
+    (1 draft, 1 faith-judge, 0 answer-judge)."""
     q = _p3("e7-p3-01", "What is the warranty period for jewelry?")
-    result, retriever, answerer, judge = _run_p3(
+    result, retriever, answerer, judge, answer_judge = _run_p3(
         [q], {q["question"]: STRONG},
         scores_by_question={q["question"]: {"faithfulness": 2, "helpfulness": 2}},
     )
@@ -729,6 +793,7 @@ def test_p3_escalates_at_faithfulness_leg() -> None:
     _check(result.n_questions == 1, f"expected 1 P3 row, got {result.n_questions}")
     _check(retriever.calls == 1 and answerer.calls == 1 and judge.calls == 1,
            f"exactly 1 retrieve/draft/judge call, got {retriever.calls}/{answerer.calls}/{judge.calls}")
+    _check(answer_judge.calls == 0, "the answer gate is skipped when the draft is unfaithful")
     d = result.decisions[0]
     _check(d.decision == "escalate", f"an unfaithful P3 must escalate, got {d.decision}")
     _check(d.escalate_leg == "faithfulness", f"escalated at the faithfulness leg, got {d.escalate_leg!r}")
@@ -736,39 +801,80 @@ def test_p3_escalates_at_faithfulness_leg() -> None:
     _check(d.false_resolve is False, "an escalated P3 is NOT a false-resolve")
     _check(d.mislabeled is False, "a faithfulness-leg escalation is not mislabeled")
     _check(d.faithfulness_score == 2 and d.faithful is False, "the sub-floor score is recorded, judged unfaithful")
-    _check(d.draft_calls == 1 and d.judge_calls == 1, "drafted AND judged before escalating")
+    _check(d.answered is None, "an unfaithful draft never reaches the answer gate")
+    _check(d.draft_calls == 1 and d.judge_calls == 1 and d.answer_judge_calls == 0, "drafted AND faithfulness-judged before escalating")
     _check(result.false_resolve_rate == 0.0, f"0% false-resolve, got {result.false_resolve_rate}")
     _check(result.false_resolves == [], "no false-resolves on a correctly-escalated P3")
     _check([x.question_id for x in result.exercised] == ["e7-p3-01"],
            "a faithfulness-leg escalation exercised the gate")
-    _check(result.passed is True, "a P3 run that exercised the faithfulness gate is structurally valid")
+    _check(result.passed is True, "a P3 run that exercised the content gates is structurally valid")
     print("ok: a P3 with an unfaithful draft escalates at the faithfulness gate (the moat), not a false-resolve")
+
+
+def test_p3_escalates_at_answer_leg() -> None:
+    """Issue #96 regression: a P3 row whose draft is FAITHFUL (a grounded "the corpus
+    doesn't cover jewelry" deferral, 5/5) but does NOT ANSWER escalates at the
+    issue-#97 answer leg — the moat working. This is the exact case that, before the
+    answer gate was modeled, scored 5/5 faithful and AUTO-RESOLVED as a false-resolve,
+    driving the P3 leg to 100% false-resolve and breaching the ceiling (issue #96).
+    Now: correct=True, NOT a false-resolve, 1 draft / 1 faith-judge / 1 answer-judge."""
+    q = _p3("e7-p3-defer", "What is the warranty period for jewelry?")
+    result, retriever, answerer, judge, answer_judge = _run_p3(
+        [q], {q["question"]: STRONG},
+        scores_by_question={q["question"]: {"faithfulness": 5, "helpfulness": 2}},
+        answers_by_question={q["question"]: False},
+    )
+
+    _check(answer_judge.calls == 1, "a faithful P3 draft IS answer-judged (the would-be-answered path)")
+    d = result.decisions[0]
+    _check(d.decision == "escalate", f"a faithful-but-non-answering P3 must escalate, got {d.decision}")
+    _check(d.escalate_leg == "answer", f"escalated at the issue-#97 answer leg, got {d.escalate_leg!r}")
+    _check(d.correct is True, "escalating at the answer gate is a CORRECT P3 outcome (the moat working)")
+    _check(d.false_resolve is False, "a grounded non-answer that escalated is NOT a false-resolve")
+    _check(d.mislabeled is False, "an answer-leg escalation exercised the content gates, so it is not mislabeled")
+    _check(d.faithful is True and d.faithfulness_score == 5, "the grounded deferral cleared the faithfulness gate")
+    _check(d.answered is False, "the answer judge said the grounded draft does not answer")
+    _check(d.draft_calls == 1 and d.judge_calls == 1 and d.answer_judge_calls == 1,
+           "drafted, faithfulness-judged, AND answer-judged")
+    _check(result.false_resolve_rate == 0.0, f"0% false-resolve — the moat caught it, got {result.false_resolve_rate}")
+    _check(result.false_resolves == [], "a grounded deferral is no longer a false-resolve (issue #96 fixed)")
+    _check([x.question_id for x in result.escalated_at_content_gate] == ["e7-p3-defer"],
+           "the row is counted as a correct content-gate escalation")
+    _check([x.question_id for x in result.exercised] == ["e7-p3-defer"],
+           "the answer-leg escalation exercised the content gates")
+    _check(result.passed is True, "a P3 run that exercised the content gates is structurally valid")
+    print("ok: issue #96 — a faithful P3 grounded deferral escalates at the answer gate (correct), NOT a false-resolve")
 
 
 def test_p3_auto_resolve_is_false_resolve() -> None:
     """Failure indicator: a P3 row whose draft the offline judge scores FAITHFUL
-    auto-resolves -> a FALSE-RESOLVE (the Risk #3 safety failure), tallied toward
-    the false-resolve rate, flagged correct=False."""
+    AND the answer judge says ANSWERS auto-resolves -> a FALSE-RESOLVE (the Risk #3
+    safety failure), tallied toward the false-resolve rate, flagged correct=False.
+    Both content gates must clear for an auto-resolve, so this is a genuine
+    false-resolve (a grounded answer to a question that should have escalated),
+    distinct from the grounded-deferral case that now escalates at the answer leg."""
     q = _p3("e7-p3-leak", "What is the warranty period for jewelry?")
-    result, _, answerer, judge = _run_p3(
+    result, _, answerer, judge, answer_judge = _run_p3(
         [q], {q["question"]: STRONG},
         scores_by_question={q["question"]: {"faithfulness": 5, "helpfulness": 2}},
+        answers_by_question={q["question"]: True},
     )
 
     d = result.decisions[0]
-    _check(d.decision == "auto_resolve", f"a faithful draft auto-resolves, got {d.decision}")
+    _check(d.decision == "auto_resolve", f"a faithful draft that answers auto-resolves, got {d.decision}")
     _check(d.false_resolve is True, "an auto-resolved P3 is a false-resolve (the safety failure)")
     _check(d.correct is False, "an auto-resolved P3 is NOT correct")
-    _check(d.mislabeled is False, "an auto-resolve is not a mislabeled (pre-faithfulness) escalation")
+    _check(d.mislabeled is False, "an auto-resolve is not a mislabeled (pre-content-gate) escalation")
     _check(d.escalate_leg is None, f"an auto-resolve has no escalate leg, got {d.escalate_leg!r}")
     _check(d.faithfulness_score == 5 and d.faithful is True, "the faithful score is recorded")
-    _check(d.draft_calls == 1 and d.judge_calls == 1, "drafted + judged")
+    _check(d.answered is True, "the answer judge said the draft answers")
+    _check(d.draft_calls == 1 and d.judge_calls == 1 and d.answer_judge_calls == 1, "drafted + faithfulness-judged + answer-judged")
     _check([x.question_id for x in result.false_resolves] == ["e7-p3-leak"], "the row is tallied as a false-resolve")
     _check(result.false_resolve_rate == 1.0, f"100% false-resolve, got {result.false_resolve_rate}")
     _check([x.question_id for x in result.exercised] == ["e7-p3-leak"],
-           "an auto-resolve reached a faithfulness verdict, so it exercised the gate")
-    _check(result.passed is True, "a P3 run that exercised the gate is structurally valid even with a false-resolve (US-055/059 gates the rate)")
-    print("ok: a P3 that auto-resolves is caught as a false-resolve (the Risk #3 safety failure)")
+           "an auto-resolve reached a content-gate verdict, so it exercised the gates")
+    _check(result.passed is True, "a P3 run that exercised the gates is structurally valid even with a false-resolve (US-055/059 gates the rate)")
+    print("ok: a P3 that is faithful AND answers auto-resolves — caught as a false-resolve (the Risk #3 safety failure)")
 
 
 def test_p3_retrieval_gate_escalation_is_mislabeled() -> None:
@@ -778,7 +884,7 @@ def test_p3_retrieval_gate_escalation_is_mislabeled() -> None:
     safe direction), so it is NOT a false-resolve, but it is NOT correct either,
     with ZERO draft and ZERO judge calls."""
     q = _p3("e7-p3-weak", "A should-escalate question whose gold retrieval is weak.")
-    result, _, answerer, judge = _run_p3([q], {q["question"]: WEAK})
+    result, _, answerer, judge, _ = _run_p3([q], {q["question"]: WEAK})
 
     d = result.decisions[0]
     _check(d.decision == "escalate", f"weak retrieval escalates, got {d.decision}")
@@ -798,7 +904,7 @@ def test_p3_empty_draft_is_mislabeled() -> None:
     with NO judge call — it never reached the faithfulness gate, so it too is
     mislabeled (not a false-resolve)."""
     q = _p3("e7-p3-empty", "What is the warranty period for jewelry?")
-    result, _, answerer, judge = _run_p3(
+    result, _, answerer, judge, _ = _run_p3(
         [q], {q["question"]: STRONG}, drafts_by_question={q["question"]: "   "}
     )
 
@@ -817,7 +923,7 @@ def test_p3_uses_offline_judge_with_reference() -> None:
     should-escalate reference (the runtime one-call gate never sees a reference)."""
     q = _p3("e7-p3-ref", "What is the warranty period for jewelry?",
             reference="The policy does not cover jewelry; escalate to a human.")
-    result, _, answerer, judge = _run_p3([q], {q["question"]: STRONG})
+    result, _, answerer, judge, _ = _run_p3([q], {q["question"]: STRONG})
 
     _check(judge.calls == 1, "the offline judge runs once on a strong-retrieval P3")
     seen = judge.seen[0]
@@ -835,7 +941,7 @@ def test_p3_faithfulness_floor_inclusive_and_flips_vs_p2() -> None:
     one below it is unfaithful -> escalate at the faithfulness leg -> correct."""
     at = _p3("e7-p3-at", "At-floor question.")
     below = _p3("e7-p3-below", "Below-floor question.")
-    result, _, _, _ = _run_p3(
+    result, _, _, _, _ = _run_p3(
         [at, below],
         {at["question"]: STRONG, below["question"]: STRONG},
         scores_by_question={
@@ -857,7 +963,7 @@ def test_p3_empty_population_is_not_a_pass() -> None:
     """A run with no P3 rows is structurally blind for the false-resolve rate — it
     must NOT pass, and non-P3 rows are ignored by the P3 leg."""
     questions = [_p1a("e7-p1a-1", "An off-topic question."), _p2("e7-p2-1", "warranty?")]
-    result, retriever, answerer, judge = _run_p3(questions, {})
+    result, retriever, answerer, judge, _ = _run_p3(questions, {})
     _check(result.n_questions == 0, f"no P3 rows expected, got {result.n_questions}")
     _check(retriever.calls == 0 and answerer.calls == 0 and judge.calls == 0, "non-P3 rows are not scored")
     _check(result.passed is False, "a P3 run scoring zero should-escalate rows must not pass")
@@ -875,7 +981,7 @@ def test_p3_all_mislabeled_is_not_a_pass() -> None:
     guard."""
     a = _p3("e7-p3-weak-a", "A should-escalate question whose gold retrieval is weak.")
     b = _p3("e7-p3-weak-b", "Another should-escalate question whose retrieval is weak.")
-    result, _, answerer, judge = _run_p3(
+    result, _, answerer, judge, _ = _run_p3(
         [a, b], {a["question"]: WEAK, b["question"]: WEAK}
     )
     _check(result.n_questions == 2, f"two P3 rows scored, got {result.n_questions}")
@@ -893,17 +999,17 @@ def test_p3_to_dict_shape() -> None:
     taxonomy flags, leg, offline faithfulness score, the false-resolve rate, call
     counts)."""
     q = _p3("e7-p3-s", "What is the warranty period for jewelry?")
-    result, _, _, _ = _run_p3(
+    result, _, _, _, _ = _run_p3(
         [q], {q["question"]: STRONG},
         scores_by_question={q["question"]: {"faithfulness": 2, "helpfulness": 2}},
     )
     d = result.to_dict()
     for key in ("population", "label", "tau_sim", "n_min", "match_threshold",
                 "faithfulness_judge_min", "judge_model", "n_questions",
-                "n_escalated_at_faithfulness", "n_false_resolve", "n_mislabeled",
+                "n_escalated_at_content_gate", "n_false_resolve", "n_mislabeled",
                 "mislabel_ratio", "false_resolve_rate", "total_draft_calls",
-                "total_judge_calls", "false_resolves", "mislabeled", "passed",
-                "decisions"):
+                "total_judge_calls", "total_answer_judge_calls", "false_resolves",
+                "mislabeled", "passed", "decisions"):
         _check(key in d, f"P3 result dict missing {key!r}")
     _check(d["mislabel_ratio"] == 0.0,
            f"a fully-exercised P3 leg has 0 mislabel_ratio, got {d['mislabel_ratio']}")
@@ -913,8 +1019,8 @@ def test_p3_to_dict_shape() -> None:
     for key in ("question_id", "decision", "expected", "correct", "false_resolve",
                 "mislabeled", "escalate_leg", "gate_strong", "top1_cosine",
                 "n_cleared", "gate_reason", "faithfulness_score", "helpfulness_score",
-                "faithfulness_judge_min", "faithful", "n_results", "draft",
-                "draft_calls", "judge_calls"):
+                "faithfulness_judge_min", "faithful", "answered", "n_results", "draft",
+                "draft_calls", "judge_calls", "answer_judge_calls"):
         _check(key in dec, f"P3 decision dict missing {key!r}")
     _check(dec["expected"] == "escalate", f"P3's expected outcome is escalate, got {dec['expected']!r}")
     _check(isinstance(result.decisions[0], P3Decision), "decisions are P3Decision instances")
@@ -949,7 +1055,7 @@ def _mixed_results() -> tuple[E7P1aResult, E7P2Result, E7P3Result]:
         {"q-p1a-a": WEAK, "q-p1a-b": WEAK},
         [_p1a("m-p1a-a", "q-p1a-a"), _p1a("m-p1a-b", "q-p1a-b")],
     )
-    p2, _, _, _ = _run_p2(
+    p2, _, _, _, _ = _run_p2(
         [_p2("m-p2-resolve", "q-p2-r"), _p2("m-p2-escalate", "q-p2-e")],
         {"q-p2-r": STRONG, "q-p2-e": STRONG},
         scores_by_question={
@@ -957,7 +1063,7 @@ def _mixed_results() -> tuple[E7P1aResult, E7P2Result, E7P3Result]:
             "q-p2-e": {"faithfulness": 2, "helpfulness": 2},
         },
     )
-    p3, _, _, _ = _run_p3(
+    p3, _, _, _, _ = _run_p3(
         [_p3("m-p3-escalate", "q-p3-e"), _p3("m-p3-resolve", "q-p3-r")],
         {"q-p3-e": STRONG, "q-p3-r": STRONG},
         scores_by_question={
@@ -1010,7 +1116,7 @@ def test_metrics_false_resolve_is_faithfulness_leg_gated() -> None:
         [_p1a("m-p1a-clear", "q-clear"), _p1a("m-p1a-weak", "q-weak")],
     )
     # P3: one auto-resolves (faithfulness-leg false-resolve) + one escalates (correct).
-    p3, _, _, _ = _run_p3(
+    p3, _, _, _, _ = _run_p3(
         [_p3("m-p3-resolve", "q3r"), _p3("m-p3-escalate", "q3e")],
         {"q3r": STRONG, "q3e": STRONG},
         scores_by_question={
@@ -1217,7 +1323,7 @@ def test_exit_p3_blind_hard_fails() -> None:
     invariant silently unmeasured. The P3 positive control (passed=False over 0 rows)
     must fail the run closed, mirroring the P1a/P1b/non-disclosure blindness guards."""
     p1a = _clean_p1a()
-    p3_blind, _, _, _ = _run_p3([], {})
+    p3_blind, _, _, _, _ = _run_p3([], {})
     _check(p3_blind.n_questions == 0 and p3_blind.passed is False,
            "the P3 leg is structurally blind (0 rows, not a pass)")
     verdict = _verdict_over(p1a, p3_blind, 0.0)
@@ -1244,7 +1350,7 @@ def test_exit_p3_all_mislabeled_hard_fails() -> None:
     p1a = _clean_p1a()
     a = _p3("m-p3-weak-a", "q-weak-a")
     b = _p3("m-p3-weak-b", "q-weak-b")
-    p3_mislabeled, _, _, _ = _run_p3(
+    p3_mislabeled, _, _, _, _ = _run_p3(
         [a, b], {a["question"]: WEAK, b["question"]: WEAK}
     )
     _check(p3_mislabeled.n_questions == 2 and p3_mislabeled.passed is False,
@@ -1268,7 +1374,7 @@ def test_exit_clean_weekly_does_not_fail() -> None:
     positive-control guard only fires on a BLIND P3, never on a healthy one."""
     p1a = _clean_p1a()
     q = _p3("m-p3-e", "q-e")
-    p3, _, _, _ = _run_p3(
+    p3, _, _, _, _ = _run_p3(
         [q], {q["question"]: STRONG},
         scores_by_question={q["question"]: {"faithfulness": 2, "helpfulness": 2}},
     )
@@ -1348,7 +1454,7 @@ def test_p3_mislabel_ratio_property() -> None:
     weak_a = _p3("e7-p3-mr-a", "q-weak-a")
     weak_b = _p3("e7-p3-mr-b", "q-weak-b")
     strong = _p3("e7-p3-mr-c", "q-strong-c")
-    result, _, _, _ = _run_p3(
+    result, _, _, _, _ = _run_p3(
         [weak_a, weak_b, strong],
         {weak_a["question"]: WEAK, weak_b["question"]: WEAK, strong["question"]: STRONG},
         scores_by_question={strong["question"]: {"faithfulness": 2, "helpfulness": 2}},
@@ -1361,7 +1467,7 @@ def test_p3_mislabel_ratio_property() -> None:
     _check(result.false_resolve_rate == 0.0,
            "no false-resolve, and the mislabeled rows stay in the rate's denominator")
 
-    empty, _, _, _ = _run_p3([], {})
+    empty, _, _, _, _ = _run_p3([], {})
     _check(empty.mislabel_ratio is None, "mislabel_ratio over an empty population is None")
     print("ok: mislabel_ratio is mislabeled/full-population (None when empty)")
 
@@ -1377,7 +1483,7 @@ def test_exit_p3_partial_mislabel_over_max_fails() -> None:
     weak_a = _p3("e7-p3-pm-a", "q-weak-a")
     weak_b = _p3("e7-p3-pm-b", "q-weak-b")
     strong = _p3("e7-p3-pm-c", "q-strong-c")
-    p3, _, _, _ = _run_p3(
+    p3, _, _, _, _ = _run_p3(
         [weak_a, weak_b, strong],
         {weak_a["question"]: WEAK, weak_b["question"]: WEAK, strong["question"]: STRONG},
         scores_by_question={strong["question"]: {"faithfulness": 2, "helpfulness": 2}},
@@ -1404,7 +1510,7 @@ def test_exit_p3_mislabel_ratio_boundary_and_configurable() -> None:
     p1a = _clean_p1a()
     weak = _p3("e7-p3-bd-a", "q-weak-a")
     strong = _p3("e7-p3-bd-b", "q-strong-b")
-    p3, _, _, _ = _run_p3(
+    p3, _, _, _, _ = _run_p3(
         [weak, strong],
         {weak["question"]: WEAK, strong["question"]: STRONG},
         scores_by_question={strong["question"]: {"faithfulness": 2, "helpfulness": 2}},
@@ -1436,7 +1542,7 @@ def test_exit_p3_all_mislabeled_owned_by_positive_control_not_ratio_guard() -> N
     p1a = _clean_p1a()
     a = _p3("e7-p3-am-a", "q-weak-a")
     b = _p3("e7-p3-am-b", "q-weak-b")
-    p3, _, _, _ = _run_p3([a, b], {a["question"]: WEAK, b["question"]: WEAK})
+    p3, _, _, _, _ = _run_p3([a, b], {a["question"]: WEAK, b["question"]: WEAK})
     _check(p3.passed is False and p3.exercised == [],
            "an all-mislabeled leg never exercises the gate (positive control owns it)")
     verdict = _verdict_over(p1a, p3, 0.05)
@@ -1492,16 +1598,19 @@ def _run_sweep(
     ceiling: float,
     scores_by_question: dict[str, dict[str, int]] | None = None,
     drafts_by_question: dict[str, str] | None = None,
-) -> tuple[E7Sweep, _FakeRetriever, _FakeAnswerer, _FakeJudge]:
+    answers_by_question: dict[str, bool] | None = None,
+) -> tuple[E7Sweep, _FakeRetriever, _FakeAnswerer, _FakeJudge, _FakeAnswerJudge]:
     retriever = _FakeRetriever(rows_by_question)
     answerer = _FakeAnswerer(drafts_by_question)
     judge = _FakeJudge(scores_by_question)
+    answer_judge = _FakeAnswerJudge(answers_by_question)
     result = asyncio.run(
         run_e7_sweep(
             questions=questions,
             retrieve=retriever,
             draft=answerer,
             judge=judge,
+            answer_judge=answer_judge,
             tau_sims=tau_sims,
             n_mins=n_mins,
             faithfulness_mins=faithfulness_mins,
@@ -1511,7 +1620,7 @@ def _run_sweep(
             judge_model=JUDGE_MODEL,
         )
     )
-    return result, retriever, answerer, judge
+    return result, retriever, answerer, judge, answer_judge
 
 
 def _sweep_scenario() -> tuple[list[dict], dict, dict]:
@@ -1563,7 +1672,7 @@ def test_sweep_curve_and_knee() -> None:
     curve listing each point's (deflection, false-resolve) and picks the
     highest-deflection FEASIBLE point as the knee, reporting its knob values."""
     questions, rows, scores = _sweep_scenario()
-    sweep, _, _, _ = _run_sweep(
+    sweep, _, _, _, _ = _run_sweep(
         questions, rows,
         tau_sims=[0.40, 0.60], n_mins=[1, 2], faithfulness_mins=[4, 5],
         ceiling=0.05, scores_by_question=scores,
@@ -1617,7 +1726,7 @@ def test_sweep_memoizes_llm_calls_per_question() -> None:
     Without memoization the 2 always-strong P2 rows would draft at all 8 points
     (16) plus the 2 P3 rows at the 4 τ_sim=0.40 points (8) = 24 draft calls."""
     questions, rows, scores = _sweep_scenario()
-    sweep, retriever, answerer, judge = _run_sweep(
+    sweep, retriever, answerer, judge, _ = _run_sweep(
         questions, rows,
         tau_sims=[0.40, 0.60], n_mins=[1, 2], faithfulness_mins=[4, 5],
         ceiling=0.05, scores_by_question=scores,
@@ -1642,7 +1751,7 @@ def test_sweep_no_point_under_ceiling_is_reported() -> None:
     questions = [_p1a("nb-p1a", "nq-p1a"), _p3("nb-p3", "nq-p3")]
     rows = {"nq-p1a": WEAK, "nq-p3": STRONG}
     scores = {"nq-p3": {"faithfulness": 5, "helpfulness": 5}}
-    sweep, _, _, _ = _run_sweep(
+    sweep, _, _, _, _ = _run_sweep(
         questions, rows,
         tau_sims=[0.40, 0.60], n_mins=[1, 2], faithfulness_mins=[4, 5],
         ceiling=0.05, scores_by_question=scores,
@@ -1667,7 +1776,7 @@ def test_sweep_deflection_blind_is_reported() -> None:
     questions = [_p3("db-p3", "dq-p3")]
     rows = {"dq-p3": STRONG}
     scores = {"dq-p3": {"faithfulness": 3, "helpfulness": 3}}
-    sweep, _, _, _ = _run_sweep(
+    sweep, _, _, _, _ = _run_sweep(
         questions, rows,
         tau_sims=[0.40, 0.60], n_mins=[1, 2], faithfulness_mins=[4, 5],
         ceiling=0.05, scores_by_question=scores,
@@ -1685,7 +1794,7 @@ def test_sweep_to_dict_shape() -> None:
     """The sweep JSON carries the curve, the per-point metrics, the knee, the
     recommended config, and the ceiling — so the operating point is auditable."""
     questions, rows, scores = _sweep_scenario()
-    sweep, _, _, _ = _run_sweep(
+    sweep, _, _, _, _ = _run_sweep(
         questions, rows,
         tau_sims=[0.40, 0.60], n_mins=[1, 2], faithfulness_mins=[4, 5],
         ceiling=0.05, scores_by_question=scores,
@@ -1727,7 +1836,7 @@ def test_sweep_reports_p3_exercise_per_point() -> None:
     below), so a later decision to gate on it is a separate, visible change.
     """
     questions, rows, scores = _sweep_scenario()
-    sweep, _, _, _ = _run_sweep(
+    sweep, _, _, _, _ = _run_sweep(
         questions, rows,
         tau_sims=[0.40, 0.60], n_mins=[1, 2], faithfulness_mins=[4, 5],
         ceiling=0.05, scores_by_question=scores,
@@ -1837,7 +1946,7 @@ def test_sweep_majority_mislabel_callout_tracks_the_configured_ceiling() -> None
         "mq-p3-mid-b": {"faithfulness": 5, "helpfulness": 5},
         "mq-p3-mid-c": {"faithfulness": 5, "helpfulness": 5},
     }
-    sweep, _, _, _ = _run_sweep(
+    sweep, _, _, _, _ = _run_sweep(
         questions, rows,
         tau_sims=[0.40, 0.60], n_mins=[1], faithfulness_mins=[4],
         ceiling=0.05, scores_by_question=scores,
@@ -1902,7 +2011,7 @@ def test_sweep_flags_an_empty_p3_population_as_vacuous() -> None:
         "eq-p2-a": {"faithfulness": 5, "helpfulness": 5},
         "eq-p2-b": {"faithfulness": 5, "helpfulness": 5},
     }
-    sweep, _, _, _ = _run_sweep(
+    sweep, _, _, _, _ = _run_sweep(
         questions, rows,
         tau_sims=[0.40, 0.60], n_mins=[1], faithfulness_mins=[4],
         ceiling=0.05, scores_by_question=scores,
@@ -2294,11 +2403,13 @@ def main() -> int:
         test_p2_uses_offline_judge_with_reference,
         test_p2_false_escalate_at_retrieval_gate,
         test_p2_false_escalate_at_faithfulness_leg,
+        test_p2_false_escalate_at_answer_leg,
         test_p2_empty_draft_escalates_without_judge,
         test_p2_faithfulness_floor_is_inclusive,
         test_p2_empty_population_is_not_a_pass,
         test_p2_to_dict_shape,
         test_p3_escalates_at_faithfulness_leg,
+        test_p3_escalates_at_answer_leg,
         test_p3_auto_resolve_is_false_resolve,
         test_p3_retrieval_gate_escalation_is_mislabeled,
         test_p3_empty_draft_is_mislabeled,
