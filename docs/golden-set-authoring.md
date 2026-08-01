@@ -145,13 +145,13 @@ Add one `escalation` label per question in `evals/retrieval/escalation_gold.yaml
 |---|---|---|---|
 | `no_context` | P1a | Answer is absent from the corpus; expected to escalate at the retrieval gate. | none (by definition) |
 | `answerable_faithful` | P2 | Strong retrieval **and** a faithful grounded answer exists; expected to deflect. | required |
-| `should_escalate` | P3 | Strong retrieval **but** no faithful answer exists; must escalate. Auto-resolving here is a false-resolve - the safety metric. | required |
+| `should_escalate` | P3 | Strong retrieval **but** no grounded answer that answers the question exists; must escalate at a content gate (faithfulness or the issue-#97 answer gate). Auto-resolving here is a false-resolve - the safety metric. | required |
 
 P2-vs-P3 is the single judgment that cannot be derived: "does a faithful answer actually exist from these chunks?" is a human call.
 Everything else in the escalation suite (the P1b no-access replay, the leak checks) is derived from the gold you already labeled.
 
 **Author your P3 rows to span the swept τ_sim grid, not to cluster below it.**
-A P3 row only proves something about the *faithfulness* gate if it first *clears* the *retrieval* gate: a row that escalates earlier is scored `mislabeled` and can never be tallied a false-resolve.
+A P3 row only proves something about the *content* gates (faithfulness or answer) if it first *clears* the *retrieval* gate: a row that escalates earlier is scored `mislabeled` and can never be tallied a false-resolve.
 So a P3 population whose retrieval similarity all sits below the top of the τ_sim grid makes the false-resolve rate fall to a clean-looking 0% at high τ_sim purely because nothing is being measured there — see `docs/evals.md` §6 for the guards that catch this on the main leg, and the `P3 exercised` column that exposes it per grid point in the sweep.
 The grid is `--sweep-tau-sim` (default `0.30,0.40,0.50`), so "the top of the grid" means τ_sim=0.50 today and a row only counts toward coverage there if its measured top-1 cosine clears it; widen the flag and the bar moves with it.
 The practical rule when authoring: ask what the chunk **is already about**, and vary only a parameter the corpus never covers.

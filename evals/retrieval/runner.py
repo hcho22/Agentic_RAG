@@ -798,6 +798,89 @@ async def judge_answer(
     raise RuntimeError("judge response did not contain submit_scores tool_use block")
 
 
+# The OFFLINE answer-completeness judge (issue #96/#97). Mirrors `judge_answer`
+# but scores a SECOND, orthogonal dimension the runtime `escalation.answer_gate`
+# owns: does the draft actually ANSWER the question, as opposed to being grounded?
+# A grounded "I don't have that information" is trivially faithful (zero
+# unsupported claims) yet answers nothing, so the E7 P2/P3 legs must model this
+# gate too or every grounded P3 deferral scores as a false-resolve (issue #96).
+# It is deliberately the OFFLINE cross-family Claude judge (like `judge_answer`),
+# NOT the runtime one-call `answer_gate` — so the E7 measurement stays independent
+# of the very gate it validates. Like the runtime gate it compares the QUESTION
+# against the DRAFT only (grounding is `judge_answer`'s job), so it needs neither
+# the reference nor the retrieved context.
+ANSWER_JUDGE_PROMPT_TEMPLATE = (
+    "You are a strict answer-completeness judge for an automated customer-support "
+    "reply. You are given the customer's QUESTION and a draft ANSWER. Decide "
+    "whether the ANSWER actually answers the QUESTION — that it provides the "
+    "specific information the customer asked for. A reply that says it does not "
+    "have the information, that it cannot help, that it is unsure, that it defers "
+    "the customer to a human, or that answers only a DIFFERENT question than the "
+    "one asked, does NOT answer the question. Judge ONLY whether the question is "
+    "answered — not grounding, tone, or politeness (a blunt but responsive answer "
+    "still answers; a warm apology that gives no information does not).\n\n"
+    "QUESTION:\n{question}\n\n"
+    "ANSWER:\n{answer}\n\n"
+    "Submit your verdict via the submit_answering tool."
+)
+
+ANSWER_JUDGE_TOOL = {
+    "name": "submit_answering",
+    "description": "Submit whether the ANSWER actually answers the QUESTION.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "answers": {
+                "type": "boolean",
+                "description": (
+                    "True iff the ANSWER actually answers the QUESTION with the "
+                    "specific information requested; False if it defers, says it "
+                    "lacks the information, cannot help, or answers a different "
+                    "question."
+                ),
+            },
+        },
+        "required": ["answers"],
+    },
+}
+
+
+async def judge_answering(
+    anthropic_client: Any,
+    question: str,
+    answer: str,
+) -> bool:
+    """Score whether `answer` actually answers `question` via Claude. Returns a bool.
+
+    The OFFLINE cross-family mirror of the runtime `escalation.answer_gate` (issue
+    #97): tool-use rather than freeform JSON guarantees a schema-validated boolean.
+    Sees only the QUESTION and the DRAFT — grounding is `judge_answer`'s concern,
+    exactly as the runtime answer gate keeps the two dimensions orthogonal.
+    """
+    response = await anthropic_client.messages.create(
+        model=JUDGE_MODEL,
+        max_tokens=JUDGE_MAX_TOKENS,
+        temperature=0,
+        tools=[ANSWER_JUDGE_TOOL],
+        tool_choice={"type": "tool", "name": "submit_answering"},
+        messages=[
+            {
+                "role": "user",
+                "content": ANSWER_JUDGE_PROMPT_TEMPLATE.format(
+                    question=question, answer=answer
+                ),
+            }
+        ],
+    )
+    for block in response.content:
+        if (
+            getattr(block, "type", None) == "tool_use"
+            and block.name == "submit_answering"
+        ):
+            return bool(block.input["answers"])
+    raise RuntimeError("judge response did not contain submit_answering tool_use block")
+
+
 # ---------------------------------------------------------------------------
 # Eval loop + aggregation
 # ---------------------------------------------------------------------------
