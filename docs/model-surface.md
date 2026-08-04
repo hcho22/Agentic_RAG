@@ -168,6 +168,12 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > the chance of a silent surprise; it is not a safety net. It never blocks startup
 > and never changes a gate decision.
 >
+> The warning is also scoped to the **support-widget** surface: those gates only
+> run on the widget path, so a knowledge-assistant-only deploy (no
+> `SUPABASE_SERVICE_ROLE_KEY`, every `/widget/*` route 503s) makes no judge call
+> and gets no warning regardless of `JUDGE_MODEL` / `JUDGE_TEMPERATURE`. Nothing
+> in this section applies to such a deploy.
+>
 > The remedy is deliberately a typed-out configuration statement rather than
 > something the gates infer from the provider's error text. Classifying free-text
 > 400s from arbitrary providers on a safety path is unsafe in *both* directions -

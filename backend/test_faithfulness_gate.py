@@ -342,8 +342,11 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
     while the pin is in effect, stays quiet once the operator has typed out the
     opt-out, and stays quiet for a name it does not recognise (best-effort by
     construction - an unrecognised refusing deployment gets no warning at all). It
-    must also never raise and never move a gate verdict, since it is an advisory
-    boot-time log rather than a gate input.
+    is also SCOPED to the widget surface (AGENTS.md invariant 10): with support
+    unconfigured the gates it warns about can never run, so it must stay silent for
+    EVERY model/pin combination that would otherwise warn. It must also never raise
+    and never move a gate verdict, since it is an advisory boot-time log rather than
+    a gate input.
     """
     records: list[logging.LogRecord] = []
 
@@ -364,7 +367,7 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
                     os.environ.pop("JUDGE_TEMPERATURE", None)
                 else:
                     os.environ["JUDGE_TEMPERATURE"] = temp
-                warn_if_judge_rejects_temperature()
+                warn_if_judge_rejects_temperature(support_configured=True)
                 _check(
                     len(records) == 1,
                     f"JUDGE_MODEL={model!r} with JUDGE_TEMPERATURE={temp!r} must warn "
@@ -394,7 +397,7 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
             # The typed-out opt-out is the remedy, so it must silence the warning.
             records.clear()
             os.environ["JUDGE_TEMPERATURE"] = "none"
-            warn_if_judge_rejects_temperature()
+            warn_if_judge_rejects_temperature(support_configured=True)
             _check(
                 not records,
                 f"JUDGE_MODEL={model!r} with the opt-out set must NOT warn, got "
@@ -423,19 +426,39 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
             else:
                 os.environ["JUDGE_MODEL"] = model
             os.environ["JUDGE_TEMPERATURE"] = "0"
-            warn_if_judge_rejects_temperature()
+            warn_if_judge_rejects_temperature(support_configured=True)
             _check(
                 not records,
                 f"JUDGE_MODEL={model!r} is not a known refuser and must NOT warn, got "
                 f"{[r.getMessage() for r in records]!r}",
             )
 
+        # Invariant 10: the gates only run on the support-widget path, so a deploy
+        # with that surface unconfigured must get NO warning whatever the judge
+        # configuration says - the message would describe conversations latching in
+        # a deploy that has none. Same models and pins that warned above.
+        for model in ("o4-mini", "gpt-5-mini", "O3", "gpt-5.1-mini"):
+            for temp in (None, "0", "0.7"):
+                records.clear()
+                os.environ["JUDGE_MODEL"] = model
+                if temp is None:
+                    os.environ.pop("JUDGE_TEMPERATURE", None)
+                else:
+                    os.environ["JUDGE_TEMPERATURE"] = temp
+                warn_if_judge_rejects_temperature(support_configured=False)
+                _check(
+                    not records,
+                    f"JUDGE_MODEL={model!r} with JUDGE_TEMPERATURE={temp!r} must NOT "
+                    "warn when the widget surface is unconfigured, got "
+                    f"{[r.getMessage() for r in records]!r}",
+                )
+
         # The warning is advisory: it never raises, and a gate evaluated on either
         # side of it returns the identical verdict.
         os.environ["JUDGE_MODEL"] = "o4-mini"
         os.environ["JUDGE_TEMPERATURE"] = "0"
         before, _ = _run(_judgment(True, 0.9), "Returns within 30 days.")
-        warn_if_judge_rejects_temperature()
+        warn_if_judge_rejects_temperature(support_configured=True)
         after, fake = _run(_judgment(True, 0.9), "Returns within 30 days.")
         _check(
             before == after and after.faithful is True,
@@ -455,7 +478,10 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-    print("ok: boot warning fires for known temperature-refusing judge models only")
+    print(
+        "ok: boot warning fires for known temperature-refusing judge models only, "
+        "and only where the widget surface is configured"
+    )
 
 
 def test_context_and_draft_reach_the_judge() -> None:

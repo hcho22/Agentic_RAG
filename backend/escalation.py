@@ -424,8 +424,21 @@ _TEMPERATURE_REFUSING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 _NON_REASONING_CHAT_MARKER = "-chat"
 
 
-def warn_if_judge_rejects_temperature() -> None:
+def warn_if_judge_rejects_temperature(*, support_configured: bool) -> None:
     """Log ONCE at boot if the judge model NAME matches a known refusing family.
+
+    `support_configured` is the caller's answer to "can these gates ever run on
+    this deploy?" - the two gates execute only on the support-widget path
+    (`support_bot` -> `run_deflection_pipeline`), and per AGENTS.md invariant 10 a
+    knowledge-assistant-only deploy leaves the widget surface unconfigured, so every
+    `/widget/*` route 503s and no judge call is ever made. Passing `False` returns
+    without logging: the message below is accurate in itself, but its PREMISE does
+    not hold for that operator - it would describe conversations latching in a
+    deploy that has no conversations. A correct warning shown to the wrong audience
+    is still wrong, and invariant 10 says such a deploy is UNAFFECTED by the support
+    surface. It is a required argument rather than an env read here so the caller
+    that owns the widget-surface predicate states it explicitly, and so both
+    directions are pinnable without booting the app.
 
     Best-effort operator aid, nothing more, and wrong in both directions. It
     compares the configured `JUDGE_MODEL` against the hand-maintained
@@ -459,6 +472,8 @@ def warn_if_judge_rejects_temperature() -> None:
     warning that could take the service down would be worse than the surprise it
     warns about.
     """
+    if not support_configured:
+        return
     if get_judge_temperature() is None:
         return
     model = get_judge_model()
