@@ -199,7 +199,9 @@ class _JudgeCompletions:
         self.answer_parsed = answer_parsed
         self.calls = 0
 
-    async def parse(self, *, model: str, messages: Any, response_format: Any) -> Any:
+    async def parse(
+        self, *, model: str, messages: Any, response_format: Any, **kwargs: Any
+    ) -> Any:
         self.calls += 1
         parsed = (
             self.answer_parsed

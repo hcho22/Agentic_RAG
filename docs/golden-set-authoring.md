@@ -145,7 +145,7 @@ Add one `escalation` label per question in `evals/retrieval/escalation_gold.yaml
 |---|---|---|---|
 | `no_context` | P1a | Answer is absent from the corpus; expected to escalate at the retrieval gate. | none (by definition) |
 | `answerable_faithful` | P2 | Strong retrieval **and** a faithful grounded answer exists; expected to deflect. | required |
-| `should_escalate` | P3 | Strong retrieval **but** no grounded answer that answers the question exists; must escalate at a content gate (faithfulness or the issue-#97 answer gate). Auto-resolving here is a false-resolve - the safety metric. | required |
+| `should_escalate` | P3 | Strong retrieval **but** no grounded answer that answers the question exists; must escalate at a content gate (faithfulness or the issue-#97 answer gate). This includes the case where the corpus's *own* answer is a deferral - "quoted per-case", "at the discretion of customer service" - since a faithful restatement of it still leaves the customer without the value they asked for (issue #104). Auto-resolving here is a false-resolve - the safety metric. | required |
 
 P2-vs-P3 is the single judgment that cannot be derived: "does a faithful answer actually exist from these chunks?" is a human call.
 Everything else in the escalation suite (the P1b no-access replay, the leak checks) is derived from the gold you already labeled.
