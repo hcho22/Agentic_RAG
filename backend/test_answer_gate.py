@@ -16,6 +16,8 @@ Covers:
   * a non-answer / deferral -> fails (escalate);
   * EXACTLY ONE judge call per evaluation;
   * a forced judge exception -> non-answer (fail-closed, escalate);
+  * a judge model that REJECTS `temperature` -> retried once WITHOUT it, yielding a
+    real verdict rather than a fail-closed escalate, then remembered;
   * the cutoff `>=` boundary, refusal / empty-choices / missing-payload
     fail-closed paths, score clamping to [0,1], and that the QUESTION + DRAFT (but
     NOT the chunks) reach the judge — grounding is the other gate's job.
@@ -39,9 +41,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from escalation import (  # noqa: E402
+    _TEMPERATURE_REJECTING_MODELS,
     AnswerDecision,
     AnswerJudgment,
     answer_gate,
+    get_judge_model,
 )
 
 CUTOFF = 0.5
@@ -67,6 +71,10 @@ class _FakeCompletions:
         self.messages_used: list[dict[str, str]] | None = None
         self.response_format_used: Any = None
         self.extra_kwargs: dict[str, Any] = {}
+        # One entry per call. The temperature fallback is a TWO-call path whose
+        # whole point is that the two calls differ, so the last-write-wins
+        # `extra_kwargs` alone cannot pin it.
+        self.kwargs_history: list[dict[str, Any]] = []
 
     async def parse(
         self,
@@ -83,6 +91,7 @@ class _FakeCompletions:
         # Issue #104: the gate pins the sampler, so the kwargs it splats in are
         # part of its contract and get recorded like `model` / `messages`.
         self.extra_kwargs = kwargs
+        self.kwargs_history.append(kwargs)
         return self._behavior()  # may raise
 
 
@@ -98,6 +107,39 @@ class _FakeJudge:
 def _client(behavior: Callable[[], Any]) -> tuple[AsyncOpenAI, _FakeJudge]:
     fake = _FakeJudge(behavior)
     return cast(AsyncOpenAI, fake), fake
+
+
+def _api_error(message: str, status_code: int) -> Exception:
+    """An SDK-shaped error carrying an HTTP status, like the real client raises."""
+    e = Exception(message)
+    e.status_code = status_code  # type: ignore[attr-defined]
+    return e
+
+
+class _RejectsTemperature:
+    """A judge model that 400s on any call carrying `temperature`.
+
+    The shape OpenAI reasoning models (o-series, `gpt-5-*`) present. Mirrors the
+    helper in `test_faithfulness_gate.py`: the two gates share `_judge_parse`, so
+    the fallback has to be pinned on BOTH of them, not just the one that is easier
+    to reach.
+    """
+
+    def __init__(self, judgment: Callable[[], Any]) -> None:
+        self._judgment = judgment
+        self._completions: _FakeCompletions | None = None
+
+    def bind(self, fake: _FakeJudge) -> None:
+        self._completions = cast(_FakeCompletions, fake.chat.completions)
+
+    def __call__(self) -> Any:
+        assert self._completions is not None, "bind() the fake judge first"
+        if "temperature" in self._completions.extra_kwargs:
+            raise _api_error(
+                "Unsupported parameter: 'temperature' is not supported with this model.",
+                400,
+            )
+        return self._judgment()
 
 
 def _completion(
@@ -254,6 +296,95 @@ def test_judge_sampling_is_pinned_deterministic() -> None:
     print("ok: the answer gate's judge call pins temperature=0")
 
 
+def test_temperature_rejecting_model_falls_back_to_a_real_verdict() -> None:
+    """This gate must survive a judge model that REJECTS `temperature`, too.
+
+    Both gates now send the parameter, so both regressed the same working
+    configurations (an OpenAI reasoning model was a fine `JUDGE_MODEL` when
+    neither gate sent it). The fallback lives in the shared `_judge_parse`, and
+    that sharing is exactly why it has to be pinned here as well as on the
+    faithfulness gate - a future refactor could re-inline one of them.
+
+    The fallback yields a REAL verdict: never `judge_error`, never fail-closed,
+    so it never reaches the one-way conversation latch. It costs two calls the
+    first time the rejecting model is seen and one call thereafter.
+    """
+    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    try:
+        behavior = _RejectsTemperature(_judgment(True, 0.9))
+        client, fake = _client(behavior)
+        behavior.bind(fake)
+        d = asyncio.run(answer_gate(client, QUESTION, "The fee is $14.95.", CUTOFF))
+
+        _check(d.answers is True, f"the fallback must yield a REAL verdict, got {d!r}")
+        _check(
+            d.reason == "answers",
+            f"the fallback must not be reported as a judge failure, got {d.reason!r}",
+        )
+        comp = cast(_FakeCompletions, fake.chat.completions)
+        _check(fake.calls == 2, f"the fallback path makes exactly two calls, got {fake.calls}")
+        _check(
+            comp.kwargs_history == [{"temperature": 0.0}, {}],
+            f"call 1 must carry the pin and call 2 must omit it, got {comp.kwargs_history!r}",
+        )
+        _check(
+            get_judge_model() in _TEMPERATURE_REJECTING_MODELS,
+            "the rejecting model must be remembered so later calls skip the probe",
+        )
+
+        behavior2 = _RejectsTemperature(_judgment(True, 0.9))
+        client2, fake2 = _client(behavior2)
+        behavior2.bind(fake2)
+        d2 = asyncio.run(answer_gate(client2, QUESTION, "The fee is $14.95.", CUTOFF))
+        _check(d2.answers is True, f"the remembered path must still answer, got {d2!r}")
+        _check(fake2.calls == 1, f"a remembered rejection costs ONE call, got {fake2.calls}")
+        _check(
+            cast(_FakeCompletions, fake2.chat.completions).kwargs_history == [{}],
+            "a remembered rejection must send no temperature at all",
+        )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+    print("ok: a temperature-rejecting judge falls back to a real verdict, once")
+
+
+def test_unrelated_bad_request_still_fails_closed() -> None:
+    """Only a 400 that names `temperature` is retried; everything else fails closed.
+
+    A rate limit or an auth failure is a DEGRADED judge. Retrying it un-pinned
+    would both hide it and return a safety gate to sampling, so the narrowness of
+    the fallback is the safety property here, not an implementation detail.
+    """
+    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    try:
+        for label, exc in (
+            ("other 400", _api_error("Invalid schema for response_format", 400)),
+            ("rate limit", _api_error("Rate limit reached for requests", 429)),
+            ("auth", _api_error("Incorrect API key provided", 401)),
+            ("429 naming temperature", _api_error("temperature is not supported", 429)),
+        ):
+            def boom(e: Exception = exc) -> Any:
+                raise e
+
+            d, fake = _run(boom, "The fee is $14.95.")
+            _check(d.answers is False, f"{label}: must fail CLOSED, got {d!r}")
+            _check(
+                d.reason == "non_answer: judge_error",
+                f"{label}: must stay a judge_error, got {d.reason!r}",
+            )
+            _check(fake.calls == 1, f"{label}: must not retry, got {fake.calls} calls")
+        _check(
+            not _TEMPERATURE_REJECTING_MODELS,
+            "an unrelated failure must never mark the model as rejecting the parameter",
+        )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+    print("ok: every non-temperature failure still fails closed in one call")
+
+
 def test_decision_is_frozen() -> None:
     d = AnswerDecision(answers=True, addressed=True, score=0.9, reason="answers")
     try:
@@ -274,6 +405,8 @@ def main() -> int:
         test_score_clamped_to_unit_interval,
         test_question_and_draft_reach_the_judge,
         test_judge_sampling_is_pinned_deterministic,
+        test_temperature_rejecting_model_falls_back_to_a_real_verdict,
+        test_unrelated_bad_request_still_fails_closed,
         test_decision_is_frozen,
     ]
     for t in tests:

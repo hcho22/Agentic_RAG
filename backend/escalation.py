@@ -26,7 +26,11 @@ treated as unfaithful (⇒ escalate), never auto-sent. This runtime gate is a
 NET-NEW one-call check, NOT the offline RAGAS `faithfulness` metric in
 `evals/retrieval/ragas.py` (which decomposes claims across several calls and
 runs weekly); the same English word "faithfulness" names two distinct
-machineries on two different latency budgets.
+machineries on two different latency budgets. ("Exactly one" has one bounded
+exception, shared by both gates: a judge model that REJECTS the `temperature`
+parameter - OpenAI's o-series and `gpt-5-*` do - costs ONE extra call the first
+time it is seen, after which `_judge_parse` remembers it and sends no
+temperature, so every later call is a single call again.)
 
 Issue #97: `answer_gate` is a SECOND, distinct runtime judge — grounding and
 answering are orthogonal, and the faithfulness gate only checks the former. A
@@ -254,12 +258,21 @@ def get_judge_model() -> str:
 # on 2 of 5 identical calls for the same (question, draft) pair — the send/escalate
 # decision was partly a coin flip. Both gates now pin the sampler.
 #
+# What the pin buys, stated exactly: it REMOVES THE SAMPLER as a source of variance
+# in the send/escalate verdict. It is not a guarantee that an identical (question,
+# draft) can never yield a different verdict - no `seed` is passed, and
+# provider-side temperature 0 is best-effort, not contractual. The measured defect
+# it removes is real; the residual is model-side nondeterminism, which is a
+# different and much smaller thing.
+#
 # The escape hatch exists because ADR-0006 lets an operator point `JUDGE_MODEL` at
 # their own deployment, and some models REJECT a `temperature` argument outright
-# (a 400, which fails closed — correct, but it would wedge that deployment at zero
-# deflection forever). Setting `JUDGE_TEMPERATURE` to the literal `none` omits the
-# parameter instead. Setting it to a number is an explicit operator decision to
-# give up the determinism these gates depend on.
+# (a 400) - including first-party OpenAI reasoning models (o-series, `gpt-5-*`).
+# `_judge_parse` handles that automatically: it retries the call ONCE without the
+# parameter and remembers the model, so a working configuration is never broken by
+# the pin. Setting `JUDGE_TEMPERATURE` to the literal `none` omits the parameter
+# up front, skipping even that one probe. Setting it to a number is an explicit
+# operator decision to give up the determinism these gates depend on.
 #
 # The knob resolves as: unset ⇒ the pinned default; blank ⇒ the pinned default;
 # `none` ⇒ omit the parameter; anything else ⇒ a number, or the pinned default.
@@ -273,8 +286,10 @@ def get_judge_model() -> str:
 DEFAULT_JUDGE_TEMPERATURE = 0.0
 
 # The range providers accept for a chat-completion `temperature`. A value outside
-# it is a 400 on every call, i.e. the same zero-deflection wedge the `none` hatch
-# exists to prevent, reachable by a fat-fingered digit.
+# it is a 400 on every call, which fails both gates closed on every turn - and the
+# latch site cannot tell that from a deliberate escalate, so the conversations it
+# hits are permanently silenced. Reachable by a fat-fingered digit, so it falls
+# back rather than shipping.
 _JUDGE_TEMPERATURE_MAX = 2.0
 
 
@@ -308,8 +323,9 @@ def _resolve_judge_temperature(raw: str | None) -> float | None:
     if not math.isfinite(value) or not 0.0 <= value <= _JUDGE_TEMPERATURE_MAX:
         log.warning(
             "JUDGE_TEMPERATURE=%r is not a finite value in [0,%.1f]; the judge API "
-            "would reject it on every call and wedge the gate at zero deflection, "
-            "so using the deterministic default %.1f instead",
+            "would reject it on every call, failing both gates closed and "
+            "permanently latching every affected conversation, so using the "
+            "deterministic default %.1f instead",
             raw,
             _JUDGE_TEMPERATURE_MAX,
             DEFAULT_JUDGE_TEMPERATURE,
@@ -343,6 +359,111 @@ def _judge_sampling_kwargs() -> dict[str, float]:
     return {} if temperature is None else {"temperature": temperature}
 
 
+# Judge models observed to reject the `temperature` parameter, learned from the
+# provider's own 400 and remembered for the process lifetime. Without this, a
+# deployment on such a model would pay the rejected attempt on EVERY customer turn
+# - double latency and double spend forever - instead of once per model.
+_TEMPERATURE_REJECTING_MODELS: set[str] = set()
+
+# Phrases a provider uses when it is the `temperature` PARAMETER itself it will not
+# accept, as opposed to any other 400. OpenAI reasoning models (o-series, `gpt-5-*`)
+# answer "Unsupported parameter: 'temperature' is not supported with this model" or
+# "Unsupported value: 'temperature' does not support 0.0 with this model";
+# Anthropic-compatible endpoints answer "`temperature` is deprecated for this
+# model". Deliberately narrow: anything this does not match keeps the existing
+# fail-closed behaviour untouched.
+_TEMPERATURE_REJECTION_MARKERS = (
+    "unsupported parameter",
+    "unsupported value",
+    "not supported",
+    "does not support",
+    "deprecated",
+)
+
+
+def _looks_like_bad_request(e: BaseException) -> bool:
+    """True when `e` is the provider refusing the REQUEST (400), not failing it.
+
+    A rate limit, a timeout, an auth failure or a 5xx must never be read as a
+    parameter rejection: those are the transient/degraded failures the gates fail
+    closed on, and retrying them without the pin would only hide them.
+    """
+    for attr in ("status_code", "status"):
+        status = getattr(e, attr, None)
+        if isinstance(status, int):
+            return status == 400
+    return type(e).__name__ in ("BadRequestError", "InvalidRequestError")
+
+
+def _is_temperature_rejection(e: BaseException) -> bool:
+    """True only for a 400 that specifically names `temperature` as the problem."""
+    if not _looks_like_bad_request(e):
+        return False
+    message = str(e).lower()
+    param = ""
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        param = str((error if isinstance(error, dict) else body).get("param") or "")
+    if "temperature" not in message and param.lower() != "temperature":
+        return False
+    return any(marker in message for marker in _TEMPERATURE_REJECTION_MARKERS)
+
+
+def _note_temperature_rejection(model: str) -> None:
+    """Record - and announce ONCE per model - that the pin is off for `model`."""
+    if model in _TEMPERATURE_REJECTING_MODELS:
+        return
+    _TEMPERATURE_REJECTING_MODELS.add(model)
+    log.warning(
+        "judge model %r rejects the `temperature` parameter; retried without it and "
+        "will omit it for this model from now on. The runtime gates are running "
+        "UNPINNED for %r - their send/escalate verdict is sampled again, which is "
+        "the defect JUDGE_TEMPERATURE exists to remove. Point JUDGE_MODEL at a model "
+        "that accepts the parameter to get the pin back, or set "
+        "JUDGE_TEMPERATURE=none to make the un-pinned choice explicit.",
+        model,
+        model,
+    )
+
+
+async def _judge_parse(
+    judge_client: AsyncOpenAI,
+    *,
+    model: str,
+    messages: list[dict[str, str]],
+    response_format: type[BaseModel],
+) -> object:
+    """The ONE structured-output judge call both runtime gates make.
+
+    Normally exactly one call. A model that rejects the `temperature` parameter
+    costs one extra call ONCE - the rejection is remembered per model id, so every
+    later call for that model sends no temperature and is a single call again.
+
+    The retry fires ONLY on a 400 that names `temperature` (`_is_temperature_rejection`).
+    It is not a judge failure: it yields a REAL verdict, never `judge_error`, so it
+    cannot fail the gate closed or reach the escalation latch. Every other failure -
+    auth, rate limit, timeout, network, any other 400 - propagates unchanged to the
+    caller's fail-closed handler.
+    """
+    call = functools.partial(
+        judge_client.chat.completions.parse,
+        model=model,
+        messages=messages,
+        response_format=response_format,
+    )
+    sampling = {} if model in _TEMPERATURE_REJECTING_MODELS else _judge_sampling_kwargs()
+    if not sampling:
+        return await call()
+    try:
+        return await call(**sampling)
+    except Exception as e:  # noqa: BLE001 — re-raised unless it is a parameter rejection
+        if not _is_temperature_rejection(e):
+            raise
+    _note_temperature_rejection(model)
+    return await call()
+
+
 def _render_context(chunks: list[SearchDocumentsResult]) -> str:
     return "\n\n".join(f"[{i + 1}] {c.content}" for i, c in enumerate(chunks))
 
@@ -365,7 +486,10 @@ async def faithfulness_gate(
     metric (see the module banner); it never decomposes claims or makes a second
     call.
 
-    Sampled at `JUDGE_TEMPERATURE` (default 0) — see `get_judge_temperature`.
+    Sampled at `JUDGE_TEMPERATURE` (default 0) - see `get_judge_temperature`. A
+    judge model that REJECTS the `temperature` parameter costs one extra call
+    once per process (`_judge_parse` retries without it and remembers the
+    model), then none.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (
@@ -374,14 +498,14 @@ async def faithfulness_gate(
         "Is every claim in the ANSWER supported by the CONTEXT?"
     )
     try:
-        completion = await judge_client.chat.completions.parse(
+        completion = await _judge_parse(
+            judge_client,
             model=resolved_model,
             messages=[
                 {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             response_format=FaithfulnessJudgment,
-            **_judge_sampling_kwargs(),
         )
     except Exception as e:  # noqa: BLE001 — any SDK/API/timeout failure fails closed
         log.warning("faithfulness judge call failed: %s", e)
@@ -543,7 +667,10 @@ async def answer_gate(
     (escalate), never open. Compares the QUESTION against the DRAFT only; grounding
     is `faithfulness_gate`'s job, not this gate's.
 
-    Sampled at `JUDGE_TEMPERATURE` (default 0) — see `get_judge_temperature`.
+    Sampled at `JUDGE_TEMPERATURE` (default 0) - see `get_judge_temperature`. A
+    judge model that REJECTS the `temperature` parameter costs one extra call
+    once per process (`_judge_parse` retries without it and remembers the
+    model), then none.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (
@@ -552,14 +679,14 @@ async def answer_gate(
         "Does the ANSWER actually answer the QUESTION?"
     )
     try:
-        completion = await judge_client.chat.completions.parse(
+        completion = await _judge_parse(
+            judge_client,
             model=resolved_model,
             messages=[
                 {"role": "system", "content": _ANSWER_JUDGE_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             response_format=AnswerJudgment,
-            **_judge_sampling_kwargs(),
         )
     except Exception as e:  # noqa: BLE001 — any SDK/API/timeout failure fails closed
         log.warning("answer-completeness judge call failed: %s", e)

@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from escalation import (  # noqa: E402
+    _TEMPERATURE_REJECTING_MODELS,
     DEFAULT_JUDGE_MODEL,
     FaithfulnessDecision,
     FaithfulnessJudgment,
@@ -72,6 +73,10 @@ class _FakeCompletions:
         self.model_used: str | None = None
         self.messages_used: list[dict[str, str]] | None = None
         self.extra_kwargs: dict[str, Any] = {}
+        # One entry per call. The temperature fallback is a TWO-call path whose
+        # whole point is that the two calls differ, so the last-write-wins
+        # `extra_kwargs` alone cannot pin it.
+        self.kwargs_history: list[dict[str, Any]] = []
 
     async def parse(
         self,
@@ -87,6 +92,7 @@ class _FakeCompletions:
         # Issue #104: the gate pins the sampler, so the kwargs it splats in are
         # part of its contract and get recorded like `model` / `messages`.
         self.extra_kwargs = kwargs
+        self.kwargs_history.append(kwargs)
         return self._behavior()  # may raise
 
 
@@ -102,6 +108,41 @@ class _FakeJudge:
 def _client(behavior: Callable[[], Any]) -> tuple[AsyncOpenAI, _FakeJudge]:
     fake = _FakeJudge(behavior)
     return cast(AsyncOpenAI, fake), fake
+
+
+def _api_error(message: str, status_code: int) -> Exception:
+    """An SDK-shaped error carrying an HTTP status, like the real client raises."""
+    e = Exception(message)
+    e.status_code = status_code  # type: ignore[attr-defined]
+    return e
+
+
+def _bad_request(message: str) -> Exception:
+    return _api_error(message, 400)
+
+
+class _RejectsTemperature:
+    """A judge model that 400s on any call carrying `temperature`.
+
+    The shape OpenAI reasoning models (o-series, `gpt-5-*`) present. Stateless
+    apart from the completions object it reads the current call's kwargs from,
+    which is bound after construction because the fake client owns it.
+    """
+
+    def __init__(self, judgment: Callable[[], Any]) -> None:
+        self._judgment = judgment
+        self._completions: _FakeCompletions | None = None
+
+    def bind(self, fake: _FakeJudge) -> None:
+        self._completions = cast(_FakeCompletions, fake.chat.completions)
+
+    def __call__(self) -> Any:
+        assert self._completions is not None, "bind() the fake judge first"
+        if "temperature" in self._completions.extra_kwargs:
+            raise _bad_request(
+                "Unsupported parameter: 'temperature' is not supported with this model."
+            )
+        return self._judgment()
 
 
 def _completion(
@@ -292,8 +333,12 @@ def test_judge_sampling_is_pinned_deterministic() -> None:
             "a malformed JUDGE_TEMPERATURE must fall back to the deterministic default",
         )
 
-        # A value the judge API would 400 on is the same zero-deflection wedge the
-        # `none` hatch exists to prevent, so it falls back rather than shipping.
+        # A value the judge API would 400 on fails both gates closed on every turn,
+        # and the latch site cannot tell that from a deliberate escalate - so it
+        # permanently silences the conversations it hits. It falls back rather than
+        # shipping. (Unlike a model that rejects the PARAMETER, an out-of-range
+        # value is the operator's own typo, so it is corrected here rather than
+        # retried at call time.)
         for rejected in ("nan", "inf", "-inf", "50", "-0.5", "2.5"):
             os.environ["JUDGE_TEMPERATURE"] = rejected
             _check(
@@ -330,6 +375,102 @@ def test_context_and_draft_reach_the_judge() -> None:
     print("ok: draft + chunk content are passed to the judge")
 
 
+def test_temperature_rejecting_model_falls_back_to_a_real_verdict() -> None:
+    """A model that REJECTS `temperature` must still produce a verdict.
+
+    Pinning the sampler must not break a configuration that worked before it: both
+    gates previously sent no `temperature` at all, so an OpenAI reasoning model
+    (o-series, `gpt-5-*`) was a working `JUDGE_MODEL`. Sending the parameter makes
+    those 400 on every call, and a permanently-failing judge does not merely lose
+    deflection - the latch site cannot tell it from a deliberate escalate, so it
+    pins `conversations.status='escalated'` one-way.
+
+    So the rejection is retried ONCE without the parameter, and the retry is a real
+    verdict: never `judge_error`, never fail-closed. The rejecting model is then
+    remembered, so the next call is a SINGLE call again - one 400 per process per
+    model, not one per customer turn.
+    """
+    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    try:
+        behavior = _RejectsTemperature(_judgment(True, 0.9))
+        client, fake = _client(behavior)
+        behavior.bind(fake)
+        d = asyncio.run(faithfulness_gate(client, "Returns within 30 days.", CHUNKS, CUTOFF))
+
+        _check(d.faithful is True, f"the fallback must yield a REAL verdict, got {d!r}")
+        _check(
+            d.reason == "faithful",
+            f"the fallback must not be reported as a judge failure, got {d.reason!r}",
+        )
+        comp = cast(_FakeCompletions, fake.chat.completions)
+        _check(fake.calls == 2, f"the fallback path makes exactly two calls, got {fake.calls}")
+        _check(
+            comp.kwargs_history == [{"temperature": 0.0}, {}],
+            f"call 1 must carry the pin and call 2 must omit it, got {comp.kwargs_history!r}",
+        )
+        _check(
+            get_judge_model() in _TEMPERATURE_REJECTING_MODELS,
+            "the rejecting model must be remembered so later calls skip the probe",
+        )
+
+        # Second invocation: the rejection is already known, so it is ONE call
+        # that never carries the parameter.
+        behavior2 = _RejectsTemperature(_judgment(True, 0.9))
+        client2, fake2 = _client(behavior2)
+        behavior2.bind(fake2)
+        d2 = asyncio.run(faithfulness_gate(client2, "Returns within 30 days.", CHUNKS, CUTOFF))
+        _check(d2.faithful is True, f"the remembered path must still answer, got {d2!r}")
+        _check(fake2.calls == 1, f"a remembered rejection costs ONE call, got {fake2.calls}")
+        _check(
+            cast(_FakeCompletions, fake2.chat.completions).kwargs_history == [{}],
+            "a remembered rejection must send no temperature at all",
+        )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+    print("ok: a temperature-rejecting judge falls back to a real verdict, once")
+
+
+def test_unrelated_bad_request_still_fails_closed() -> None:
+    """The fallback is narrow ON PURPOSE: only a 400 that names `temperature`.
+
+    Every other failure - auth, rate limit, timeout, network, any OTHER 400 - is
+    a degraded judge, and retrying it without the pin would hide it while
+    un-pinning a safety gate. Those keep the existing fail-closed behaviour,
+    unchanged and in one call.
+    """
+    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    try:
+        for label, exc in (
+            ("other 400", _bad_request("Invalid schema for response_format")),
+            ("rate limit", _api_error("Rate limit reached for requests", 429)),
+            ("auth", _api_error("Incorrect API key provided", 401)),
+            # A 429 whose body happens to mention temperature must NOT be read as
+            # a parameter rejection: the status is what says the request was refused.
+            ("429 naming temperature", _api_error("temperature is not supported", 429)),
+        ):
+            def boom(e: Exception = exc) -> Any:
+                raise e
+
+            d, fake = _run(boom, "Returns within 30 days.")
+            _check(d.faithful is False, f"{label}: must fail CLOSED, got {d!r}")
+            _check(
+                d.reason == "unfaithful: judge_error",
+                f"{label}: must stay a judge_error, got {d.reason!r}",
+            )
+            _check(fake.calls == 1, f"{label}: must not retry, got {fake.calls} calls")
+        _check(
+            not _TEMPERATURE_REJECTING_MODELS,
+            "an unrelated failure must never mark the model as rejecting the parameter",
+        )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+    print("ok: every non-temperature failure still fails closed in one call")
+
+
 def test_decision_is_frozen() -> None:
     d = FaithfulnessDecision(faithful=True, supported=True, score=0.9, reason="faithful")
     try:
@@ -351,6 +492,8 @@ def main() -> int:
         test_judge_model_selector,
         test_judge_sampling_is_pinned_deterministic,
         test_context_and_draft_reach_the_judge,
+        test_temperature_rejecting_model_falls_back_to_a_real_verdict,
+        test_unrelated_bad_request_still_fails_closed,
         test_decision_is_frozen,
     ]
     for t in tests:

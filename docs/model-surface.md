@@ -121,26 +121,42 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > sampling one rather than deciding it - the 2026-08-03 E7 investigation measured
 > the answer gate returning `answers=true` on 2 of 5 identical calls for the same
 > (question, draft) pair (issue #104). Both gates therefore send `temperature=0`
-> by default.
+> by default. That **removes the sampler** as a source of variance in the
+> send/escalate verdict; it is best-effort, not a guarantee - no `seed` is passed
+> and provider-side temperature 0 is itself best-effort, so a differing verdict on
+> an identical pair is unlikely rather than impossible.
 >
-> The escape hatch is for a bring-your-own judge: some non-OpenAI deployments
-> **reject** a `temperature` argument with a 400, which fails closed on every
-> turn, and that costs more than deflection. A judge that 400s makes both gates
-> fail closed, `run_deflection_pipeline` returns `action='escalated'`, and the
-> latch site in `backend/main.py` tests only `result.turn.escalated` - it cannot
-> tell that from a **deliberate** ADR-0003 escalate, so it calls
-> `_escalate_conversation_safe` and pins `conversations.status='escalated'`. That
-> transition is one-way and DB-trigger-enforced (AGENTS.md invariant 5), so the
-> blast radius is **permanent per-conversation bot silence**, not merely lost
-> deflection. Repairing the configuration stops NEW conversations from latching;
-> it does **not** un-latch the ones already latched, which stay `escalated` with
-> the bot silent in them, because the status transition cannot be reversed. The
-> failure is not self-healing, so set `JUDGE_TEMPERATURE=none` **before** pointing
-> `JUDGE_MODEL` at a deployment that rejects the parameter. The underlying defect
-> - that a transient or misconfigured judge failure is indistinguishable from a
-> deliberate escalate at the latch site, contradicting both invariant 8 ("a
-> degraded/transient failure defers this turn but does NOT latch") and the
-> `_escalate_conversation_safe` docstring - is **not yet fixed**; follow-up task
+> **Models that reject the parameter are handled automatically.** Some judge
+> deployments **reject** a `temperature` argument with a 400 - not only
+> bring-your-own endpoints, but first-party OpenAI **reasoning models**
+> (o-series, `gpt-5-*`), which are a plausible `JUDGE_MODEL` choice. Both gates
+> therefore retry that one call **without** `temperature` when (and only when) the
+> 400 specifically names the parameter, use the result normally, and remember the
+> model id - so a rejecting model costs one extra call once per process, then
+> none. The fallback is **not** a judge failure: it yields a real verdict, never
+> `judge_error`, and never fails a gate closed. It logs one `warning` per model
+> naming it and stating the gates are running **unpinned** for it. Any other
+> failure - auth, rate limit, timeout, network, any other 400 - still fails closed
+> exactly as before.
+>
+> **Why that matters, and the residual risk.** A judge that fails on *every* call
+> for a reason the fallback does not cover makes both gates fail closed,
+> `run_deflection_pipeline` returns `action='escalated'`, and the latch site in
+> `backend/main.py` tests only `result.turn.escalated` - it cannot tell that from
+> a **deliberate** ADR-0003 escalate, so it calls `_escalate_conversation_safe`
+> and pins `conversations.status='escalated'`. That transition is one-way and
+> DB-trigger-enforced (AGENTS.md invariant 5), so the blast radius is **permanent
+> per-conversation bot silence**, not merely lost deflection. Repairing the
+> configuration stops NEW conversations from latching; it does **not** un-latch
+> the ones already latched, which stay `escalated` with the bot silent in them,
+> because the status transition cannot be reversed. The failure is not
+> self-healing, so verify a new `JUDGE_MODEL` answers before pointing production
+> at it, and set `JUDGE_TEMPERATURE=none` up front if you would rather not have
+> the gates probe the parameter at all. The underlying defect - that a transient
+> or misconfigured judge failure is indistinguishable from a deliberate escalate
+> at the latch site, contradicting both invariant 8 ("a degraded/transient failure
+> defers this turn but does NOT latch") and the `_escalate_conversation_safe`
+> docstring - is **not yet fixed**; follow-up task
 > `purvia-judge-error-latches-conversation` tracks it.
 >
 > Set `JUDGE_TEMPERATURE=none` to omit the parameter entirely. That literal

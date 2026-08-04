@@ -26,6 +26,22 @@ Keying on the first alone made the send/escalate verdict ride on whether
 `gpt-4o-mini` happened to append "Therefore, I don't have that information" — an
 observed coin flip across runs of the same row.
 
+A KNOWN LIMITATION of the issue-#104 clause
+-------------------------------------------
+The clause is stated UNCONDITIONALLY: a reply that only reports the answer is
+quoted case-by-case / at someone's discretion / decided by staff / unpublished
+"does NOT answer the question". It never conditions on WHAT was asked. That is
+right for the two E7 rows it was built from, which both ask for a value the
+corpus defers. It is wrong for a question whose correct answer genuinely IS the
+policy or the disposition — "Who decides a book warranty claim after 30 days?"
+is fully answered by "customer service, at their discretion", yet the rubric
+reads that draft as a deferral and escalates it.
+
+The last row of `_CASES` pins that shape at its CURRENT behaviour so a future
+rubric change cannot alter it unnoticed. Fixing the clause means editing both
+rubric strings, which invalidates the live measurement they were validated
+against, so it is deferred rather than smuggled in here.
+
 LIVE CALLS vs RECORDED FIXTURES — the deliberate choice
 -------------------------------------------------------
 This file makes LIVE model calls in its integration layer, and records nothing.
@@ -45,8 +61,10 @@ What that costs, stated plainly:
   * mild non-determinism. Mitigated, not hand-waved: both judges are now pinned
     to temperature 0 (issue #104's other half), each case is asserted UNANIMOUS
     over `_REPS` calls, and every case in the table was measured stable at 5/5
-    during the investigation. A single flip is therefore a real signal and fails
-    the test rather than being retried away.
+    during the investigation. The pin removes the SAMPLER, which is best-effort
+    rather than a guarantee — no `seed` is passed — so a split can still come
+    from the provider rather than from the rubric. It fails the test either way,
+    because both causes need looking at and neither should be retried away.
 
 The offline half stays fixture-free in a different sense: it reads the two rubric
 strings out of the source and asserts they carry the same rules. That needs no
@@ -334,11 +352,55 @@ _CASES: list[tuple[str, str, str, bool, str]] = [
         True,
         "opposite direction, third instance",
     ),
+    # KNOWN LIMITATION, pinned at CURRENT behaviour - not at desired behaviour.
+    #
+    # Here the disposition IS the requested information: the customer asked WHO
+    # decides, and the draft tells them who. By invariant 8's own test - does the
+    # customer end up holding what they asked for - this should auto-send. The
+    # issue-#104 clause is stated unconditionally, so the rubric reads it as a
+    # deferral and escalates instead, and `must_answer=False` records that rather
+    # than asserting it is correct.
+    #
+    # This errs toward ESCALATION, which is the SAFE direction under the operating
+    # objective (maximize deflection subject to false-resolve <= ceiling): a human
+    # picks the conversation up and the customer is answered, just not by the bot.
+    # The failure this PR fixes was the unsafe direction - auto-resolving a
+    # customer who got nothing. So it is a real cost in deflection, not a risk, and
+    # is deferred rather than rushed.
+    #
+    # It is here so a future rubric edit that flips this shape says so out loud
+    # instead of moving live send/escalate behaviour unobserved. Fixing it means
+    # conditioning the clause on the request ("...when the customer asked for that
+    # value"), which requires re-validating both rubric strings against live
+    # models; until then, flip this row's expectation in the same change that
+    # fixes the clause.
+    (
+        "KNOWN LIMITATION: the disposition IS the requested information",
+        "Who decides a book warranty claim after 30 days?",
+        "Beyond 30 days, book warranty claims are decided by customer service, at "
+        "their discretion.",
+        False,
+        "the customer asked WHO decides and the draft says who, so invariant 8's "
+        "test says auto-send; the unconditional issue-#104 clause escalates it "
+        "anyway. Pinned as-is - see the KNOWN LIMITATION note in the module "
+        "docstring. If this row starts failing, the clause was made conditional "
+        "and the expectation must move with it",
+    ),
 ]
+
+
+class _Skipped(Exception):
+    """A test group that MEASURED NOTHING, raised so `main` can see it.
+
+    Invariant 12 applies to this module's own summary line: a skipped live layer
+    must not be reportable as a passing group. A printed `SKIP` line is not enough
+    - `main` would have to parse stdout to notice - so the skip is structural.
+    """
 
 
 def _skip(reason: str) -> None:
     print(f"SKIP (live rubric layer): {reason}")
+    raise _Skipped(reason)
 
 
 def test_live_rubric_discrimination() -> None:
@@ -359,7 +421,6 @@ def test_live_rubric_discrimination() -> None:
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     if not openai_key and not anthropic_key:
         _skip("neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set")
-        return
 
     failures: list[str] = []
 
@@ -419,7 +480,6 @@ def test_live_rubric_discrimination() -> None:
         impls = _build_impls()
         if not impls:
             _skip("no usable judge implementation")
-            return
 
         for label, question, draft, must_answer, why in _CASES:
             for impl_name, judge in impls:
@@ -457,7 +517,14 @@ def test_live_rubric_discrimination() -> None:
                 if not unanimous:
                     failures.append(
                         f"[{impl_name}] {label}: SPLIT verdict {verdicts} over "
-                        f"{_REPS} calls at temperature 0 — the gate is sampling"
+                        f"{_REPS} calls at temperature 0 — INVESTIGATE, do not "
+                        "retry away. Two causes produce this observation and they "
+                        "need different fixes: (a) the rubric no longer "
+                        "discriminates this case cleanly, which is a real "
+                        "regression in the shipped send/escalate behaviour; or (b) "
+                        "provider-side nondeterminism, since temperature 0 is "
+                        "best-effort and no `seed` is passed. Re-run to tell them "
+                        "apart — (a) reproduces, (b) usually does not."
                     )
                 elif verdicts[0] is not must_answer:
                     failures.append(
@@ -478,9 +545,27 @@ def main() -> int:
         test_non_answer_fails_closed_for_an_unregistered_tag,
         test_live_rubric_discrimination,
     ]
+    # A skipped group measured NOTHING and must never be counted into the passing
+    # total (invariant 12, in the module that argues it hardest). In CI the guard
+    # job sets no API keys, so the live layer skipping is the NORMAL case: reporting
+    # 5 groups passing where 4 ran would be exactly the shape this file exists to
+    # forbid, printed by the file itself.
+    passed: list[str] = []
+    skipped: list[str] = []
     for t in tests:
-        t()
-    print(f"\nPASS: {len(tests)} answer-gate RUBRIC (issue #104) test groups")
+        try:
+            t()
+        except _Skipped:
+            skipped.append(t.__name__)
+        else:
+            passed.append(t.__name__)
+    summary = f"\nPASS: {len(passed)} answer-gate RUBRIC (issue #104) test groups"
+    if skipped:
+        summary += (
+            f", {len(skipped)} SKIPPED and therefore UNMEASURED "
+            f"({', '.join(skipped)})"
+        )
+    print(summary)
     return 0
 
 
