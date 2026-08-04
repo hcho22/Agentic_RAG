@@ -118,6 +118,12 @@ on:
       # dropping a _SHARED_RULES rule, gutting _CASES, or neutering the lockstep
       # assertions - which is precisely the failure mode it exists to catch.
       - 'backend/test_answer_gate_rubric.py'
+      # Issue #104: the two runtime-gate modules pin the JUDGE_TEMPERATURE
+      # resolution matrix and that both gates actually SEND the pin, plus the
+      # fail-closed paths. Listed for the same reason as the rubric guard above:
+      # the one edit that escapes a guard must not be the edit that weakens it.
+      - 'backend/test_answer_gate.py'
+      - 'backend/test_faithfulness_gate.py'
       - 'evals/retrieval/**'
       # Invariant 12's two guard tests live under evals/retrieval/ and
       # evals/permissions_scale/ and are enforced by the eval-harness-guards job
@@ -190,6 +196,12 @@ jobs:
               # eval-side rubric lives under evals/retrieval/ above.
               - 'backend/escalation.py'
               - 'backend/test_answer_gate_rubric.py'
+              # The two runtime-gate modules are guards in this job too: they pin
+              # the JUDGE_TEMPERATURE resolution matrix and that both gates
+              # actually send the pin. A PR touching only one of them is the edit
+              # most likely to weaken it, so it must re-run the job.
+              - 'backend/test_answer_gate.py'
+              - 'backend/test_faithfulness_gate.py'
               # The same guard also reads backend/main.py's SOURCE, to pin that
               # the judge boot warning is still called there and still wired to
               # the SUPABASE_SERVICE_ROLE_KEY widget-surface predicate (AGENTS.md
@@ -213,12 +225,26 @@ jobs:
   # someone remembers to run it provides none of that protection - which is how
   # the issue-#104 gap survived from PR #99 to the 2026-08-03 sweep.
   #
-  # All three are offline by construction - no DB, no secrets, no network, inputs
-  # built in-process - which is what lets this job gate a PR without the Supabase
-  # stack the two jobs below pay for. The rubric module's LIVE half skips cleanly
-  # when no API keys are present, and it reads the eval-side rubric via `ast`
-  # rather than importing evals.retrieval.runner, so only its offline half runs
-  # here. It is deliberately its own job so it still reports on a
+  # backend/test_answer_gate.py and backend/test_faithfulness_gate.py join them
+  # for a narrower but larger-stakes reason: they are the ONLY per-PR enforcement
+  # of the issue-#104 sampler pin. Between them they pin the JUDGE_TEMPERATURE
+  # resolution matrix (unset / blank / `none` / out-of-range) and that both
+  # runtime gates actually SEND that pin on the wire, plus the boot warning's
+  # scoping and the fail-closed one-call-no-retry paths on every judge failure
+  # shape. Without them an edit dropping `**_judge_sampling_kwargs()` from
+  # `_judge_parse`, or flipping DEFAULT_JUDGE_TEMPERATURE, leaves the whole suite
+  # green - un-pinning the send/escalate verdict (AGENTS.md invariant 8) with no
+  # signal at all. That is the same "runs only when someone remembers to run it"
+  # failure the rubric guard above exists to close, applied to the property the
+  # rubric guard is scoped around.
+  #
+  # All five are offline by construction - no DB, no secrets, no network, inputs
+  # built in-process (the two gate modules drive fake judge clients, so there is
+  # no network call to make) - which is what lets this job gate a PR without the
+  # Supabase stack the two jobs below pay for. The rubric module's LIVE half
+  # skips cleanly when no API keys are present, and it reads the eval-side rubric
+  # via `ast` rather than importing evals.retrieval.runner, so only its offline
+  # half runs here. It is deliberately its own job so it still reports on a
   # permissions-scale-only change, where `retrieval-eval` is skipped.
   eval-harness-guards:
     name: Eval-harness guards (offline, deterministic, may block)
@@ -240,22 +266,26 @@ jobs:
 
       - name: Install Python deps
         run: |
-          # Same slim install as the eval job: all three guard modules import only
+          # Same slim install as the eval job: all five guard modules import only
           # what requirements-ci.txt already covers (asyncpg / httpx / openai /
           # pyyaml / pyjwt), never the ML stack. The rubric guard reaches
           # backend/escalation.py -> retrieval -> embeddings, which stays inside
-          # that set (openai brings pydantic); verified against a clean venv.
+          # that set (openai brings pydantic); the two gate modules import the
+          # same chain plus `openai.AsyncOpenAI` for the fake judge client they
+          # cast to, and never `anthropic`. Verified against a clean venv.
           python -m pip install --upgrade pip
           pip install -r evals/retrieval/requirements-ci.txt
 
       - name: Run the offline harness guards
-        # No `|| true`, no skip-on-unset-env: these three modules must always run
+        # No `|| true`, no skip-on-unset-env: these five modules must always run
         # and a non-zero exit must block the merge. A guard that can go quiet is
         # the failure mode it exists to catch.
         run: |
           python -m evals.retrieval.test_empty_gold_guard
           python -m evals.permissions_scale.test_degenerate_guard
           python -m backend.test_answer_gate_rubric
+          python -m backend.test_answer_gate
+          python -m backend.test_faithfulness_gate
 
   retrieval-eval:
     name: PR vs main

@@ -717,9 +717,11 @@ def main() -> int:
     ]
     # A skipped group measured NOTHING and must never be counted into the passing
     # total (invariant 12, in the module that argues it hardest). In CI the guard
-    # job sets no API keys, so the live layer skipping is the NORMAL case: reporting
-    # 5 groups passing where 4 ran would be exactly the shape this file exists to
-    # forbid, printed by the file itself.
+    # job sets no API keys, so the live layer skipping is the NORMAL case:
+    # reporting len(tests) groups passing where len(tests) - len(skipped) ran would
+    # be exactly the shape this file exists to forbid, printed by the file itself.
+    # Both numbers are computed below rather than written out - a hand-maintained
+    # count drifting from the list above is the same defect in miniature.
     passed: list[str] = []
     skipped: list[str] = []
     for t in tests:
