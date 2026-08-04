@@ -377,9 +377,10 @@ _TEMPERATURE_REJECTING_MODELS: dict[str, int] = {}
 # can enter a model into it by mistake and would otherwise leave both safety gates
 # sampling for the rest of the process, with one log line as the only trace. 500 is
 # chosen to be generous in the direction that costs nothing: both gates run per
-# customer turn, so it is a probe roughly every 250 turns - a genuinely rejecting
-# model pays one extra rejected call per ~0.2% of its judge calls, while a
-# mis-recorded one recovers its pin on its own instead of never.
+# customer turn, so it is ONE probe roughly every 250 turns (the slot is claimed
+# before the call, so concurrent callers at a boundary do not each pay one) - a
+# genuinely rejecting model pays one extra rejected call per ~0.2% of its judge
+# calls, while a mis-recorded one recovers its pin on its own instead of never.
 _TEMPERATURE_REPROBE_INTERVAL = 500
 
 # Phrases a provider uses when it is the `temperature` argument itself it will not
@@ -581,6 +582,21 @@ def _count_unpinned_call(model: str) -> None:
     _TEMPERATURE_REJECTING_MODELS[model] = _TEMPERATURE_REJECTING_MODELS.get(model, 0) + 1
 
 
+def _claim_temperature_reprobe(model: str) -> None:
+    """Take the probe slot for `model`, synchronously, before the call goes out.
+
+    Restarting the interval HERE rather than only on the probe's outcome is what
+    makes the probe cost bounded in both directions. It claims the slot, so of the
+    callers that see the boundary exactly one probes and the rest take the
+    known-good un-pinned path (no lock needed: the check and this mutation share a
+    single-threaded event loop with no `await` between them). And it restarts the
+    interval even when the probe reaches no conclusion - a rate limit, a 5xx, an
+    auth blip - so an INCONCLUSIVE probe cannot re-arm itself on every subsequent
+    call and pin a model that was demonstrably working un-pinned.
+    """
+    _TEMPERATURE_REJECTING_MODELS[model] = 0
+
+
 def _note_temperature_rejection(model: str) -> None:
     """Record - and announce - that the pin is off for `model`, resetting its
     re-probe interval.
@@ -642,10 +658,12 @@ async def _judge_parse(
     costs one extra call, paid once per model after the first rejection is
     RECORDED and once more per `_TEMPERATURE_REPROBE_INTERVAL` thereafter: every
     other call for that model sends no temperature and is a single call again.
-    Concurrency caveat — the record is written only when the retry
-    returns, so judge calls already in flight against a rejecting model each pay
-    their own rejected attempt. That is bounded to the first burst and
-    self-corrects; it is not worth a lock on the request path.
+    Concurrency caveat — the record is written only when the retry returns, so
+    judge calls already in flight when the FIRST rejection lands each pay their own
+    rejected attempt; nothing exists to claim yet at that point, and it is not
+    worth a lock on the request path. Re-probes carry no such caveat: the slot is
+    claimed before the call goes out (`_claim_temperature_reprobe`), so a boundary
+    costs exactly one probe however many callers cross it together.
 
     The retry fires ONLY on a 400 that blames `temperature`
     (`_is_temperature_rejection`). It is not a judge failure: it yields a REAL
@@ -664,7 +682,11 @@ async def _judge_parse(
     un-pinned calls, one call PROBES the pin again. A model that really rejects the
     parameter re-confirms it (and says so in the log); a model recorded by mistake
     - a transient 400 whose text happened to anchor a marker - gets its pin back
-    without an operator noticing anything was wrong.
+    without an operator noticing anything was wrong. A probe that fails for some
+    OTHER reason proved nothing either way, so it stays recorded and the next call
+    resumes the un-pinned path that was already working, while the error itself
+    still propagates and fails this turn's gate closed. Self-healing must never be
+    able to wedge a deployment worse than the state it heals.
     """
     call = functools.partial(
         judge_client.chat.completions.parse,
@@ -677,6 +699,7 @@ async def _judge_parse(
     if sampling and model in _TEMPERATURE_REJECTING_MODELS:
         if _temperature_reprobe_due(model):
             probing = True
+            _claim_temperature_reprobe(model)
         else:
             _count_unpinned_call(model)
             sampling = {}
@@ -733,8 +756,9 @@ async def faithfulness_gate(
     judge model that REJECTS the `temperature` parameter costs one extra call,
     paid once per model after the first rejection is recorded (`_judge_parse`
     retries without it and remembers the model), then one per
-    `_TEMPERATURE_REPROBE_INTERVAL` re-probe - though calls already in flight when
-    that first rejection lands each pay their own.
+    `_TEMPERATURE_REPROBE_INTERVAL` re-probe (one, whatever the concurrency) -
+    though calls already in flight when that first rejection lands each pay their
+    own.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (
@@ -916,8 +940,9 @@ async def answer_gate(
     judge model that REJECTS the `temperature` parameter costs one extra call,
     paid once per model after the first rejection is recorded (`_judge_parse`
     retries without it and remembers the model), then one per
-    `_TEMPERATURE_REPROBE_INTERVAL` re-probe - though calls already in flight when
-    that first rejection lands each pay their own.
+    `_TEMPERATURE_REPROBE_INTERVAL` re-probe (one, whatever the concurrency) -
+    though calls already in flight when that first rejection lands each pay their
+    own.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (

@@ -138,8 +138,8 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > (and only when) the 400 specifically blames the argument - by name or by value -
 > use the result normally, and remember the model id, so a rejecting model costs
 > one extra call, paid once per model after that first rejection is recorded.
-> Judge calls already in flight when it lands each pay their own rejected attempt;
-> that is bounded to the first burst and self-corrects, and is deliberately not
+> Judge calls already in flight when that FIRST rejection lands each pay their own
+> rejected attempt - there is no record to consult yet, and it is deliberately not
 > locked on the request path. The fallback is **not** a judge failure: it yields a
 > real verdict, never `judge_error`, and never fails a gate closed. It logs one
 > `warning` per model naming it and stating the gates are running **unpinned** for
@@ -150,11 +150,15 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > string, so a transient or gateway-originated 400 can enter a model into it by
 > mistake and would otherwise leave both gates sampling for the life of the
 > process. Every ~500 un-pinned calls (roughly every 250 customer turns, since both
-> gates run per turn) one call sends the parameter again: a model that really
-> rejects it re-confirms, stays unpinned and logs a fresh `warning` - so a
+> gates run per turn) **exactly one** call sends the parameter again: a model that
+> really rejects it re-confirms, stays unpinned and logs a fresh `warning` - so a
 > long-running deployment keeps saying so in monitoring - while a model recorded by
 > mistake accepts the probe, is forgotten, and is **pinned again** from the next
-> call, logging that recovery at the same level.
+> call, logging that recovery at the same level. The probe slot is claimed before
+> the call goes out, so a boundary costs one probe however many judge calls cross
+> it together, and a probe that fails for an unrelated reason (rate limit, 5xx)
+> proved nothing: it fails that turn's gate closed like any other judge error, and
+> the next call resumes the un-pinned path rather than re-probing forever.
 >
 > **Why that matters, and the residual risk.** A judge that fails on *every* call
 > for a reason the fallback does not cover makes both gates fail closed,

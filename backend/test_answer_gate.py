@@ -19,7 +19,9 @@ Covers:
   * a judge model that REJECTS `temperature` (by name, or by capping its range
     below the validated `[0,2]`) -> retried once WITHOUT it, yielding a real
     verdict rather than a fail-closed escalate, then remembered, and that record
-    re-probed so a misread rejection heals instead of un-pinning the gate forever;
+    re-probed so a misread rejection heals instead of un-pinning the gate forever
+    — once per interval however many callers cross the boundary, and resuming the
+    un-pinned path when a probe fails for some unrelated reason;
   * the cutoff `>=` boundary, refusal / empty-choices / missing-payload
     fail-closed paths, score clamping to [0,1], and that the QUESTION + DRAFT (but
     NOT the chunks) reach the judge — grounding is the other gate's job.
@@ -560,12 +562,180 @@ def test_recorded_rejection_is_reprobed_and_can_heal() -> None:
             == [{"temperature": 0.0}],
             "after healing, the gate must be pinned again on every call",
         )
+
+        # ...and the re-confirming case must go back to the un-pinned path rather
+        # than probing again on every call: the interval is what bounds the cost.
+        _TEMPERATURE_REJECTING_MODELS[model] = _TEMPERATURE_REPROBE_INTERVAL
+        behavior4 = _RejectsTemperature(_judgment(True, 0.9))
+        client4, fake4 = _client(behavior4)
+        behavior4.bind(fake4)
+        asyncio.run(answer_gate(client4, QUESTION, "The fee is $14.95.", CUTOFF))
+        _, fake5 = _run(_judgment(True, 0.9), "The fee is $14.95.")
+        _check(
+            cast(_FakeCompletions, fake5.chat.completions).kwargs_history == [{}],
+            "the call after a re-confirmed rejection must be un-pinned, not another "
+            "probe",
+        )
+        _check(
+            _TEMPERATURE_REJECTING_MODELS.get(model) == 1,
+            "that un-pinned call must be charged against a FRESH interval, got "
+            f"{_TEMPERATURE_REJECTING_MODELS.get(model)!r}",
+        )
     finally:
         _TEMPERATURE_REJECTING_MODELS.clear()
         _TEMPERATURE_REJECTING_MODELS.update(saved_models)
         if saved_temp is not None:
             os.environ["JUDGE_TEMPERATURE"] = saved_temp
     print("ok: a recorded rejection is re-probed, re-confirmed or healed")
+
+
+def test_inconclusive_probe_resumes_the_unpinned_path() -> None:
+    """A probe that fails for a NON-temperature reason must not wedge the model.
+
+    The probe goes out PINNED. If it comes back a rate limit, a 5xx or an auth
+    blip, it proved nothing about whether the parameter is accepted - but the model
+    was already running un-pinned successfully. Leaving the interval at its
+    threshold would re-arm the probe on the next call, and the next, so a single
+    transient during a probe would turn a working deployment into one where every
+    judge call is a pinned call that fails closed - and via issue #105 permanently
+    latches every conversation it touches. Self-healing must not be able to wedge a
+    deployment worse than the state it heals.
+
+    So: restart the interval (next call resumes the known-good un-pinned path) and
+    still let the error propagate, because hiding a degraded judge is the opposite
+    of what the gates are for.
+    """
+    model = get_judge_model()
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
+    try:
+        _TEMPERATURE_REJECTING_MODELS[model] = _TEMPERATURE_REPROBE_INTERVAL
+        d, fake = _run(
+            _raises(_api_error("Rate limit reached for requests", 429)),
+            "The fee is $14.95.",
+        )
+        _check(
+            d.answers is False and d.reason == "non_answer: judge_error",
+            f"an inconclusive probe must still fail THIS turn closed, got {d!r}",
+        )
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).kwargs_history
+            == [{"temperature": 0.0}],
+            "the probe carries the pin and an unrelated error must not be retried",
+        )
+        _check(
+            _TEMPERATURE_REJECTING_MODELS.get(model) == 0,
+            "an inconclusive probe must restart the interval, not leave it armed, got "
+            f"{_TEMPERATURE_REJECTING_MODELS.get(model)!r}",
+        )
+
+        _, fake2 = _run(_judgment(True, 0.9), "The fee is $14.95.")
+        _check(
+            cast(_FakeCompletions, fake2.chat.completions).kwargs_history == [{}],
+            "the next call must resume the un-pinned path that was already working",
+        )
+        _check(
+            _TEMPERATURE_REJECTING_MODELS.get(model) == 1,
+            f"and be charged against the fresh interval, got "
+            f"{_TEMPERATURE_REJECTING_MODELS.get(model)!r}",
+        )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
+    print("ok: an inconclusive probe surfaces its error and resumes un-pinned")
+
+
+class _InterleavingCompletions:
+    """A judge whose `parse` yields to the event loop before answering.
+
+    `_FakeCompletions` never suspends, so `asyncio.gather` runs each gate call to
+    completion in turn and no two of them are ever inside `_judge_parse` at once.
+    The probe slot is claimed synchronously precisely so concurrent callers at a
+    boundary do not each probe, and only a fake with a real suspension point can
+    tell that apart from the caller-at-a-time behaviour.
+    """
+
+    def __init__(self) -> None:
+        self.kwargs_history: list[dict[str, Any]] = []
+
+    async def parse(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        response_format: Any,
+        **kwargs: Any,
+    ) -> Any:
+        self.kwargs_history.append(kwargs)
+        await asyncio.sleep(0)
+        if "temperature" in kwargs:
+            raise _api_error(
+                "Unsupported parameter: 'temperature' is not supported with this model.",
+                400,
+            )
+        return _completion(parsed=AnswerJudgment(answers=True, score=0.9))
+
+
+def test_concurrent_calls_at_a_boundary_probe_exactly_once() -> None:
+    """N judge calls crossing the re-probe boundary together cost ONE probe.
+
+    The interval is claimed before the call goes out, so the first caller to see
+    the boundary takes the slot and the rest read a restarted interval and take the
+    un-pinned path. Were the record only written when the probe returns, every
+    in-flight caller would see the boundary and a rejecting model would pay N
+    rejected attempts plus N retries at EVERY boundary - which is what the module's
+    cost comment and `docs/model-surface.md` promise it does not.
+
+    No lock is involved or wanted: the check and the claim share a single-threaded
+    event loop with no `await` between them.
+    """
+    model = get_judge_model()
+    callers = 4
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
+    try:
+        _TEMPERATURE_REJECTING_MODELS[model] = _TEMPERATURE_REPROBE_INTERVAL
+        comp = _InterleavingCompletions()
+        client = cast(
+            AsyncOpenAI, types.SimpleNamespace(chat=types.SimpleNamespace(completions=comp))
+        )
+
+        async def _all() -> list[AnswerDecision]:
+            return list(
+                await asyncio.gather(
+                    *(
+                        answer_gate(client, QUESTION, "The fee is $14.95.", CUTOFF)
+                        for _ in range(callers)
+                    )
+                )
+            )
+
+        decisions = asyncio.run(_all())
+        _check(
+            all(d.answers is True for d in decisions),
+            f"every concurrent caller must still get a real verdict, got {decisions!r}",
+        )
+        pinned = [k for k in comp.kwargs_history if "temperature" in k]
+        _check(
+            len(pinned) == 1,
+            f"exactly one caller may probe at a boundary, got {len(pinned)} of "
+            f"{comp.kwargs_history!r}",
+        )
+        _check(
+            len(comp.kwargs_history) == callers + 1,
+            f"the boundary must cost one extra call in total, got "
+            f"{len(comp.kwargs_history)} for {callers} callers",
+        )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
+    print("ok: concurrent callers at a re-probe boundary produce exactly one probe")
 
 
 def test_failed_retry_does_not_record_the_model() -> None:
@@ -673,6 +843,8 @@ def main() -> int:
         test_echoed_payload_400_does_not_unpin_the_gate,
         test_out_of_range_temperature_400_recovers_unpinned,
         test_recorded_rejection_is_reprobed_and_can_heal,
+        test_inconclusive_probe_resumes_the_unpinned_path,
+        test_concurrent_calls_at_a_boundary_probe_exactly_once,
         test_failed_retry_does_not_record_the_model,
         test_unrelated_bad_request_still_fails_closed,
         test_decision_is_frozen,
