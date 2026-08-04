@@ -76,8 +76,10 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from escalation import (  # noqa: E402
     _ANSWER_JUDGE_SYSTEM_PROMPT,
+    _non_answer,
     AnswerJudgment,
     DEFAULT_ANSWER_CUTOFF,
+    JUDGE_FAILURE_TAGS,
     answer_gate,
     judge_failure_tag,
 )
@@ -90,6 +92,10 @@ _REPS = 3
 # its rubric out of the source with `ast` instead: these are plain literals, so
 # this needs nothing but the stdlib and still reads the REAL shipped text.
 _RUNNER_SRC = ROOT / "evals" / "retrieval" / "runner.py"
+
+# The runtime gate's own source, read the same way for the `_non_answer` registry
+# check below.
+_ESCALATION_SRC = ROOT / "backend" / "escalation.py"
 
 
 def _check(cond: bool, msg: str) -> None:
@@ -118,6 +124,29 @@ def _offline_tool_description() -> str:
 
 def _runtime_tool_description() -> str:
     return AnswerJudgment.model_fields["answers"].description or ""
+
+
+def _non_answer_call_tags(path: Path) -> set[str]:
+    """Every tag literal `_non_answer(...)` is called with in `path`'s source.
+
+    Raises if a call site passes anything but a plain string literal, since a
+    computed tag would slip past the registry check below unseen.
+    """
+    tags: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "_non_answer"):
+            continue
+        if len(node.args) != 1 or not isinstance(node.args[0], ast.Constant):
+            raise AssertionError(
+                f"{path.name}:{node.lineno}: _non_answer must be called with one "
+                "plain string literal so the JUDGE_FAILURE_TAGS registry can be "
+                "checked statically"
+            )
+        tags.add(node.args[0].value)
+    return tags
 
 
 # The rules BOTH implementations must state. Phrased as the substrings they share,
@@ -184,6 +213,53 @@ def test_both_tool_schemas_describe_the_disposition_case() -> None:
                 f"(missing {fragment!r}): {description!r}",
             )
     print("ok: both tool schemas describe the disposition case")
+
+
+def test_every_non_answer_tag_is_registered() -> None:
+    """`JUDGE_FAILURE_TAGS` must name exactly the tags the gate can produce.
+
+    Both shapes of a `False` answer verdict fail closed, so `reason` is the only
+    thing that tells a DEAD JUDGE apart from a real non-answer, and
+    `judge_failure_tag` reads that off this registry. A failure branch added
+    without registering its tag silently reclassifies a dead judge as a rubric
+    verdict - invariant 12 again, at the layer that measures the rubric.
+
+    This is a source-level check on purpose. The runtime `_non_answer` only logs,
+    because it sits in the fail-closed path and must never raise there, and an
+    `assert` would be stripped by `python -O` anyway. Reading the call sites with
+    `ast` gives the guarantee unconditionally and before merge.
+    """
+    called = _non_answer_call_tags(_ESCALATION_SRC)
+    registered = set(JUDGE_FAILURE_TAGS)
+    _check(
+        called == registered,
+        "JUDGE_FAILURE_TAGS must match the tags escalation.py actually calls "
+        f"_non_answer with. Unregistered: {sorted(called - registered)}; "
+        f"registered but never produced: {sorted(registered - called)}",
+    )
+    print(f"ok: all {len(called)} _non_answer tags are registered")
+
+
+def test_non_answer_fails_closed_for_an_unregistered_tag() -> None:
+    """An unregistered tag must still escalate, never raise.
+
+    `_non_answer` is how every fail-closed branch of `answer_gate` returns,
+    including the blanket `except Exception` handler, so raising here would
+    convert a graceful escalate into an exception on the customer request path -
+    in the one function whose contract is that it never raises (AGENTS.md
+    invariant 4).
+    """
+    decision = _non_answer("judge_not_a_registered_tag")
+    _check(
+        decision.answers is False and decision.addressed is False,
+        f"an unregistered tag must fail CLOSED, got {decision!r}",
+    )
+    _check(
+        judge_failure_tag(decision.reason) is None,
+        "an unregistered tag cannot be recognised by judge_failure_tag - that is "
+        "the drift test_every_non_answer_tag_is_registered exists to block",
+    )
+    print("ok: _non_answer escalates rather than raising on an unregistered tag")
 
 
 # --- integration layer (skips cleanly without keys) ------------------------
@@ -398,6 +474,8 @@ def main() -> int:
     tests = [
         test_both_rubrics_state_every_shared_rule,
         test_both_tool_schemas_describe_the_disposition_case,
+        test_every_non_answer_tag_is_registered,
+        test_non_answer_fails_closed_for_an_unregistered_tag,
         test_live_rubric_discrimination,
     ]
     for t in tests:

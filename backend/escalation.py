@@ -67,6 +67,7 @@ path (off `EscalationConfig` entirely) so it cannot leak into the latency path.
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import os
@@ -277,23 +278,19 @@ DEFAULT_JUDGE_TEMPERATURE = 0.0
 _JUDGE_TEMPERATURE_MAX = 2.0
 
 
-def get_judge_temperature() -> float | None:
-    """Sampling temperature for the two runtime gates (`JUDGE_TEMPERATURE` env).
+@functools.lru_cache(maxsize=None)
+def _resolve_judge_temperature(raw: str | None) -> float | None:
+    """Parse one raw `JUDGE_TEMPERATURE` value; see `get_judge_temperature`.
 
-    Resolves as: unset ⇒ `DEFAULT_JUDGE_TEMPERATURE`; blank ⇒
-    `DEFAULT_JUDGE_TEMPERATURE`; the literal `none` ⇒ `None`, meaning "send no
-    `temperature` at all" for a judge model that rejects the parameter (ADR-0006).
-    The typed-out `none` is the ONLY way to un-pin: a deliberate opt-out is
-    legitimate, an accidental one is not.
-
-    A value that is not a number, is not finite, or falls outside
-    `[0, _JUDGE_TEMPERATURE_MAX]` warns and falls back to the deterministic
-    default. Note the deliberate difference from the sibling `_env_unit_float`,
-    which RAISES on the same input: this knob must not fail the boot, because
-    falling back to the pinned default is always safe here, whereas raising would
-    take the gate offline entirely.
+    Cached on the raw string so a MISCONFIGURED knob warns once per distinct
+    value rather than once per judge call. `_judge_sampling_kwargs` runs on every
+    gate invocation and both gates run on every customer turn, so an uncached
+    warning would emit two lines per turn forever for a static config error and
+    bury the very misconfiguration it is trying to surface. Keying on the raw
+    value (rather than caching the resolved result outright) means the env is
+    still read on every call, so a caller that changes `JUDGE_TEMPERATURE` — the
+    tests do — can never read a stale value.
     """
-    raw = os.environ.get("JUDGE_TEMPERATURE")
     if raw is None or raw.strip() == "":
         return DEFAULT_JUDGE_TEMPERATURE
     if raw.strip().lower() == "none":
@@ -319,6 +316,25 @@ def get_judge_temperature() -> float | None:
         )
         return DEFAULT_JUDGE_TEMPERATURE
     return value
+
+
+def get_judge_temperature() -> float | None:
+    """Sampling temperature for the two runtime gates (`JUDGE_TEMPERATURE` env).
+
+    Resolves as: unset ⇒ `DEFAULT_JUDGE_TEMPERATURE`; blank ⇒
+    `DEFAULT_JUDGE_TEMPERATURE`; the literal `none` ⇒ `None`, meaning "send no
+    `temperature` at all" for a judge model that rejects the parameter (ADR-0006).
+    The typed-out `none` is the ONLY way to un-pin: a deliberate opt-out is
+    legitimate, an accidental one is not.
+
+    A value that is not a number, is not finite, or falls outside
+    `[0, _JUDGE_TEMPERATURE_MAX]` warns and falls back to the deterministic
+    default. Note the deliberate difference from the sibling `_env_unit_float`,
+    which RAISES on the same input: this knob must not fail the boot, because
+    falling back to the pinned default is always safe here, whereas raising would
+    take the gate offline entirely.
+    """
+    return _resolve_judge_temperature(os.environ.get("JUDGE_TEMPERATURE"))
 
 
 def _judge_sampling_kwargs() -> dict[str, float]:
@@ -591,11 +607,29 @@ JUDGE_FAILURE_TAGS = ("judge_error", "judge_no_choices", "judge_refusal", "judge
 def _non_answer(tag: str) -> AnswerDecision:
     """The fail-closed decision: the judge itself failed, escalate.
 
-    The tag is asserted to be registered so a NEW failure branch cannot be added
-    without `judge_failure_tag` learning to recognise it - the drift would leave a
-    dead judge once again indistinguishable from a real non-answer verdict.
+    NEVER raises, including on an unregistered tag. Every fail-closed branch of
+    `answer_gate` returns through here - one of them the blanket
+    `except Exception` handler - and that function's contract is that it always
+    yields an escalate decision on the customer request path. So an unregistered
+    tag logs and still escalates; it must not turn a graceful escalate into an
+    exception (AGENTS.md invariant 4).
+
+    The anti-drift guarantee - a new failure branch cannot be added without
+    `judge_failure_tag` learning to recognise it, drift that would leave a dead
+    judge once again indistinguishable from a real non-answer verdict - is a
+    SOURCE-level property, so it is pinned statically by
+    `test_answer_gate_rubric.test_every_non_answer_tag_is_registered`: it reads
+    these call sites with `ast` and asserts set-equality with
+    `JUDGE_FAILURE_TAGS`. That holds unconditionally, unlike an `assert`, which
+    `python -O` strips out of an optimized deployment entirely.
     """
-    assert tag in JUDGE_FAILURE_TAGS, f"unregistered judge failure tag {tag!r}"
+    if tag not in JUDGE_FAILURE_TAGS:
+        log.error(
+            "unregistered judge failure tag %r: judge_failure_tag() will report this "
+            "dead judge as a real non-answer verdict until the tag is added to "
+            "JUDGE_FAILURE_TAGS",
+            tag,
+        )
     return AnswerDecision(
         answers=False, addressed=False, score=0.0, reason=f"non_answer: {tag}"
     )

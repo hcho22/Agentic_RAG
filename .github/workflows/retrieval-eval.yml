@@ -111,6 +111,13 @@ on:
       - 'backend/main.py'
       - 'backend/permissions.py'
       - 'backend/test_au4_auth_attacks.py'
+      # Issue #104: the answer-gate rubric guard must trigger on a change to
+      # ITSELF. Every other trigger for it (backend/escalation.py above,
+      # evals/retrieval/** below) is already in this union, so without this entry
+      # the one edit that escapes the guard is the edit that WEAKENS the guard -
+      # dropping a _SHARED_RULES rule, gutting _CASES, or neutering the lockstep
+      # assertions - which is precisely the failure mode it exists to catch.
+      - 'backend/test_answer_gate_rubric.py'
       - 'evals/retrieval/**'
       # Invariant 12's two guard tests live under evals/retrieval/ and
       # evals/permissions_scale/ and are enforced by the eval-harness-guards job
