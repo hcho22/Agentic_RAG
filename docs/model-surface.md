@@ -104,7 +104,7 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 | `OPENAI_SUBAGENT_MODEL` | Document subagent | `OPENAI_MODEL` |
 | `OPENAI_RERANK_MODEL` | `llm` reranker (only when `RERANKER=llm`, or the eval runner's `--reranker llm`) | `OPENAI_MODEL` |
 | `EMBEDDER_MODEL` | Embedder | `EMBEDDING_MODEL` → `text-embedding-3-small` |
-| `JUDGE_MODEL` | Runtime faithfulness gate (US-048) | `gpt-4o-mini` (does **not** chain to `OPENAI_MODEL`) |
+| `JUDGE_MODEL` | Runtime faithfulness gate (US-048) + answer-completeness gate (issue #97) | `gpt-4o-mini` (does **not** chain to `OPENAI_MODEL`) |
 | `JUDGE_TEMPERATURE` | Runtime faithfulness + answer-completeness gates | `0` (unset **or** blank); the literal `none` omits the parameter |
 | `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (OpenAI proper, no `base_url`) / `completions` (Azure or `openai` + `base_url`) |
 
@@ -114,7 +114,10 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > model **without** chaining through `OPENAI_MODEL` — the per-reply runtime gate
 > stays cheap even behind a large answerer. On a non-OpenAI judge, set
 > `JUDGE_MODEL` to your deployment/model id; an unset/wrong value just makes the
-> judge call fail, which fails **closed** (escalate), never auto-sends a reply.
+> judge call fail, which fails **closed** (escalate), never auto-sends a reply -
+> but read the residual-risk paragraph under `JUDGE_TEMPERATURE` below before
+> repointing production: a judge that fails on *every* call latches the
+> conversations it hits to `escalated` permanently (issue #105).
 
 > **`JUDGE_TEMPERATURE` pins the two runtime gates' sampler.** Both gates fail
 > **closed**, and a gate that returns a different verdict on identical input is
