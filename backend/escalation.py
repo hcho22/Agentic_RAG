@@ -246,6 +246,53 @@ def get_judge_model() -> str:
     return os.environ.get("JUDGE_MODEL") or DEFAULT_JUDGE_MODEL
 
 
+# Both runtime gates are SAFETY gates that fail closed, and a gate that returns a
+# different verdict on identical input is not doing that: it is sampling one. The
+# 2026-08-03 E7 investigation measured the answer gate returning `answers=True`
+# on 2 of 5 identical calls for the same (question, draft) pair — the send/escalate
+# decision was partly a coin flip. Both gates now pin the sampler.
+#
+# The escape hatch exists because ADR-0006 lets an operator point `JUDGE_MODEL` at
+# their own deployment, and some models REJECT a `temperature` argument outright
+# (a 400, which fails closed — correct, but it would wedge that deployment at zero
+# deflection forever). Setting `JUDGE_TEMPERATURE` to `none` omits the parameter
+# instead. Setting it to a number is an explicit operator decision to give up the
+# determinism these gates depend on.
+DEFAULT_JUDGE_TEMPERATURE = 0.0
+
+
+def get_judge_temperature() -> float | None:
+    """Sampling temperature for the two runtime gates (`JUDGE_TEMPERATURE` env).
+
+    Returns `0.0` unless overridden. `None` means "send no `temperature` at all",
+    for a judge model that rejects the parameter; it is requested by setting the
+    env var to `none` (or an empty string). An unparseable value falls back to the
+    deterministic default rather than raising — a malformed knob must not take a
+    safety gate offline.
+    """
+    raw = os.environ.get("JUDGE_TEMPERATURE")
+    if raw is None:
+        return DEFAULT_JUDGE_TEMPERATURE
+    if raw.strip().lower() in ("", "none"):
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(
+            "JUDGE_TEMPERATURE=%r is not a number; using the deterministic "
+            "default %.1f",
+            raw,
+            DEFAULT_JUDGE_TEMPERATURE,
+        )
+        return DEFAULT_JUDGE_TEMPERATURE
+
+
+def _judge_sampling_kwargs() -> dict[str, float]:
+    """Sampling kwargs both runtime gates splat into their one judge call."""
+    temperature = get_judge_temperature()
+    return {} if temperature is None else {"temperature": temperature}
+
+
 def _render_context(chunks: list[SearchDocumentsResult]) -> str:
     return "\n\n".join(f"[{i + 1}] {c.content}" for i, c in enumerate(chunks))
 
@@ -267,6 +314,8 @@ async def faithfulness_gate(
     (escalate), never open. This is the runtime gate, NOT the offline RAGAS
     metric (see the module banner); it never decomposes claims or makes a second
     call.
+
+    Sampled at `JUDGE_TEMPERATURE` (default 0) — see `get_judge_temperature`.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (
@@ -282,6 +331,7 @@ async def faithfulness_gate(
                 {"role": "user", "content": user_prompt},
             ],
             response_format=FaithfulnessJudgment,
+            **_judge_sampling_kwargs(),
         )
     except Exception as e:  # noqa: BLE001 — any SDK/API/timeout failure fails closed
         log.warning("faithfulness judge call failed: %s", e)
@@ -337,6 +387,23 @@ def _unfaithful(tag: str) -> FaithfulnessDecision:
 # the runtime companion to the OFFLINE-only `answer_relevancy` RAGAS metric
 # (`evals/retrieval/ragas.py`), which gates CI regressions, never an individual
 # customer reply.
+#
+# Issue #104: the rubric originally caught only the shape that ANNOUNCES itself —
+# a draft saying it lacks the information. It missed the shape where the CORPUS's
+# own answer is a deferral. Asked "what is the return shipping fee for a return
+# over 20 lbs?", the corpus says "quoted per-case for returns over 20 lbs"
+# (`db_seed/corpus/returns-process.md:33`); a draft restating that is faithful,
+# fluent, and occupies exactly the slot the question asked about, so the gate read
+# the slot as filled and auto-sent. The customer still has no fee. Same for a book
+# warranty "at the discretion of customer service"
+# (`db_seed/corpus/warranty-terms.md:29`).
+#
+# Those two shapes are ORTHOGONAL, and the fix has to name the second explicitly:
+# whether the draft admits ignorance is a fact about the DRAFTER, whether the
+# customer ends up holding the requested value is a fact about the ANSWER. Before
+# the added clause the gate keyed mostly on the first, which the drafter emits or
+# omits at its own sampling temperature — so the send/escalate decision partly rode
+# on a phrasing coin flip (`backend/test_answer_gate_rubric.py` pins both shapes).
 # -----------------------------------------------------------------------------
 
 _ANSWER_JUDGE_SYSTEM_PROMPT = (
@@ -346,7 +413,12 @@ _ANSWER_JUDGE_SYSTEM_PROMPT = (
     "specific information the customer asked for. A reply that says it does not "
     "have the information, that it cannot help, that it is unsure, or that it is "
     "deferring the customer to a human, or that answers only a DIFFERENT question "
-    "than the one asked, does NOT answer the question. Judge ONLY whether the "
+    "than the one asked, does NOT answer the question. A reply that only tells the "
+    "customer the answer is quoted case-by-case, is set at someone's discretion, is "
+    "decided by staff, or is otherwise not published does NOT answer the question "
+    "either: the customer still does not have the specific information they asked "
+    "for, however accurately or confidently the reply states that policy. Judge "
+    "ONLY whether the "
     "question is answered — not grounding, tone, or politeness (a blunt but "
     "responsive answer still answers; a warm apology that gives no information "
     "does not). Return `answers` and a `score` in [0,1] for how completely the "
@@ -369,7 +441,9 @@ class AnswerJudgment(BaseModel):
         description=(
             "True iff the ANSWER actually answers the customer's QUESTION with "
             "the specific information requested. False if it defers, says it "
-            "lacks the information, cannot help, or answers a different question."
+            "lacks the information, cannot help, answers a different question, "
+            "or only reports that the requested value is case-by-case, "
+            "discretionary, or unpublished."
         ),
     )
     score: float = Field(
@@ -418,6 +492,8 @@ async def answer_gate(
     choices, missing parsed payload — fails **closed**: `answers=False`
     (escalate), never open. Compares the QUESTION against the DRAFT only; grounding
     is `faithfulness_gate`'s job, not this gate's.
+
+    Sampled at `JUDGE_TEMPERATURE` (default 0) — see `get_judge_temperature`.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (
@@ -433,6 +509,7 @@ async def answer_gate(
                 {"role": "user", "content": user_prompt},
             ],
             response_format=AnswerJudgment,
+            **_judge_sampling_kwargs(),
         )
     except Exception as e:  # noqa: BLE001 — any SDK/API/timeout failure fails closed
         log.warning("answer-completeness judge call failed: %s", e)

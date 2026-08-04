@@ -27,6 +27,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import types
 from pathlib import Path
@@ -65,14 +66,23 @@ class _FakeCompletions:
         self.model_used: str | None = None
         self.messages_used: list[dict[str, str]] | None = None
         self.response_format_used: Any = None
+        self.extra_kwargs: dict[str, Any] = {}
 
     async def parse(
-        self, *, model: str, messages: list[dict[str, str]], response_format: Any
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        response_format: Any,
+        **kwargs: Any,
     ) -> Any:
         self.calls += 1
         self.model_used = model
         self.messages_used = messages
         self.response_format_used = response_format
+        # Issue #104: the gate pins the sampler, so the kwargs it splats in are
+        # part of its contract and get recorded like `model` / `messages`.
+        self.extra_kwargs = kwargs
         return self._behavior()  # may raise
 
 
@@ -218,6 +228,32 @@ def test_question_and_draft_reach_the_judge() -> None:
     print("ok: question + draft reach the judge under the AnswerJudgment schema")
 
 
+def test_judge_sampling_is_pinned_deterministic() -> None:
+    """Issue #104: this gate decides send-vs-escalate, so it must not SAMPLE.
+
+    The 2026-08-03 E7 investigation measured this gate returning `answers=True` on
+    2 of 5 identical calls, which made a pinned safety verdict partly a coin flip.
+    The semantics of `JUDGE_TEMPERATURE` itself are covered once in
+    `test_faithfulness_gate.py`; here we pin that THIS gate's call carries it.
+    """
+    saved = os.environ.get("JUDGE_TEMPERATURE")
+    try:
+        os.environ.pop("JUDGE_TEMPERATURE", None)
+        _, fake = _run(_judgment(True, 0.9), "The fee is $14.95.")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"temperature": 0.0},
+            "the answer-gate call must pin temperature=0, got "
+            f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+    finally:
+        if saved is None:
+            os.environ.pop("JUDGE_TEMPERATURE", None)
+        else:
+            os.environ["JUDGE_TEMPERATURE"] = saved
+    print("ok: the answer gate's judge call pins temperature=0")
+
+
 def test_decision_is_frozen() -> None:
     d = AnswerDecision(answers=True, addressed=True, score=0.9, reason="answers")
     try:
@@ -237,6 +273,7 @@ def main() -> int:
         test_refusal_and_malformed_responses_fail_closed,
         test_score_clamped_to_unit_interval,
         test_question_and_draft_reach_the_judge,
+        test_judge_sampling_is_pinned_deterministic,
         test_decision_is_frozen,
     ]
     for t in tests:

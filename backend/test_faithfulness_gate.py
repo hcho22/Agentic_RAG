@@ -38,6 +38,7 @@ from escalation import (  # noqa: E402
     FaithfulnessJudgment,
     faithfulness_gate,
     get_judge_model,
+    get_judge_temperature,
 )
 from retrieval import SearchDocumentsResult  # noqa: E402
 
@@ -70,13 +71,22 @@ class _FakeCompletions:
         self.calls = 0
         self.model_used: str | None = None
         self.messages_used: list[dict[str, str]] | None = None
+        self.extra_kwargs: dict[str, Any] = {}
 
     async def parse(
-        self, *, model: str, messages: list[dict[str, str]], response_format: Any
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        response_format: Any,
+        **kwargs: Any,
     ) -> Any:
         self.calls += 1
         self.model_used = model
         self.messages_used = messages
+        # Issue #104: the gate pins the sampler, so the kwargs it splats in are
+        # part of its contract and get recorded like `model` / `messages`.
+        self.extra_kwargs = kwargs
         return self._behavior()  # may raise
 
 
@@ -224,6 +234,50 @@ def test_judge_model_selector() -> None:
     print("ok: JUDGE_MODEL selector — cheap default, no OPENAI_MODEL chaining")
 
 
+def test_judge_sampling_is_pinned_deterministic() -> None:
+    """Issue #104: a fail-closed safety gate must not SAMPLE its verdict.
+
+    The call pins `temperature=0` by default; `JUDGE_TEMPERATURE=none` omits the
+    parameter entirely (for a BYO judge model that rejects it, ADR-0006) rather
+    than wedging that deployment at a 400 forever; a malformed value falls back to
+    the deterministic default instead of taking the gate offline.
+    """
+    saved = os.environ.get("JUDGE_TEMPERATURE")
+    try:
+        os.environ.pop("JUDGE_TEMPERATURE", None)
+        _check(
+            get_judge_temperature() == 0.0,
+            f"default judge temperature must be 0.0, got {get_judge_temperature()!r}",
+        )
+        _, fake = _run(_judgment(True, 0.9), "x")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"temperature": 0.0},
+            "the faithfulness call must pin temperature=0 by default, got "
+            f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+
+        os.environ["JUDGE_TEMPERATURE"] = "none"
+        _check(get_judge_temperature() is None, "'none' must mean: send no temperature")
+        _, fake = _run(_judgment(True, 0.9), "x")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs == {},
+            "JUDGE_TEMPERATURE=none must omit the parameter entirely",
+        )
+
+        os.environ["JUDGE_TEMPERATURE"] = "not-a-number"
+        _check(
+            get_judge_temperature() == 0.0,
+            "a malformed JUDGE_TEMPERATURE must fall back to the deterministic default",
+        )
+    finally:
+        if saved is None:
+            os.environ.pop("JUDGE_TEMPERATURE", None)
+        else:
+            os.environ["JUDGE_TEMPERATURE"] = saved
+    print("ok: judge sampling pinned to temperature=0, with a documented escape hatch")
+
+
 def test_context_and_draft_reach_the_judge() -> None:
     """The judge actually receives the draft and the chunk contents (so a 'zero'
     isn't a structurally-blind pass)."""
@@ -254,6 +308,7 @@ def main() -> int:
         test_refusal_and_malformed_responses_fail_closed,
         test_score_clamped_to_unit_interval,
         test_judge_model_selector,
+        test_judge_sampling_is_pinned_deterministic,
         test_context_and_draft_reach_the_judge,
         test_decision_is_frozen,
     ]
