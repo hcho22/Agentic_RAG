@@ -63,8 +63,11 @@ What that costs, stated plainly:
   * a dependency on network + API keys, so it CANNOT be part of the always-run
     unit layer;
   * mild non-determinism. Mitigated, not hand-waved: both judges are now pinned
-    to temperature 0 (issue #104's other half), each case is asserted UNANIMOUS
-    over `_REPS` calls, and every case in the table was measured stable at 5/5
+    to temperature 0 (issue #104's other half) - the live layer neutralizes the
+    ambient `JUDGE_MODEL` / `JUDGE_TEMPERATURE` exactly as the unit layer does, so
+    a developer shell cannot un-pin the run the failure message describes as
+    pinned - each case is asserted UNANIMOUS over `_REPS` calls, and every case in
+    the table was measured stable at 5/5
     during the investigation. The pin removes the SAMPLER, which is best-effort
     rather than a guarantee — no `seed` is passed — so a split can still come
     from the provider rather than from the rubric. It fails the test either way,
@@ -103,6 +106,8 @@ from escalation import (  # noqa: E402
     DEFAULT_ANSWER_CUTOFF,
     JUDGE_FAILURE_TAGS,
     answer_gate,
+    get_judge_model,
+    get_judge_temperature,
     judge_failure_tag,
 )
 
@@ -425,7 +430,10 @@ def test_live_rubric_discrimination() -> None:
 
     Skips cleanly when a key or package is absent so the unit layer above still
     runs anywhere. Requires unanimity over `_REPS` calls per case: both judges are
-    pinned to temperature 0, so a split verdict is a finding, not a flake.
+    pinned to temperature 0, so a split verdict is a finding, not a flake. That
+    claim only holds if the pin the failure message asserts is the pin that
+    actually ran, so the ambient judge environment is neutralized for the duration
+    of this layer - see the comment on `saved_env` below.
 
     A judge that was CALLED AND FAILED is a third outcome, distinct from both a
     clean skip and a verdict: it is reported as UNMEASURED and fails the test. The
@@ -438,6 +446,21 @@ def test_live_rubric_discrimination() -> None:
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     if not openai_key and not anthropic_key:
         _skip("neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set")
+
+    # The LIVE layer must neutralize the SAME judge env the unit layer does. Its
+    # runtime half calls the real `answer_gate`, which resolves both knobs from the
+    # ambient environment - and the developer most likely to run this file is the
+    # one debugging the pin, whose shell may well export `JUDGE_TEMPERATURE=none`
+    # (the documented escape hatch) or a bring-your-own `JUDGE_MODEL` the plain
+    # OpenAI client built below cannot serve. Either silently un-pins the half whose
+    # unanimity assertion and SPLIT message both state "at temperature 0", so a run
+    # whose stated mitigation was never in effect would be reportable as a clean
+    # measurement - invariant 12, in the module that argues it hardest. This bug
+    # class was fixed once already in the unit-layer gate tests and came back here
+    # because the fix was applied only where the finding pointed.
+    saved_env = {k: os.environ.get(k) for k in ("JUDGE_MODEL", "JUDGE_TEMPERATURE")}
+    for key in saved_env:
+        os.environ.pop(key, None)
 
     failures: list[str] = []
 
@@ -506,7 +529,13 @@ def test_live_rubric_discrimination() -> None:
         impls = _build_impls()
         if not impls:
             _skip("no usable judge implementation")
-        print(f"  live rubric layer: {_cost_note(len(impls))}")
+        # Record WHICH judge answered and at what temperature: the determinism the
+        # SPLIT message argues from is a property of that pair, not of the rubric
+        # alone, so the verdicts below are only interpretable alongside it.
+        print(
+            f"  live rubric layer: {_cost_note(len(impls))}; runtime judge "
+            f"{get_judge_model()!r} at temperature {get_judge_temperature()!r}"
+        )
 
         for label, question, draft, must_answer, why in _CASES:
             for impl_name, judge in impls:
@@ -559,7 +588,15 @@ def test_live_rubric_discrimination() -> None:
                         f"{must_answer} — {why}"
                     )
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     _check(not failures, "live rubric discrimination failed:\n  - " + "\n  - ".join(failures))
     print("ok: the live rubric separates deferral-shaped non-answers from real answers")
 

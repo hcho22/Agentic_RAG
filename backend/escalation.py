@@ -407,13 +407,21 @@ def _judge_sampling_kwargs() -> dict[str, float]:
 # deployment may accept the parameter perfectly well.
 _TEMPERATURE_REFUSING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 
-# Names that match a prefix above but are NOT reasoning models and take
-# `temperature` normally - `gpt-5-chat-latest` is OpenAI's non-reasoning gpt-5
-# variant. Warning on those would push an operator to un-pin a gate that was
+# Marker carried by names that match a prefix above but are NOT reasoning models
+# and take `temperature` normally - `gpt-5-chat-latest` is OpenAI's non-reasoning
+# gpt-5 variant. Warning on those would push an operator to un-pin a gate that was
 # working, the same harm case (2) of the `DEFAULT_JUDGE_TEMPERATURE` block warns
-# against. Only names we can actually point at belong here; this is not an attempt
-# to enumerate every accepting model.
-_TEMPERATURE_ACCEPTING_MODEL_PREFIXES = ("gpt-5-chat",)
+# against.
+#
+# This is a CONVENTION rather than a name list, deliberately: OpenAI spells its
+# non-reasoning chat variants with this marker, so the rule survives dotted point
+# releases and the next generation, whereas an enumerated tuple would have to guess
+# tomorrow's spelling and would silently rot when it guessed wrong. Being a marker
+# it is also BROADER than any list, and broad here means MORE MISSED WARNINGS: any
+# refusing deployment that happens to carry `-chat` in its name is excluded and gets
+# no warning at all. That is the best-effort direction this check already owns, not
+# a claim that the marker is exhaustive.
+_NON_REASONING_CHAT_MARKER = "-chat"
 
 
 def warn_if_judge_rejects_temperature() -> None:
@@ -421,12 +429,14 @@ def warn_if_judge_rejects_temperature() -> None:
 
     Best-effort operator aid, nothing more, and wrong in both directions. It
     compares the configured `JUDGE_MODEL` against the hand-maintained
-    `_TEMPERATURE_REFUSING_MODEL_PREFIXES` (less the known-accepting variants in
-    `_TEMPERATURE_ACCEPTING_MODEL_PREFIXES`) and warns when the pin is also in
+    `_TEMPERATURE_REFUSING_MODEL_PREFIXES`, less any name carrying the
+    `_NON_REASONING_CHAT_MARKER` convention, and warns when the pin is also in
     effect. FALSE NEGATIVES: it does NOT guarantee detection, does not prevent the
     breakage, and does not make the upgrade safe - a refusing deployment whose name
     is not in that tuple, a newer model or an OpenAI-compatible endpoint under any
-    other name, is missed silently. FALSE POSITIVES: a name in the tuple is a
+    other name, is missed silently, and so is one whose name happens to carry the
+    `-chat` marker. That marker rule is deliberately broad, and broad means MORE
+    misses, not more false alarms. FALSE POSITIVES: a name in the tuple is a
     heuristic, never an observation, so a matching deployment may accept
     `temperature` perfectly well. The whole claim is that it reduces the chance of a
     silent surprise for the families we already know about.
@@ -455,7 +465,7 @@ def warn_if_judge_rejects_temperature() -> None:
     name = model.lower()
     if not name.startswith(_TEMPERATURE_REFUSING_MODEL_PREFIXES):
         return
-    if name.startswith(_TEMPERATURE_ACCEPTING_MODEL_PREFIXES):
+    if _NON_REASONING_CHAT_MARKER in name:
         return
     log.warning(
         "judge_temperature.known_refusing_model JUDGE_MODEL=%r matches a model "
@@ -470,7 +480,8 @@ def warn_if_judge_rejects_temperature() -> None:
         "configuration does not un-latch them. Remedy IF it refuses: set "
         "JUDGE_TEMPERATURE=none to omit the parameter; if it accepts, leave the pin "
         "alone. Best-effort and known names only - a refusing deployment under any "
-        "other name gets no warning.",
+        "other name, or under a name carrying the non-reasoning `-chat` marker that "
+        "this check treats as accepting, gets no warning at all.",
         model,
         get_judge_temperature(),
     )

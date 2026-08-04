@@ -151,13 +151,17 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > Case 1 is also flagged **at boot**: startup logs a warning when `JUDGE_MODEL`
 > matches a **known** reasoning-model name and the pin is in effect. That check is
 > a hand-maintained name match (`_TEMPERATURE_REFUSING_MODEL_PREFIXES` in
-> `backend/escalation.py` - edit it when a new refusing model ships, less the
-> known-accepting variants in `_TEMPERATURE_ACCEPTING_MODEL_PREFIXES`, e.g. the
-> non-reasoning `gpt-5-chat-latest`) and is **best-effort only**, wrong in both
-> directions. It does not guarantee detection, does not prevent the breakage, and
-> does not make the upgrade safe: a judge model it does not recognise - anything
-> newer than the list, or an OpenAI-compatible endpoint under another name - gets
-> **no warning at all**. And a name it *does* match is a family guess rather than
+> `backend/escalation.py` - edit it when a new refusing model ships), minus any
+> name carrying the non-reasoning `-chat` marker (`_NON_REASONING_CHAT_MARKER`,
+> e.g. `gpt-5-chat-latest`). It is **best-effort only**, wrong in both directions.
+> It does not guarantee detection, does not prevent the breakage, and does not
+> make the upgrade safe: a judge model it does not recognise - anything newer than
+> the list, or an OpenAI-compatible endpoint under another name - gets **no
+> warning at all**. The `-chat` exclusion is a naming *convention* rather than a
+> list, so it holds across dotted point releases instead of rotting, but it is
+> correspondingly broad: it errs toward **more missed warnings**, never toward
+> more false alarms, so a refusing deployment whose name happens to carry `-chat`
+> is also silently skipped. And a name it *does* match is a family guess rather than
 > an observed refusal, so **the warning is not proof your judge rejects the
 > parameter** - verify that judge calls are actually 400ing before setting
 > `JUDGE_TEMPERATURE=none`, or you will un-pin a gate that was working. It reduces

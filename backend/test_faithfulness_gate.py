@@ -356,7 +356,7 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
     escalation_log.addHandler(handler)
     saved = {k: os.environ.get(k) for k in ("JUDGE_MODEL", "JUDGE_TEMPERATURE")}
     try:
-        for model in ("o4-mini", "gpt-5-mini", "O3"):
+        for model in ("o4-mini", "gpt-5-mini", "O3", "gpt-5.1-mini"):
             for temp in (None, "0", "0.7"):
                 records.clear()
                 os.environ["JUDGE_MODEL"] = model
@@ -405,7 +405,9 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
         # hand-maintained name match, not a capability probe. `gpt-5-chat-latest`
         # matches the `gpt-5` prefix but is the NON-reasoning variant and takes
         # `temperature` normally, so warning on it would push an operator to un-pin
-        # a working gate.
+        # a working gate. The exclusion is the `-chat` MARKER rather than a spelling,
+        # so a dotted point release stays excluded too - an enumerated list would
+        # have re-acquired that false positive one naming generation later.
         for model in (
             None,
             "gpt-4o-mini",
@@ -413,6 +415,7 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
             "my-o3-lookalike",
             "gpt-5-chat-latest",
             "GPT-5-Chat-Latest",
+            "gpt-5.1-chat-latest",
         ):
             records.clear()
             if model is None:
