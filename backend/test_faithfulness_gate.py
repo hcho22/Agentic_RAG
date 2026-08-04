@@ -237,10 +237,16 @@ def test_judge_model_selector() -> None:
 def test_judge_sampling_is_pinned_deterministic() -> None:
     """Issue #104: a fail-closed safety gate must not SAMPLE its verdict.
 
-    The call pins `temperature=0` by default; `JUDGE_TEMPERATURE=none` omits the
-    parameter entirely (for a BYO judge model that rejects it, ADR-0006) rather
-    than wedging that deployment at a 400 forever; a malformed value falls back to
-    the deterministic default instead of taking the gate offline.
+    The call pins `temperature=0` by default; the typed-out `JUDGE_TEMPERATURE=none`
+    omits the parameter entirely (for a BYO judge model that rejects it, ADR-0006)
+    rather than wedging that deployment at a 400 forever; a malformed, non-finite or
+    out-of-range value falls back to the deterministic default instead of taking the
+    gate offline.
+
+    A BLANK value is pinned here explicitly, because it is the accidental state (a
+    bare `-e JUDGE_TEMPERATURE`, an empty configMap value, a trailing
+    `JUDGE_TEMPERATURE=` in a .env) and it must read as the default, never as the
+    opt-out - an accident must not silently return a safety gate to sampling.
     """
     saved = os.environ.get("JUDGE_TEMPERATURE")
     try:
@@ -257,6 +263,21 @@ def test_judge_sampling_is_pinned_deterministic() -> None:
             f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
         )
 
+        for blank in ("", "   "):
+            os.environ["JUDGE_TEMPERATURE"] = blank
+            _check(
+                get_judge_temperature() == 0.0,
+                f"a blank JUDGE_TEMPERATURE ({blank!r}) must mean the pinned default, "
+                f"not the un-pin escape hatch, got {get_judge_temperature()!r}",
+            )
+            _, fake = _run(_judgment(True, 0.9), "x")
+            _check(
+                cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+                == {"temperature": 0.0},
+                f"a blank JUDGE_TEMPERATURE ({blank!r}) must still pin temperature=0, "
+                f"got {cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+            )
+
         os.environ["JUDGE_TEMPERATURE"] = "none"
         _check(get_judge_temperature() is None, "'none' must mean: send no temperature")
         _, fake = _run(_judgment(True, 0.9), "x")
@@ -270,6 +291,26 @@ def test_judge_sampling_is_pinned_deterministic() -> None:
             get_judge_temperature() == 0.0,
             "a malformed JUDGE_TEMPERATURE must fall back to the deterministic default",
         )
+
+        # A value the judge API would 400 on is the same zero-deflection wedge the
+        # `none` hatch exists to prevent, so it falls back rather than shipping.
+        for rejected in ("nan", "inf", "-inf", "50", "-0.5", "2.5"):
+            os.environ["JUDGE_TEMPERATURE"] = rejected
+            _check(
+                get_judge_temperature() == 0.0,
+                f"JUDGE_TEMPERATURE={rejected!r} is not a finite value the judge API "
+                f"accepts and must fall back to the deterministic default, got "
+                f"{get_judge_temperature()!r}",
+            )
+
+        # In-range numbers stay an explicit operator decision and are honoured.
+        for accepted, want in (("0.7", 0.7), ("0", 0.0), ("2", 2.0)):
+            os.environ["JUDGE_TEMPERATURE"] = accepted
+            _check(
+                get_judge_temperature() == want,
+                f"JUDGE_TEMPERATURE={accepted!r} must be honoured as {want}, got "
+                f"{get_judge_temperature()!r}",
+            )
     finally:
         if saved is None:
             os.environ.pop("JUDGE_TEMPERATURE", None)

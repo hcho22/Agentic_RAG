@@ -68,6 +68,7 @@ path (off `EscalationConfig` entirely) so it cannot leak into the latency path.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Literal
 
@@ -255,28 +256,50 @@ def get_judge_model() -> str:
 # The escape hatch exists because ADR-0006 lets an operator point `JUDGE_MODEL` at
 # their own deployment, and some models REJECT a `temperature` argument outright
 # (a 400, which fails closed — correct, but it would wedge that deployment at zero
-# deflection forever). Setting `JUDGE_TEMPERATURE` to `none` omits the parameter
-# instead. Setting it to a number is an explicit operator decision to give up the
-# determinism these gates depend on.
+# deflection forever). Setting `JUDGE_TEMPERATURE` to the literal `none` omits the
+# parameter instead. Setting it to a number is an explicit operator decision to
+# give up the determinism these gates depend on.
+#
+# The knob resolves as: unset ⇒ the pinned default; blank ⇒ the pinned default;
+# `none` ⇒ omit the parameter; anything else ⇒ a number, or the pinned default.
+# Blank is deliberately NOT the opt-out. An empty environment variable is a common
+# accidental state - a bare `-e JUDGE_TEMPERATURE` in Docker, an empty configMap
+# value, a trailing `JUDGE_TEMPERATURE=` in a .env - and treating that accident as
+# an opt-out silently returns a safety gate to sampling, which is the exact defect
+# this knob exists to remove. Every sibling knob in this module (`_env_unit_float`,
+# `_env_min_int`) already reads unset/blank as the default; this one being
+# different was the bug, not the convention. Un-pinning must be typed out.
 DEFAULT_JUDGE_TEMPERATURE = 0.0
+
+# The range providers accept for a chat-completion `temperature`. A value outside
+# it is a 400 on every call, i.e. the same zero-deflection wedge the `none` hatch
+# exists to prevent, reachable by a fat-fingered digit.
+_JUDGE_TEMPERATURE_MAX = 2.0
 
 
 def get_judge_temperature() -> float | None:
     """Sampling temperature for the two runtime gates (`JUDGE_TEMPERATURE` env).
 
-    Returns `0.0` unless overridden. `None` means "send no `temperature` at all",
-    for a judge model that rejects the parameter; it is requested by setting the
-    env var to `none` (or an empty string). An unparseable value falls back to the
-    deterministic default rather than raising — a malformed knob must not take a
-    safety gate offline.
+    Resolves as: unset ⇒ `DEFAULT_JUDGE_TEMPERATURE`; blank ⇒
+    `DEFAULT_JUDGE_TEMPERATURE`; the literal `none` ⇒ `None`, meaning "send no
+    `temperature` at all" for a judge model that rejects the parameter (ADR-0006).
+    The typed-out `none` is the ONLY way to un-pin: a deliberate opt-out is
+    legitimate, an accidental one is not.
+
+    A value that is not a number, is not finite, or falls outside
+    `[0, _JUDGE_TEMPERATURE_MAX]` warns and falls back to the deterministic
+    default. Note the deliberate difference from the sibling `_env_unit_float`,
+    which RAISES on the same input: this knob must not fail the boot, because
+    falling back to the pinned default is always safe here, whereas raising would
+    take the gate offline entirely.
     """
     raw = os.environ.get("JUDGE_TEMPERATURE")
-    if raw is None:
+    if raw is None or raw.strip() == "":
         return DEFAULT_JUDGE_TEMPERATURE
-    if raw.strip().lower() in ("", "none"):
+    if raw.strip().lower() == "none":
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         log.warning(
             "JUDGE_TEMPERATURE=%r is not a number; using the deterministic "
@@ -285,6 +308,17 @@ def get_judge_temperature() -> float | None:
             DEFAULT_JUDGE_TEMPERATURE,
         )
         return DEFAULT_JUDGE_TEMPERATURE
+    if not math.isfinite(value) or not 0.0 <= value <= _JUDGE_TEMPERATURE_MAX:
+        log.warning(
+            "JUDGE_TEMPERATURE=%r is not a finite value in [0,%.1f]; the judge API "
+            "would reject it on every call and wedge the gate at zero deflection, "
+            "so using the deterministic default %.1f instead",
+            raw,
+            _JUDGE_TEMPERATURE_MAX,
+            DEFAULT_JUDGE_TEMPERATURE,
+        )
+        return DEFAULT_JUDGE_TEMPERATURE
+    return value
 
 
 def _judge_sampling_kwargs() -> dict[str, float]:
@@ -543,11 +577,40 @@ async def answer_gate(
     )
 
 
+# The tags `_non_answer` is called with - the branches where the JUDGE ITSELF
+# failed, as opposed to `judge_unaddressed` / `score < cutoff`, which are verdicts
+# the judge actually reached. Both shapes fail closed to `answers=False`, so the
+# `reason` is the ONLY thing that tells them apart; a caller measuring what the
+# rubric concludes must not count a dead judge as a non-answer verdict (invariant
+# 12: measured nothing must never be reportable as a measurement). Note that
+# `judge_unaddressed` shares the `judge_` prefix, so this is an exact-match set
+# rather than a prefix test.
+JUDGE_FAILURE_TAGS = ("judge_error", "judge_no_choices", "judge_refusal", "judge_no_payload")
+
+
 def _non_answer(tag: str) -> AnswerDecision:
-    """The fail-closed decision: the draft did not answer, escalate."""
+    """The fail-closed decision: the judge itself failed, escalate.
+
+    The tag is asserted to be registered so a NEW failure branch cannot be added
+    without `judge_failure_tag` learning to recognise it - the drift would leave a
+    dead judge once again indistinguishable from a real non-answer verdict.
+    """
+    assert tag in JUDGE_FAILURE_TAGS, f"unregistered judge failure tag {tag!r}"
     return AnswerDecision(
         answers=False, addressed=False, score=0.0, reason=f"non_answer: {tag}"
     )
+
+
+def judge_failure_tag(reason: str) -> str | None:
+    """The `JUDGE_FAILURE_TAGS` entry an `AnswerDecision.reason` reports, if any.
+
+    `None` means the judge was reached and returned a verdict (including a
+    legitimate `judge_unaddressed`), so the decision reflects the rubric.
+    """
+    for tag in JUDGE_FAILURE_TAGS:
+        if reason == f"non_answer: {tag}":
+            return tag
+    return None
 
 
 # -----------------------------------------------------------------------------

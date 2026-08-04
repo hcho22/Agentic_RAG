@@ -105,6 +105,7 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 | `OPENAI_RERANK_MODEL` | `llm` reranker (only when `RERANKER=llm`, or the eval runner's `--reranker llm`) | `OPENAI_MODEL` |
 | `EMBEDDER_MODEL` | Embedder | `EMBEDDING_MODEL` → `text-embedding-3-small` |
 | `JUDGE_MODEL` | Runtime faithfulness gate (US-048) | `gpt-4o-mini` (does **not** chain to `OPENAI_MODEL`) |
+| `JUDGE_TEMPERATURE` | Runtime faithfulness + answer-completeness gates | `0` (unset **or** blank); the literal `none` omits the parameter |
 | `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (OpenAI proper, no `base_url`) / `completions` (Azure or `openai` + `base_url`) |
 
 > **`JUDGE_MODEL` is a `judge`-role selector, not an answerer one.** Its
@@ -114,6 +115,25 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > stays cheap even behind a large answerer. On a non-OpenAI judge, set
 > `JUDGE_MODEL` to your deployment/model id; an unset/wrong value just makes the
 > judge call fail, which fails **closed** (escalate), never auto-sends a reply.
+
+> **`JUDGE_TEMPERATURE` pins the two runtime gates' sampler.** Both gates fail
+> **closed**, and a gate that returns a different verdict on identical input is
+> sampling one rather than deciding it - the 2026-08-03 E7 investigation measured
+> the answer gate returning `answers=true` on 2 of 5 identical calls for the same
+> (question, draft) pair (issue #104). Both gates therefore send `temperature=0`
+> by default.
+>
+> The escape hatch is for a bring-your-own judge: some non-OpenAI deployments
+> **reject** a `temperature` argument with a 400, which fails closed on every turn
+> and would wedge that deployment at zero deflection forever. Set
+> `JUDGE_TEMPERATURE=none` to omit the parameter entirely. That literal `none` is
+> the **only** way to un-pin - unset and blank both mean the pinned default, so a
+> bare `-e JUDGE_TEMPERATURE` or a trailing `JUDGE_TEMPERATURE=` in a `.env`
+> cannot silently return a safety gate to sampling. A value that is not a number,
+> not finite, or outside `[0,2]` logs a warning and falls back to `0` rather than
+> failing the boot: a fat-fingered knob must not take a safety gate offline.
+> Setting a real number is an explicit operator decision to give up that
+> determinism.
 
 Rerankers (`COHERE_RERANK_MODEL` / `VOYAGE_RERANK_MODEL`) are a **separate
 provider axis** (dedicated rerank endpoints) and are not part of this surface.

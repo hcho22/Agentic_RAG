@@ -69,7 +69,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -79,6 +79,7 @@ from escalation import (  # noqa: E402
     AnswerJudgment,
     DEFAULT_ANSWER_CUTOFF,
     answer_gate,
+    judge_failure_tag,
 )
 
 # How many times each live case is judged. Every case must come back UNANIMOUS.
@@ -270,6 +271,13 @@ def test_live_rubric_discrimination() -> None:
     Skips cleanly when a key or package is absent so the unit layer above still
     runs anywhere. Requires unanimity over `_REPS` calls per case: both judges are
     pinned to temperature 0, so a split verdict is a finding, not a flake.
+
+    A judge that was CALLED AND FAILED is a third outcome, distinct from both a
+    clean skip and a verdict: it is reported as UNMEASURED and fails the test. The
+    runtime gate fails closed, so a dead judge answers False on every case and
+    would otherwise print `ok` for every `must_answer=False` row while exercising
+    no rubric at all - invariant 12's "measured nothing must never be reportable as
+    a measurement", in the one layer whose entire job is to measure the rubric.
     """
     openai_key = os.environ.get("OPENAI_API_KEY")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -279,7 +287,11 @@ def test_live_rubric_discrimination() -> None:
 
     failures: list[str] = []
 
-    Judge = Callable[[str, str], Awaitable[bool]]
+    # A judge verdict, plus the `JUDGE_FAILURE_TAGS` entry naming a judge that was
+    # CALLED AND FAILED (`None` when the judge actually reached a verdict). This
+    # alias is EVALUATED, not deferred like an annotation, so it spells the union
+    # the `typing` way rather than with `|`.
+    Judge = Callable[[str, str], Awaitable[Tuple[bool, Optional[str]]]]
 
     def _build_impls() -> list[tuple[str, Judge]]:
         impls: list[tuple[str, Judge]] = []
@@ -288,11 +300,18 @@ def test_live_rubric_discrimination() -> None:
 
             oc = AsyncOpenAI(api_key=openai_key)
 
-            async def runtime(question: str, draft: str) -> bool:
+            async def runtime(question: str, draft: str) -> tuple[bool, str | None]:
+                # `answer_gate` fails CLOSED, so an expired key, a rate limit, a
+                # timeout or a network blip all return answers=False - the same
+                # value a correct non-answer verdict returns. Reading only
+                # `.answers` would print `ok` for every must_answer=False case
+                # while zero rubric evaluation happened, which is exactly the
+                # invariant-12 shape the project forbids. The `reason` is what
+                # separates the two, so it is carried out of here.
                 decision = await answer_gate(
                     oc, question, draft, DEFAULT_ANSWER_CUTOFF
                 )
-                return decision.answers
+                return decision.answers, judge_failure_tag(decision.reason)
 
             impls.append(("runtime", runtime))
         if anthropic_key:
@@ -311,8 +330,11 @@ def test_live_rubric_discrimination() -> None:
 
                 ac = anthropic.AsyncAnthropic(api_key=anthropic_key)
 
-                async def offline(question: str, draft: str) -> bool:
-                    return await judge_answering(ac, question, draft)
+                # The offline mirror RAISES on a failed/unparseable judge call
+                # rather than failing closed, so it cannot silently report a dead
+                # judge as a verdict and never needs a failure tag.
+                async def offline(question: str, draft: str) -> tuple[bool, str | None]:
+                    return await judge_answering(ac, question, draft), None
 
                 impls.append(("offline", offline))
         return impls
@@ -325,9 +347,30 @@ def test_live_rubric_discrimination() -> None:
 
         for label, question, draft, must_answer, why in _CASES:
             for impl_name, judge in impls:
-                verdicts = await asyncio.gather(
+                results = await asyncio.gather(
                     *[judge(question, draft) for _ in range(_REPS)]
                 )
+
+                # A judge that was called and failed measured NOTHING, so this case
+                # is UNMEASURED - never a legitimate non-answer verdict, and never
+                # an `ok`.
+                judge_failures = sorted({tag for _, tag in results if tag})
+                if judge_failures:
+                    print(
+                        f"  UNMEASURED [{impl_name:>7}] {label}: the judge was "
+                        f"called and failed ({', '.join(judge_failures)})"
+                    )
+                    failures.append(
+                        f"[{impl_name}] {label}: HARNESS FAILURE - the judge was "
+                        f"called and failed ({', '.join(judge_failures)}), so this "
+                        "case exercised no rubric at all. The gate fails closed, so "
+                        "a dead judge reports answers=False and would otherwise read "
+                        "as the rubric correctly rejecting a non-answer. Fix the "
+                        "judge credentials/connectivity and re-run."
+                    )
+                    continue
+
+                verdicts = [answers for answers, _ in results]
                 unanimous = len(set(verdicts)) == 1
                 got = verdicts[0] if unanimous else verdicts
                 ok = unanimous and verdicts[0] is must_answer
