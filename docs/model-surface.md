@@ -126,43 +126,27 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > and provider-side temperature 0 is itself best-effort, so a differing verdict on
 > an identical pair is unlikely rather than impossible.
 >
-> **Models that reject the parameter are handled automatically.** Some judge
-> deployments **reject** a `temperature` argument with a 400 - not only
-> bring-your-own endpoints, but first-party OpenAI **reasoning models**
-> (o-series, `gpt-5-*`), which are a plausible `JUDGE_MODEL` choice. Others accept
-> the argument but cap its **range** below the `[0,2]` the knob validates (an
-> Anthropic-compatible endpoint caps it at 1.0 and answers `temperature: Input
-> should be less than or equal to 1`); a validator cannot know each endpoint's
-> range, so that disagreement is absorbed here rather than left to 400 on every
-> call. Both gates therefore retry that one call **without** `temperature` when
-> (and only when) the 400 specifically blames the argument - by name or by value -
-> use the result normally, and remember the model id, so a rejecting model costs
-> one extra call, paid once per model after that first rejection is recorded.
-> Judge calls already in flight when that FIRST rejection lands each pay their own
-> rejected attempt - there is no record to consult yet, and it is deliberately not
-> locked on the request path. The fallback is **not** a judge failure: it yields a
-> real verdict, never `judge_error`, and never fails a gate closed. It logs one
-> `warning` per model naming it and stating the gates are running **unpinned** for
-> it. Any other failure - auth, rate limit, timeout, network, any other 400 - still
-> fails closed exactly as before.
+> **If your judge deployment will not take the parameter, set
+> `JUDGE_TEMPERATURE=none`.** Two deployments do not: first-party OpenAI
+> **reasoning models** (o-series, `gpt-5-*`) reject the `temperature` argument
+> outright with a 400, and an endpoint whose accepted range is narrower than the
+> `[0,2]` the knob validates rejects the *value* (an Anthropic-compatible endpoint
+> caps at 1.0 and answers `temperature: Input should be less than or equal to 1`).
+> Both are a 400 on **every** call, both fail both gates closed on every turn, and
+> both have the same one-setting remedy: `JUDGE_TEMPERATURE=none` omits the
+> parameter entirely.
 >
-> **The un-pinned state re-probes itself.** The record is inferred from an error
-> string, so a transient or gateway-originated 400 can enter a model into it by
-> mistake and would otherwise leave both gates sampling for the life of the
-> process. Every ~500 un-pinned calls (roughly every 250 customer turns, since both
-> gates run per turn) **exactly one** call sends the parameter again: a model that
-> really rejects it re-confirms, stays unpinned and logs a fresh `warning` - so a
-> long-running deployment keeps saying so in monitoring - while a model recorded by
-> mistake accepts the probe, is forgotten, and is **pinned again** from the next
-> call, logging that recovery at the same level. The probe slot is claimed before
-> the call goes out, so a boundary costs one probe however many judge calls cross
-> it together, and a probe that fails for an unrelated reason (rate limit, 5xx)
-> proved nothing: it fails that turn's gate closed like any other judge error, and
-> the next call resumes the un-pinned path rather than re-probing forever.
+> That remedy is deliberately a typed-out configuration statement rather than
+> something the gates infer from the provider's error text. Classifying free-text
+> 400s from arbitrary providers on a safety path is unsafe in *both* directions -
+> read too loosely, a gateway echoing the request payload into an unrelated error
+> un-pins a safety gate; read too strictly, a real rejection goes unrecognised and
+> the gate fails closed anyway. So a judge call is exactly one call with no retry,
+> and every failure - auth, rate limit, timeout, network, any 400 - fails closed.
 >
 > **Why that matters, and the residual risk.** A judge that fails on *every* call
-> for a reason the fallback does not cover makes both gates fail closed,
-> `run_deflection_pipeline` returns `action='escalated'`, and the latch site in
+> makes both gates fail closed, `run_deflection_pipeline` returns
+> `action='escalated'`, and the latch site in
 > `backend/main.py` tests only `result.turn.escalated` - it cannot tell that from
 > a **deliberate** ADR-0003 escalate, so it calls `_escalate_conversation_safe`
 > and pins `conversations.status='escalated'`. That transition is one-way and
@@ -172,9 +156,8 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > the ones already latched, which stay `escalated` with the bot silent in them,
 > because the status transition cannot be reversed. The failure is not
 > self-healing, so verify a new `JUDGE_MODEL` answers before pointing production
-> at it, and set `JUDGE_TEMPERATURE=none` up front if you would rather not have
-> the gates probe the parameter at all. The underlying defect - that a transient
-> or misconfigured judge failure is indistinguishable from a deliberate escalate
+> at it. The underlying defect - that a transient or misconfigured judge failure
+> is indistinguishable from a deliberate escalate
 > at the latch site, contradicting both invariant 8 ("a degraded/transient failure
 > defers this turn but does NOT latch") and the `_escalate_conversation_safe`
 > docstring - is **not yet fixed**; issue #105 tracks it.
