@@ -124,15 +124,32 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > by default.
 >
 > The escape hatch is for a bring-your-own judge: some non-OpenAI deployments
-> **reject** a `temperature` argument with a 400, which fails closed on every turn
-> and would wedge that deployment at zero deflection forever. Set
-> `JUDGE_TEMPERATURE=none` to omit the parameter entirely. That literal `none` is
-> the **only** way to un-pin - unset and blank both mean the pinned default, so a
-> bare `-e JUDGE_TEMPERATURE` or a trailing `JUDGE_TEMPERATURE=` in a `.env`
-> cannot silently return a safety gate to sampling. A value that is not a number,
-> not finite, or outside `[0,2]` logs a warning and falls back to `0` rather than
-> failing the boot: a fat-fingered knob must not take a safety gate offline.
-> Setting a real number is an explicit operator decision to give up that
+> **reject** a `temperature` argument with a 400, which fails closed on every
+> turn, and that costs more than deflection. A judge that 400s makes both gates
+> fail closed, `run_deflection_pipeline` returns `action='escalated'`, and the
+> latch site in `backend/main.py` tests only `result.turn.escalated` - it cannot
+> tell that from a **deliberate** ADR-0003 escalate, so it calls
+> `_escalate_conversation_safe` and pins `conversations.status='escalated'`. That
+> transition is one-way and DB-trigger-enforced (AGENTS.md invariant 5), so the
+> blast radius is **permanent per-conversation bot silence**, not merely lost
+> deflection. Repairing the configuration stops NEW conversations from latching;
+> it does **not** un-latch the ones already latched, which stay `escalated` with
+> the bot silent in them, because the status transition cannot be reversed. The
+> failure is not self-healing, so set `JUDGE_TEMPERATURE=none` **before** pointing
+> `JUDGE_MODEL` at a deployment that rejects the parameter. The underlying defect
+> - that a transient or misconfigured judge failure is indistinguishable from a
+> deliberate escalate at the latch site, contradicting both invariant 8 ("a
+> degraded/transient failure defers this turn but does NOT latch") and the
+> `_escalate_conversation_safe` docstring - is **not yet fixed**; follow-up task
+> `purvia-judge-error-latches-conversation` tracks it.
+>
+> Set `JUDGE_TEMPERATURE=none` to omit the parameter entirely. That literal
+> `none` is the **only** way to un-pin - unset and blank both mean the pinned
+> default, so a bare `-e JUDGE_TEMPERATURE` or a trailing `JUDGE_TEMPERATURE=` in
+> a `.env` cannot silently return a safety gate to sampling. A value that is not
+> a number, not finite, or outside `[0,2]` logs a warning and falls back to `0`
+> rather than failing the boot: a fat-fingered knob must not take a safety gate
+> offline. Setting a real number is an explicit operator decision to give up that
 > determinism.
 
 Rerankers (`COHERE_RERANK_MODEL` / `VOYAGE_RERANK_MODEL`) are a **separate
