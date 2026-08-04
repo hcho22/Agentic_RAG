@@ -351,10 +351,10 @@ def _resolve_judge_temperature(raw: str | None) -> float | None:
         return DEFAULT_JUDGE_TEMPERATURE
     if not math.isfinite(value) or not 0.0 <= value <= _JUDGE_TEMPERATURE_MAX:
         log.warning(
-            "JUDGE_TEMPERATURE=%r is not a finite value in [0,%.1f]; the judge API "
-            "would reject it on every call, failing both gates closed and "
-            "permanently latching every affected conversation, so using the "
-            "deterministic default %.1f instead",
+            "JUDGE_TEMPERATURE=%r is outside the validated range [0,%.1f]; it was "
+            "NOT sent and the deterministic default %.1f was used instead. The "
+            "range guard exists because a value providers reject would 400 every "
+            "judge call; nothing was sent here, so the gates stay pinned",
             raw,
             _JUDGE_TEMPERATURE_MAX,
             DEFAULT_JUDGE_TEMPERATURE,
@@ -394,36 +394,54 @@ def _judge_sampling_kwargs() -> dict[str, float]:
     return {} if temperature is None else {"temperature": temperature}
 
 
-# Model-name prefixes of judge deployments KNOWN to refuse the `temperature`
-# parameter outright - case (1) of the `DEFAULT_JUDGE_TEMPERATURE` block. This is a
-# hand-maintained list of names observed to reject the argument, and it is the ONLY
-# input to the boot check below: nothing here looks at any provider response.
+# Model-name prefixes of judge deployments COMMONLY seen to refuse the
+# `temperature` parameter outright - case (1) of the `DEFAULT_JUDGE_TEMPERATURE`
+# block. This is a hand-maintained name list, and it is the ONLY input to the boot
+# check below: nothing here looks at any provider response.
 #
-# Edit THIS tuple when a new refusing model ships. It WILL go stale - the list
-# cannot know about models released after it was written, and it cannot see a
-# bring-your-own endpoint that refuses the parameter under an unrelated name. A
-# `JUDGE_MODEL` it does not recognise gets NO warning at all.
+# Edit THIS tuple when a new refusing model ships. It is wrong in BOTH directions.
+# It WILL go stale - it cannot know about models released after it was written, and
+# it cannot see a bring-your-own endpoint that refuses the parameter under an
+# unrelated name, so a `JUDGE_MODEL` it does not recognise gets NO warning at all.
+# And a name in it is a family guess, not an observed refusal, so a matching
+# deployment may accept the parameter perfectly well.
 _TEMPERATURE_REFUSING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+# Names that match a prefix above but are NOT reasoning models and take
+# `temperature` normally - `gpt-5-chat-latest` is OpenAI's non-reasoning gpt-5
+# variant. Warning on those would push an operator to un-pin a gate that was
+# working, the same harm case (2) of the `DEFAULT_JUDGE_TEMPERATURE` block warns
+# against. Only names we can actually point at belong here; this is not an attempt
+# to enumerate every accepting model.
+_TEMPERATURE_ACCEPTING_MODEL_PREFIXES = ("gpt-5-chat",)
 
 
 def warn_if_judge_rejects_temperature() -> None:
-    """Log ONCE at boot if the judge model is a KNOWN temperature-refuser.
+    """Log ONCE at boot if the judge model NAME matches a known refusing family.
 
-    Best-effort operator aid, nothing more. It compares the configured
-    `JUDGE_MODEL` against the hand-maintained
-    `_TEMPERATURE_REFUSING_MODEL_PREFIXES` and warns when the pin is also in
-    effect. It does NOT guarantee detection, does not prevent the breakage, and
-    does not make the upgrade safe: a refusing deployment whose name is not in that
-    tuple - a newer model, or an OpenAI-compatible endpoint under any other name -
-    is missed silently. The whole claim is that it reduces the chance of a silent
-    surprise for the names we already know about.
+    Best-effort operator aid, nothing more, and wrong in both directions. It
+    compares the configured `JUDGE_MODEL` against the hand-maintained
+    `_TEMPERATURE_REFUSING_MODEL_PREFIXES` (less the known-accepting variants in
+    `_TEMPERATURE_ACCEPTING_MODEL_PREFIXES`) and warns when the pin is also in
+    effect. FALSE NEGATIVES: it does NOT guarantee detection, does not prevent the
+    breakage, and does not make the upgrade safe - a refusing deployment whose name
+    is not in that tuple, a newer model or an OpenAI-compatible endpoint under any
+    other name, is missed silently. FALSE POSITIVES: a name in the tuple is a
+    heuristic, never an observation, so a matching deployment may accept
+    `temperature` perfectly well. The whole claim is that it reduces the chance of a
+    silent surprise for the families we already know about.
+
+    Because it can be wrong either way, the log line it emits is conditional and
+    tells the operator to VERIFY before changing configuration - a human acts on the
+    message, not on this docstring, so the message must hedge at least as carefully
+    as this does.
 
     It exists because the pin is a NEW request parameter on an upgrade path: an
-    operator already running one of these models has a working deployment today,
-    and after the pin every judge call 400s, both gates fail closed on every turn,
-    and per issue #105 the latch site cannot tell that from a deliberate escalate,
-    so affected conversations latch to `escalated` permanently. Docs alone do not
-    reach an operator mid-upgrade.
+    operator already running one of these models has a working deployment today, and
+    if that judge does refuse the parameter then every call 400s, both gates fail
+    closed on every turn, and per issue #105 the latch site cannot tell that from a
+    deliberate escalate, so affected conversations latch to `escalated` permanently.
+    Docs alone do not reach an operator mid-upgrade.
 
     Boot-time only, by construction: it is called from the startup hook, never from
     `_judge_parse` or either gate, so it adds nothing to the request path and can
@@ -434,19 +452,25 @@ def warn_if_judge_rejects_temperature() -> None:
     if get_judge_temperature() is None:
         return
     model = get_judge_model()
-    if not model.lower().startswith(_TEMPERATURE_REFUSING_MODEL_PREFIXES):
+    name = model.lower()
+    if not name.startswith(_TEMPERATURE_REFUSING_MODEL_PREFIXES):
+        return
+    if name.startswith(_TEMPERATURE_ACCEPTING_MODEL_PREFIXES):
         return
     log.warning(
-        "judge_temperature.known_refusing_model JUDGE_MODEL=%r is a known "
-        "reasoning model that rejects the `temperature` parameter with a 400. The "
-        "faithfulness and answer gates send temperature=%s on every call, so every "
-        "judge call will fail and BOTH GATES WILL FAIL CLOSED ON EVERY TURN; per "
-        "issue #105 the latch site cannot tell that from a deliberate escalate, so "
-        "affected conversations latch to status='escalated' permanently and "
-        "repairing the configuration does not un-latch them. Remedy: set "
-        "JUDGE_TEMPERATURE=none to omit the parameter. This check matches only the "
-        "known names in escalation._TEMPERATURE_REFUSING_MODEL_PREFIXES and is "
-        "best-effort: a refusing deployment under any other name gets no warning.",
+        "judge_temperature.known_refusing_model JUDGE_MODEL=%r matches a model "
+        "family that COMMONLY refuses the `temperature` parameter. This is a name "
+        "match against escalation._TEMPERATURE_REFUSING_MODEL_PREFIXES, NOT an "
+        "observed refusal - this deployment may accept it perfectly well, so VERIFY "
+        "before changing configuration. The faithfulness and answer gates send "
+        "temperature=%s on every call; if this judge does refuse it, every judge "
+        "call 400s, both gates fail closed on every turn, and per issue #105 the "
+        "latch site cannot tell that from a deliberate escalate, so affected "
+        "conversations latch to status='escalated' permanently and repairing the "
+        "configuration does not un-latch them. Remedy IF it refuses: set "
+        "JUDGE_TEMPERATURE=none to omit the parameter; if it accepts, leave the pin "
+        "alone. Best-effort and known names only - a refusing deployment under any "
+        "other name gets no warning.",
         model,
         get_judge_temperature(),
     )
@@ -753,14 +777,20 @@ def _non_answer(tag: str) -> AnswerDecision:
     tag logs and still escalates; it must not turn a graceful escalate into an
     exception (AGENTS.md invariant 4).
 
-    The anti-drift guarantee - a new failure branch cannot be added without
-    `judge_failure_tag` learning to recognise it, drift that would leave a dead
-    judge once again indistinguishable from a real non-answer verdict - is a
-    SOURCE-level property, so it is pinned statically by
+    The anti-drift check is a SOURCE-level property, so it is pinned statically by
     `test_answer_gate_rubric.test_every_non_answer_tag_is_registered`: it reads
     these call sites with `ast` and asserts set-equality with
     `JUDGE_FAILURE_TAGS`. That holds unconditionally, unlike an `assert`, which
     `python -O` strips out of an optimized deployment entirely.
+
+    Its scope is exactly the tags passed to `_non_answer`, and no wider: the test
+    walks CALLS to this helper, so a fail-closed branch that builds an
+    `AnswerDecision` directly is invisible to it - and `answer_gate` already
+    constructs decisions that way for its two real verdicts, so the pattern is at
+    hand. A new judge-failure branch MUST return through `_non_answer` for the guard
+    to see it; written any other way, `judge_failure_tag` reports the dead judge as
+    a real non-answer verdict, which is the invariant-12 drift the registry exists
+    to block.
     """
     if tag not in JUDGE_FAILURE_TAGS:
         log.error(

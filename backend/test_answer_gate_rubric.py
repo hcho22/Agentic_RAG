@@ -127,7 +127,7 @@ def _check(cond: bool, msg: str) -> None:
 
 def _literal_from_source(path: Path, name: str) -> Any:
     """Evaluate a module-level literal assignment without importing the module."""
-    for node in ast.parse(path.read_text()).body:
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == name for t in node.targets
         ):
@@ -155,7 +155,7 @@ def _non_answer_call_tags(path: Path) -> set[str]:
     computed tag would slip past the registry check below unseen.
     """
     tags: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text())):
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if not isinstance(node, ast.Call):
             continue
         func = node.func

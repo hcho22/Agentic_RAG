@@ -151,13 +151,18 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > Case 1 is also flagged **at boot**: startup logs a warning when `JUDGE_MODEL`
 > matches a **known** reasoning-model name and the pin is in effect. That check is
 > a hand-maintained name match (`_TEMPERATURE_REFUSING_MODEL_PREFIXES` in
-> `backend/escalation.py` - edit it when a new refusing model ships) and is
-> **best-effort only**: it does not guarantee detection, does not prevent the
-> breakage, and does not make the upgrade safe. A judge model it does not
-> recognise - anything newer than the list, or an OpenAI-compatible endpoint under
-> another name - gets **no warning at all**. It reduces the chance of a silent
-> surprise; it is not a safety net. It never blocks startup and never changes a
-> gate decision.
+> `backend/escalation.py` - edit it when a new refusing model ships, less the
+> known-accepting variants in `_TEMPERATURE_ACCEPTING_MODEL_PREFIXES`, e.g. the
+> non-reasoning `gpt-5-chat-latest`) and is **best-effort only**, wrong in both
+> directions. It does not guarantee detection, does not prevent the breakage, and
+> does not make the upgrade safe: a judge model it does not recognise - anything
+> newer than the list, or an OpenAI-compatible endpoint under another name - gets
+> **no warning at all**. And a name it *does* match is a family guess rather than
+> an observed refusal, so **the warning is not proof your judge rejects the
+> parameter** - verify that judge calls are actually 400ing before setting
+> `JUDGE_TEMPERATURE=none`, or you will un-pin a gate that was working. It reduces
+> the chance of a silent surprise; it is not a safety net. It never blocks startup
+> and never changes a gate decision.
 >
 > The remedy is deliberately a typed-out configuration statement rather than
 > something the gates infer from the provider's error text. Classifying free-text

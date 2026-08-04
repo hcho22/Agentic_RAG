@@ -380,6 +380,16 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
                     "the warning must name the consequence (both gates fail closed; "
                     f"issue #105 permanent latching), got {message!r}",
                 )
+                # A name match is a heuristic, not an observed refusal, so the
+                # message must stay conditional and tell the operator to verify
+                # before un-pinning a gate that may well be working.
+                _check(
+                    "NOT an observed refusal" in message
+                    and "VERIFY" in message
+                    and "if it refuses" in message.lower(),
+                    "the warning must be conditional and tell the operator to "
+                    f"verify before changing configuration, got {message!r}",
+                )
 
             # The typed-out opt-out is the remedy, so it must silence the warning.
             records.clear()
@@ -392,8 +402,18 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
             )
 
         # A name the list does not know gets no warning - the check is a
-        # hand-maintained name match, not a capability probe.
-        for model in (None, "gpt-4o-mini", "claude-haiku-judge", "my-o3-lookalike"):
+        # hand-maintained name match, not a capability probe. `gpt-5-chat-latest`
+        # matches the `gpt-5` prefix but is the NON-reasoning variant and takes
+        # `temperature` normally, so warning on it would push an operator to un-pin
+        # a working gate.
+        for model in (
+            None,
+            "gpt-4o-mini",
+            "claude-haiku-judge",
+            "my-o3-lookalike",
+            "gpt-5-chat-latest",
+            "GPT-5-Chat-Latest",
+        ):
             records.clear()
             if model is None:
                 os.environ.pop("JUDGE_MODEL", None)
