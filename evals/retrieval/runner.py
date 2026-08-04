@@ -818,7 +818,16 @@ async def judge_answer(
 # for it lives in full at that runtime prompt's block comment. The independence
 # that makes this a *mirror* rather than the same object is deliberate, but it is
 # NOT free: it is what let the two implementations disagree unnoticed until the
-# 2026-08-03 sweep. Keep them in step by hand until the parity check lands.
+# 2026-08-03 sweep.
+#
+# `backend/test_answer_gate_rubric.test_both_rubrics_state_every_shared_rule` now
+# guards that drift, gated per-PR by the `eval-harness-guards` job. Know its exact
+# scope before leaning on it: it asserts rule PRESENCE in each rubric against the
+# hand-curated `_SHARED_RULES` list, NOT textual parity. So it catches a rule
+# DROPPED from one side and it does NOT catch a rule ADDED to only one - a rule
+# nobody has entered in `_SHARED_RULES` is a rule it cannot see. That residual is
+# the remaining by-hand obligation: a new rule goes into this prompt, the runtime
+# prompt, AND `_SHARED_RULES`, in the same change.
 ANSWER_JUDGE_PROMPT_TEMPLATE = (
     "You are a strict answer-completeness judge for an automated customer-support "
     "reply. You are given the customer's QUESTION and a draft ANSWER. Decide "

@@ -59,10 +59,20 @@ pipeline above read no environment — they take explicit params, staying pure a
 testable — so this config layer supplies the validated `tau_sim` / `n_min` /
 `faithfulness_cutoff` the support endpoint (US-066+) spreads into
 `run_deflection_pipeline` (alongside `retrieval.get_similarity_threshold()` for
-`match_threshold`). The **false-resolve ceiling** is a separate eval-time knob —
-the one number a buyer sets as their risk tolerance, consumed by the E7 sweep
-(US-058) and the E8 gate (US-059) — and is deliberately kept OFF the per-request
-path (off `EscalationConfig` entirely) so it cannot leak into the latency path.
+`match_threshold`). ONE gate knob sits outside that rule and is named here so the
+exception is visible rather than discovered: `JUDGE_TEMPERATURE` (issue #104) is
+read from env by `_judge_sampling_kwargs()` on EVERY gate invocation, with no
+parameter override - unlike `JUDGE_MODEL`, which at least has the gates' `model=`
+argument. It is deliberately not an `EscalationConfig` field because it is not a
+per-request decision input: it is a property of the JUDGE DEPLOYMENT's request
+contract, resolved alongside `get_judge_model()` and never varied per call site,
+so threading it through the pipeline would suggest a caller may legitimately
+choose a different sampler per turn. The statement above still holds for every
+knob `EscalationConfig` does own. The **false-resolve ceiling** is a separate
+eval-time knob — the one number a buyer sets as their risk tolerance, consumed by
+the E7 sweep (US-058) and the E8 gate (US-059) — and is deliberately kept OFF the
+per-request path (off `EscalationConfig` entirely) so it cannot leak into the
+latency path.
 """
 
 from __future__ import annotations
@@ -262,16 +272,31 @@ def get_judge_model() -> str:
 # different and much smaller thing.
 #
 # The escape hatch exists because ADR-0006 lets an operator point `JUDGE_MODEL` at
-# their own deployment, and not every deployment accepts the argument: first-party
-# OpenAI reasoning models (o-series, `gpt-5-*`) reject the PARAMETER outright, and
-# an endpoint whose accepted range is narrower than `_JUDGE_TEMPERATURE_MAX` (an
-# Anthropic-compatible one caps at 1.0) rejects the VALUE. Both are a 400 on every
-# call, and both have the same remedy: set `JUDGE_TEMPERATURE` to the literal
-# `none`, which omits the parameter entirely. That is a typed-out operator decision
-# rather than something inferred from a provider's error text - guessing at free-text
-# 400s on a safety path is unsafe in both directions, since reading one too loosely
-# un-pins a gate on an echoed payload and reading one too strictly leaves the gate
-# failing closed on every turn. Setting it to a number is an explicit operator
+# their own deployment, and not every deployment accepts the argument. There are
+# TWO distinct rejections, and they do NOT share a remedy:
+#
+#   (1) The PARAMETER is refused outright. First-party OpenAI reasoning models
+#       (o-series, `gpt-5-*`) do this, at ANY value including the pinned default,
+#       so it is a 400 on every call from the moment the deployment is pointed
+#       there. The remedy is `JUDGE_TEMPERATURE=none`, which omits the parameter
+#       entirely - there is no number that works.
+#
+#   (2) The VALUE is refused as outside that endpoint's accepted range. This one
+#       CANNOT fire at the shipped default: `DEFAULT_JUDGE_TEMPERATURE` is 0.0,
+#       which is inside every provider's range including an Anthropic-compatible
+#       endpoint's `[0,1]`. It only happens once an operator has explicitly set a
+#       number above that endpoint's cap, and the remedy is then to set a value
+#       the endpoint accepts (`0` keeps the gates pinned). Reaching for the
+#       opt-out here would un-pin a safety gate the operator could have kept
+#       pinned; it is the alternative only if they would rather send nothing at
+#       all. `_JUDGE_TEMPERATURE_MAX` does not protect against this and is not
+#       trying to: a validator cannot know each bring-your-own endpoint's range.
+#
+# Either way the escape hatch is a typed-out operator decision rather than
+# something inferred from a provider's error text - guessing at free-text 400s on a
+# safety path is unsafe in both directions, since reading one too loosely un-pins a
+# gate on an echoed payload and reading one too strictly leaves the gate failing
+# closed on every turn. Setting the knob to a number is an explicit operator
 # decision to give up the determinism these gates depend on.
 #
 # The knob resolves as: unset ⇒ the pinned default; blank ⇒ the pinned default;
@@ -291,8 +316,9 @@ DEFAULT_JUDGE_TEMPERATURE = 0.0
 # hits are permanently silenced (issue #105). Reachable by a fat-fingered digit, so
 # it falls back rather than shipping. This is OpenAI's range and stays that way: a
 # bring-your-own endpoint with a NARROWER one is a provider disagreement no
-# validator can enumerate, and its remedy is `JUDGE_TEMPERATURE=none`, not a wider
-# or provider-forked bound here.
+# validator can enumerate, so clearing this bound is necessary and not sufficient -
+# an operator whose endpoint refuses the number they chose lowers it to one that
+# endpoint accepts, not a wider or provider-forked bound here.
 _JUDGE_TEMPERATURE_MAX = 2.0
 
 
@@ -342,12 +368,15 @@ def get_judge_temperature() -> float | None:
 
     Resolves as: unset ⇒ `DEFAULT_JUDGE_TEMPERATURE`; blank ⇒
     `DEFAULT_JUDGE_TEMPERATURE`; the literal `none` ⇒ `None`, meaning "send no
-    `temperature` at all". That is the documented remedy when a judge model
-    rejects the parameter or its value (ADR-0006): first-party OpenAI reasoning
-    models (o-series, `gpt-5-*`) refuse the argument outright, and an endpoint
-    whose accepted range is narrower than `_JUDGE_TEMPERATURE_MAX` refuses the
-    value. The typed-out `none` is the ONLY way to un-pin: a deliberate opt-out is
-    legitimate, an accidental one is not.
+    `temperature` at all". That is the documented remedy for exactly one failure
+    (ADR-0006): a judge deployment that refuses the PARAMETER itself, as
+    first-party OpenAI reasoning models (o-series, `gpt-5-*`) do at any value
+    including the pinned default. An endpoint that instead refuses a VALUE as
+    outside its own narrower range is a different case with a different remedy -
+    it cannot fire at the pinned default, and the fix is a number that endpoint
+    accepts (see the `DEFAULT_JUDGE_TEMPERATURE` block). The typed-out `none` is
+    the ONLY way to un-pin: a deliberate opt-out is legitimate, an accidental one
+    is not.
 
     A value that is not a number, is not finite, or falls outside
     `[0, _JUDGE_TEMPERATURE_MAX]` warns and falls back to the deterministic
@@ -365,6 +394,64 @@ def _judge_sampling_kwargs() -> dict[str, float]:
     return {} if temperature is None else {"temperature": temperature}
 
 
+# Model-name prefixes of judge deployments KNOWN to refuse the `temperature`
+# parameter outright - case (1) of the `DEFAULT_JUDGE_TEMPERATURE` block. This is a
+# hand-maintained list of names observed to reject the argument, and it is the ONLY
+# input to the boot check below: nothing here looks at any provider response.
+#
+# Edit THIS tuple when a new refusing model ships. It WILL go stale - the list
+# cannot know about models released after it was written, and it cannot see a
+# bring-your-own endpoint that refuses the parameter under an unrelated name. A
+# `JUDGE_MODEL` it does not recognise gets NO warning at all.
+_TEMPERATURE_REFUSING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+
+def warn_if_judge_rejects_temperature() -> None:
+    """Log ONCE at boot if the judge model is a KNOWN temperature-refuser.
+
+    Best-effort operator aid, nothing more. It compares the configured
+    `JUDGE_MODEL` against the hand-maintained
+    `_TEMPERATURE_REFUSING_MODEL_PREFIXES` and warns when the pin is also in
+    effect. It does NOT guarantee detection, does not prevent the breakage, and
+    does not make the upgrade safe: a refusing deployment whose name is not in that
+    tuple - a newer model, or an OpenAI-compatible endpoint under any other name -
+    is missed silently. The whole claim is that it reduces the chance of a silent
+    surprise for the names we already know about.
+
+    It exists because the pin is a NEW request parameter on an upgrade path: an
+    operator already running one of these models has a working deployment today,
+    and after the pin every judge call 400s, both gates fail closed on every turn,
+    and per issue #105 the latch site cannot tell that from a deliberate escalate,
+    so affected conversations latch to `escalated` permanently. Docs alone do not
+    reach an operator mid-upgrade.
+
+    Boot-time only, by construction: it is called from the startup hook, never from
+    `_judge_parse` or either gate, so it adds nothing to the request path and can
+    never alter a gate decision. It never raises and never blocks startup - a
+    warning that could take the service down would be worse than the surprise it
+    warns about.
+    """
+    if get_judge_temperature() is None:
+        return
+    model = get_judge_model()
+    if not model.lower().startswith(_TEMPERATURE_REFUSING_MODEL_PREFIXES):
+        return
+    log.warning(
+        "judge_temperature.known_refusing_model JUDGE_MODEL=%r is a known "
+        "reasoning model that rejects the `temperature` parameter with a 400. The "
+        "faithfulness and answer gates send temperature=%s on every call, so every "
+        "judge call will fail and BOTH GATES WILL FAIL CLOSED ON EVERY TURN; per "
+        "issue #105 the latch site cannot tell that from a deliberate escalate, so "
+        "affected conversations latch to status='escalated' permanently and "
+        "repairing the configuration does not un-latch them. Remedy: set "
+        "JUDGE_TEMPERATURE=none to omit the parameter. This check matches only the "
+        "known names in escalation._TEMPERATURE_REFUSING_MODEL_PREFIXES and is "
+        "best-effort: a refusing deployment under any other name gets no warning.",
+        model,
+        get_judge_temperature(),
+    )
+
+
 async def _judge_parse(
     judge_client: AsyncOpenAI,
     *,
@@ -377,10 +464,11 @@ async def _judge_parse(
     Exactly one call, with no exception: the sampling kwargs resolved from
     `JUDGE_TEMPERATURE` are splatted straight in. There is deliberately no retry
     and no per-model learning here. A judge deployment that will not accept the
-    pinned `temperature` is a CONFIGURATION fact an operator states once with
+    `temperature` PARAMETER is a CONFIGURATION fact an operator states once with
     `JUDGE_TEMPERATURE=none`, not something this module infers from a provider's
     free-text 400 - see the `DEFAULT_JUDGE_TEMPERATURE` block for why that
-    inference is unsafe in both directions on a safety path.
+    inference is unsafe in both directions on a safety path, and for the separate
+    case of an endpoint refusing an operator-chosen VALUE as out of its range.
 
     Every failure - auth, rate limit, timeout, network, any 400 - propagates
     unchanged to the caller's fail-closed handler. This function exists so both

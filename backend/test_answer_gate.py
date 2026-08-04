@@ -103,11 +103,14 @@ def _client(behavior: Callable[[], Any]) -> tuple[AsyncOpenAI, _FakeJudge]:
     return cast(AsyncOpenAI, fake), fake
 
 
-def _api_error(message: str, status_code: int) -> Exception:
-    """An SDK-shaped error carrying an HTTP status, like the real client raises."""
-    e = Exception(message)
-    e.status_code = status_code  # type: ignore[attr-defined]
-    return e
+def _judge_error(message: str) -> Exception:
+    """A judge-call failure, carrying nothing but its message.
+
+    Deliberately status-free: `_judge_parse` treats EVERY exception identically,
+    so an HTTP status is not part of the contract and attaching one here would
+    imply the gate reads it.
+    """
+    return Exception(message)
 
 
 def _completion(
@@ -269,22 +272,22 @@ def test_every_judge_failure_fails_closed_in_one_call() -> None:
 
     `_judge_parse` makes exactly one call with no exception at all - there is no
     error-text inference and no un-pinned retry. A judge deployment that will not
-    accept the pinned `temperature` is a CONFIGURATION fact stated once with
+    accept the `temperature` PARAMETER is a CONFIGURATION fact stated once with
     `JUDGE_TEMPERATURE=none`, so the 400 that names the parameter is pinned here as
     just another fail-closed error, exactly like a rate limit or an auth failure.
+    The errors below therefore carry only a message - the gate never reads a status.
     """
     saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
     try:
         for label, exc in (
-            ("other 400", _api_error("Invalid schema for response_format", 400)),
-            ("rate limit", _api_error("Rate limit reached for requests", 429)),
-            ("auth", _api_error("Incorrect API key provided", 401)),
+            ("other 400", _judge_error("Invalid schema for response_format")),
+            ("rate limit", _judge_error("Rate limit reached for requests")),
+            ("auth", _judge_error("Incorrect API key provided")),
             (
                 "400 naming temperature",
-                _api_error(
+                _judge_error(
                     "Unsupported parameter: 'temperature' is not supported with "
-                    "this model.",
-                    400,
+                    "this model."
                 ),
             ),
         ):

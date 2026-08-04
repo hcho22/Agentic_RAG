@@ -60,6 +60,7 @@ from escalation import (
     GENERIC_DEFERRAL,
     DeflectionResult,
     EscalationConfig,
+    warn_if_judge_rejects_temperature,
 )
 from widget_keys import (
     WILDCARD_ORIGIN,
@@ -846,6 +847,13 @@ async def _on_startup() -> None:
     # key) fails CLOSED at boot rather than on the first upload. Default
     # PARSER=docling, so today's behavior is unchanged.
     get_selected_parser()
+    # Issue #104: the runtime gates pin JUDGE_TEMPERATURE, which is a NEW request
+    # parameter some judge deployments refuse. Surface the known-refusing names
+    # alongside the other boot-time configuration checks - and ahead of the slow
+    # warmup below - rather than letting the operator discover it as both gates
+    # failing closed on live turns. Best-effort and advisory only: it warns about
+    # names we already know, never blocks startup, and never touches a gate.
+    warn_if_judge_rejects_temperature()
     # US-018: front-load docling's heavy import + model init (only when
     # PARSER=docling, the default) so the first file-upload ingest doesn't pay
     # that multi-second cost on the request path; a non-docling parser skips it.

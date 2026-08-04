@@ -126,17 +126,40 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > and provider-side temperature 0 is itself best-effort, so a differing verdict on
 > an identical pair is unlikely rather than impossible.
 >
-> **If your judge deployment will not take the parameter, set
-> `JUDGE_TEMPERATURE=none`.** Two deployments do not: first-party OpenAI
-> **reasoning models** (o-series, `gpt-5-*`) reject the `temperature` argument
-> outright with a 400, and an endpoint whose accepted range is narrower than the
-> `[0,2]` the knob validates rejects the *value* (an Anthropic-compatible endpoint
-> caps at 1.0 and answers `temperature: Input should be less than or equal to 1`).
-> Both are a 400 on **every** call, both fail both gates closed on every turn, and
-> both have the same one-setting remedy: `JUDGE_TEMPERATURE=none` omits the
-> parameter entirely.
+> **Two different rejections, two different remedies.** Do not reach for the
+> opt-out on both.
 >
-> That remedy is deliberately a typed-out configuration statement rather than
+> 1. **The deployment rejects the `temperature` *argument*.** First-party OpenAI
+>    **reasoning models** (o-series, `gpt-5-*`) do this, at *any* value including
+>    the shipped default, so it is a 400 on **every** call from the moment you
+>    point `JUDGE_MODEL` there. **Remedy: `JUDGE_TEMPERATURE=none`**, which omits
+>    the parameter entirely. No number works.
+> 2. **The endpoint rejects the *value* as outside its own accepted range** (an
+>    Anthropic-compatible endpoint caps at 1.0 and answers `temperature: Input
+>    should be less than or equal to 1`). This **cannot happen at the default**:
+>    the default is `0`, which is inside every provider's range including `[0,1]`.
+>    It only fires once you have explicitly set a number above that endpoint's cap.
+>    **Remedy: set a value that endpoint accepts** - `0` keeps the gates pinned.
+>    `JUDGE_TEMPERATURE=none` also stops the 400, but it un-pins a safety gate you
+>    could have kept pinned, so use it only if you would rather send nothing at all.
+>
+> The knob validates `[0,2]` (OpenAI's range) and that is unchanged - but it does
+> **not** protect you from case 2, and is not trying to: a validator cannot know
+> each bring-your-own endpoint's range. Clearing `[0,2]` is necessary, not
+> sufficient.
+>
+> Case 1 is also flagged **at boot**: startup logs a warning when `JUDGE_MODEL`
+> matches a **known** reasoning-model name and the pin is in effect. That check is
+> a hand-maintained name match (`_TEMPERATURE_REFUSING_MODEL_PREFIXES` in
+> `backend/escalation.py` - edit it when a new refusing model ships) and is
+> **best-effort only**: it does not guarantee detection, does not prevent the
+> breakage, and does not make the upgrade safe. A judge model it does not
+> recognise - anything newer than the list, or an OpenAI-compatible endpoint under
+> another name - gets **no warning at all**. It reduces the chance of a silent
+> surprise; it is not a safety net. It never blocks startup and never changes a
+> gate decision.
+>
+> The remedy is deliberately a typed-out configuration statement rather than
 > something the gates infer from the provider's error text. Classifying free-text
 > 400s from arbitrary providers on a safety path is unsafe in *both* directions -
 > read too loosely, a gateway echoing the request payload into an unrelated error
@@ -162,9 +185,9 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > defers this turn but does NOT latch") and the `_escalate_conversation_safe`
 > docstring - is **not yet fixed**; issue #105 tracks it.
 >
-> Set `JUDGE_TEMPERATURE=none` to omit the parameter entirely. That literal
-> `none` is the **only** way to un-pin - unset and blank both mean the pinned
-> default, so a bare `-e JUDGE_TEMPERATURE` or a trailing `JUDGE_TEMPERATURE=` in
+> **How the knob resolves.** The literal `none` is the **only** way to un-pin -
+> unset and blank both mean the pinned default, so a bare `-e JUDGE_TEMPERATURE`
+> or a trailing `JUDGE_TEMPERATURE=` in
 > a `.env` cannot silently return a safety gate to sampling. A value that is not
 > a number, not finite, or outside `[0,2]` logs a warning and falls back to `0`
 > rather than failing the boot: a fat-fingered knob must not take a safety gate

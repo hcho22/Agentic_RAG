@@ -55,7 +55,11 @@ to catch — a rubric edit that changes what the model concludes — is precisel
 one it would be blind to.
 
 What that costs, stated plainly:
-  * money and latency (~48 calls per full run, on the two cheap judge models);
+  * money and latency: `len(_CASES) * _REPS` calls per implementation, on the two
+    cheap judge models, so a full run with both keys set is
+    `len(_CASES) * _REPS * 2`. Read it off the table rather than trusting a
+    hand-count here - `_cost_note()` prints the current number at run time, and a
+    row added to `_CASES` moves it without this paragraph needing an edit;
   * a dependency on network + API keys, so it CANNOT be part of the always-run
     unit layer;
   * mild non-determinism. Mitigated, not hand-waved: both judges are now pinned
@@ -389,6 +393,19 @@ _CASES: list[tuple[str, str, str, bool, str]] = [
 ]
 
 
+def _cost_note(n_impls: int) -> str:
+    """The live layer's call count, DERIVED from the table rather than restated.
+
+    The module docstring argues that the live-call cost is a deliberate, quantified
+    tradeoff, so the quantity has to track `_CASES` instead of drifting away from a
+    hand-count the next row invalidates.
+    """
+    return (
+        f"{len(_CASES)} cases x {_REPS} reps x {n_impls} implementation(s) = "
+        f"{len(_CASES) * _REPS * n_impls} live judge calls"
+    )
+
+
 class _Skipped(Exception):
     """A test group that MEASURED NOTHING, raised so `main` can see it.
 
@@ -452,19 +469,28 @@ def test_live_rubric_discrimination() -> None:
 
             impls.append(("runtime", runtime))
         if anthropic_key:
+            # BOTH imports are guarded, not just `anthropic`. The offline mirror is
+            # only imported HERE, inside the live layer, so the always-run unit
+            # layer above never needs the eval deps - but `evals.retrieval.runner`
+            # itself pulls asyncpg / yaml / jwt at module scope, so leaving it
+            # outside the guard would let a missing EVAL dep raise an uncaught
+            # ImportError that aborts the whole module, taking the always-run unit
+            # layer's result reporting down with it. That is the invariant-12 shape
+            # this file argues hardest against, so the promise in the docstring -
+            # "skips cleanly when a key or package is absent" - has to cover every
+            # package the half needs, not just the first one.
             try:
                 import anthropic
-            except ImportError:
-                print(
-                    "note: ANTHROPIC_API_KEY is set but the `anthropic` package is "
-                    "not installed; skipping the OFFLINE mirror half"
-                )
-            else:
-                # The offline mirror is only imported HERE, inside the live layer,
-                # so the always-run unit layer above never needs the eval deps.
+
                 sys.path.insert(0, str(ROOT))
                 from evals.retrieval.runner import judge_answering
-
+            except ImportError as exc:
+                print(
+                    "note: ANTHROPIC_API_KEY is set but the OFFLINE mirror's "
+                    f"dependencies are not installed ({exc.name or exc}); skipping "
+                    "the OFFLINE mirror half"
+                )
+            else:
                 ac = anthropic.AsyncAnthropic(api_key=anthropic_key)
 
                 # The offline mirror RAISES on a failed/unparseable judge call
@@ -480,6 +506,7 @@ def test_live_rubric_discrimination() -> None:
         impls = _build_impls()
         if not impls:
             _skip("no usable judge implementation")
+        print(f"  live rubric layer: {_cost_note(len(impls))}")
 
         for label, question, draft, must_answer, why in _CASES:
             for impl_name, judge in impls:
