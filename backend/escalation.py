@@ -59,15 +59,27 @@ pipeline above read no environment — they take explicit params, staying pure a
 testable — so this config layer supplies the validated `tau_sim` / `n_min` /
 `faithfulness_cutoff` the support endpoint (US-066+) spreads into
 `run_deflection_pipeline` (alongside `retrieval.get_similarity_threshold()` for
-`match_threshold`). The **false-resolve ceiling** is a separate eval-time knob —
-the one number a buyer sets as their risk tolerance, consumed by the E7 sweep
-(US-058) and the E8 gate (US-059) — and is deliberately kept OFF the per-request
-path (off `EscalationConfig` entirely) so it cannot leak into the latency path.
+`match_threshold`). ONE gate knob sits outside that rule and is named here so the
+exception is visible rather than discovered: `JUDGE_TEMPERATURE` (issue #104) is
+read from env by `_judge_sampling_kwargs()` on EVERY gate invocation, with no
+parameter override - unlike `JUDGE_MODEL`, which at least has the gates' `model=`
+argument. It is deliberately not an `EscalationConfig` field because it is not a
+per-request decision input: it is a property of the JUDGE DEPLOYMENT's request
+contract, resolved alongside `get_judge_model()` and never varied per call site,
+so threading it through the pipeline would suggest a caller may legitimately
+choose a different sampler per turn. The statement above still holds for every
+knob `EscalationConfig` does own. The **false-resolve ceiling** is a separate
+eval-time knob — the one number a buyer sets as their risk tolerance, consumed by
+the E7 sweep (US-058) and the E8 gate (US-059) — and is deliberately kept OFF the
+per-request path (off `EscalationConfig` entirely) so it cannot leak into the
+latency path.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
+import math
 import os
 from typing import Literal
 
@@ -246,6 +258,280 @@ def get_judge_model() -> str:
     return os.environ.get("JUDGE_MODEL") or DEFAULT_JUDGE_MODEL
 
 
+# Both runtime gates are SAFETY gates that fail closed, and a gate that returns a
+# different verdict on identical input is not doing that: it is sampling one. The
+# 2026-08-03 E7 investigation measured the answer gate returning `answers=True`
+# on 2 of 5 identical calls for the same (question, draft) pair — the send/escalate
+# decision was partly a coin flip. Both gates now pin the sampler.
+#
+# What the pin buys, stated exactly: it REMOVES THE SAMPLER as a source of variance
+# in the send/escalate verdict. It is not a guarantee that an identical (question,
+# draft) can never yield a different verdict - no `seed` is passed, and
+# provider-side temperature 0 is best-effort, not contractual. The measured defect
+# it removes is real; the residual is model-side nondeterminism, which is a
+# different and much smaller thing.
+#
+# The escape hatch exists because ADR-0006 lets an operator point `JUDGE_MODEL` at
+# their own deployment, and not every deployment accepts the argument. There are
+# TWO distinct rejections, and they do NOT share a remedy:
+#
+#   (1) The PARAMETER is refused outright. First-party OpenAI reasoning models
+#       (o-series, `gpt-5-*`) do this, at ANY value including the pinned default,
+#       so it is a 400 on every call from the moment the deployment is pointed
+#       there. The remedy is `JUDGE_TEMPERATURE=none`, which omits the parameter
+#       entirely - there is no number that works.
+#
+#   (2) The VALUE is refused as outside that endpoint's accepted range. This one
+#       CANNOT fire at the shipped default: `DEFAULT_JUDGE_TEMPERATURE` is 0.0,
+#       which is inside every provider's range including an Anthropic-compatible
+#       endpoint's `[0,1]`. It only happens once an operator has explicitly set a
+#       number above that endpoint's cap, and the remedy is then to set a value
+#       the endpoint accepts (`0` keeps the gates pinned). Reaching for the
+#       opt-out here would un-pin a safety gate the operator could have kept
+#       pinned; it is the alternative only if they would rather send nothing at
+#       all. `_JUDGE_TEMPERATURE_MAX` does not protect against this and is not
+#       trying to: a validator cannot know each bring-your-own endpoint's range.
+#
+# Either way the escape hatch is a typed-out operator decision rather than
+# something inferred from a provider's error text - guessing at free-text 400s on a
+# safety path is unsafe in both directions, since reading one too loosely un-pins a
+# gate on an echoed payload and reading one too strictly leaves the gate failing
+# closed on every turn. Setting the knob to a number is an explicit operator
+# decision to give up the determinism these gates depend on.
+#
+# The knob resolves as: unset ⇒ the pinned default; blank ⇒ the pinned default;
+# `none` ⇒ omit the parameter; anything else ⇒ a number, or the pinned default.
+# Blank is deliberately NOT the opt-out. An empty environment variable is a common
+# accidental state - a bare `-e JUDGE_TEMPERATURE` in Docker, an empty configMap
+# value, a trailing `JUDGE_TEMPERATURE=` in a .env - and treating that accident as
+# an opt-out silently returns a safety gate to sampling, which is the exact defect
+# this knob exists to remove. Every sibling knob in this module (`_env_unit_float`,
+# `_env_min_int`) already reads unset/blank as the default; this one being
+# different was the bug, not the convention. Un-pinning must be typed out.
+DEFAULT_JUDGE_TEMPERATURE = 0.0
+
+# The range providers accept for a chat-completion `temperature`. A value outside
+# it is a 400 on every call, which fails both gates closed on every turn - and the
+# latch site cannot tell that from a deliberate escalate, so the conversations it
+# hits are permanently silenced (issue #105). Reachable by a fat-fingered digit, so
+# it falls back rather than shipping. This is OpenAI's range and stays that way: a
+# bring-your-own endpoint with a NARROWER one is a provider disagreement no
+# validator can enumerate, so clearing this bound is necessary and not sufficient -
+# an operator whose endpoint refuses the number they chose lowers it to one that
+# endpoint accepts, not a wider or provider-forked bound here.
+_JUDGE_TEMPERATURE_MAX = 2.0
+
+
+@functools.lru_cache(maxsize=None)
+def _resolve_judge_temperature(raw: str | None) -> float | None:
+    """Parse one raw `JUDGE_TEMPERATURE` value; see `get_judge_temperature`.
+
+    Cached on the raw string so a MISCONFIGURED knob warns once per distinct
+    value rather than once per judge call. `_judge_sampling_kwargs` runs on every
+    gate invocation and both gates run on every customer turn, so an uncached
+    warning would emit two lines per turn forever for a static config error and
+    bury the very misconfiguration it is trying to surface. Keying on the raw
+    value (rather than caching the resolved result outright) means the env is
+    still read on every call, so a caller that changes `JUDGE_TEMPERATURE` — the
+    tests do — can never read a stale value.
+    """
+    if raw is None or raw.strip() == "":
+        return DEFAULT_JUDGE_TEMPERATURE
+    if raw.strip().lower() == "none":
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning(
+            "JUDGE_TEMPERATURE=%r is not a number; using the deterministic "
+            "default %.1f",
+            raw,
+            DEFAULT_JUDGE_TEMPERATURE,
+        )
+        return DEFAULT_JUDGE_TEMPERATURE
+    if not math.isfinite(value) or not 0.0 <= value <= _JUDGE_TEMPERATURE_MAX:
+        log.warning(
+            "JUDGE_TEMPERATURE=%r is outside the validated range [0,%.1f]; it was "
+            "NOT sent and the deterministic default %.1f was used instead. The "
+            "range guard exists because a value providers reject would 400 every "
+            "judge call; nothing was sent here, so the gates stay pinned",
+            raw,
+            _JUDGE_TEMPERATURE_MAX,
+            DEFAULT_JUDGE_TEMPERATURE,
+        )
+        return DEFAULT_JUDGE_TEMPERATURE
+    return value
+
+
+def get_judge_temperature() -> float | None:
+    """Sampling temperature for the two runtime gates (`JUDGE_TEMPERATURE` env).
+
+    Resolves as: unset ⇒ `DEFAULT_JUDGE_TEMPERATURE`; blank ⇒
+    `DEFAULT_JUDGE_TEMPERATURE`; the literal `none` ⇒ `None`, meaning "send no
+    `temperature` at all". That is the documented remedy for exactly one failure
+    (ADR-0006): a judge deployment that refuses the PARAMETER itself, as
+    first-party OpenAI reasoning models (o-series, `gpt-5-*`) do at any value
+    including the pinned default. An endpoint that instead refuses a VALUE as
+    outside its own narrower range is a different case with a different remedy -
+    it cannot fire at the pinned default, and the fix is a number that endpoint
+    accepts (see the `DEFAULT_JUDGE_TEMPERATURE` block). The typed-out `none` is
+    the ONLY way to un-pin: a deliberate opt-out is legitimate, an accidental one
+    is not.
+
+    A value that is not a number, is not finite, or falls outside
+    `[0, _JUDGE_TEMPERATURE_MAX]` warns and falls back to the deterministic
+    default. Note the deliberate difference from the sibling `_env_unit_float`,
+    which RAISES on the same input: this knob must not fail the boot, because
+    falling back to the pinned default is always safe here, whereas raising would
+    take the gate offline entirely.
+    """
+    return _resolve_judge_temperature(os.environ.get("JUDGE_TEMPERATURE"))
+
+
+def _judge_sampling_kwargs() -> dict[str, float]:
+    """Sampling kwargs both runtime gates splat into their one judge call."""
+    temperature = get_judge_temperature()
+    return {} if temperature is None else {"temperature": temperature}
+
+
+# Model-name prefixes of judge deployments COMMONLY seen to refuse the
+# `temperature` parameter outright - case (1) of the `DEFAULT_JUDGE_TEMPERATURE`
+# block. This is a hand-maintained name list, and it is the ONLY input to the boot
+# check below: nothing here looks at any provider response.
+#
+# Edit THIS tuple when a new refusing model ships. It is wrong in BOTH directions.
+# It WILL go stale - it cannot know about models released after it was written, and
+# it cannot see a bring-your-own endpoint that refuses the parameter under an
+# unrelated name, so a `JUDGE_MODEL` it does not recognise gets NO warning at all.
+# And a name in it is a family guess, not an observed refusal, so a matching
+# deployment may accept the parameter perfectly well.
+_TEMPERATURE_REFUSING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+# Marker carried by names that match a prefix above but are NOT reasoning models
+# and take `temperature` normally - `gpt-5-chat-latest` is OpenAI's non-reasoning
+# gpt-5 variant. Warning on those would push an operator to un-pin a gate that was
+# working, the same harm case (2) of the `DEFAULT_JUDGE_TEMPERATURE` block warns
+# against.
+#
+# This is a CONVENTION rather than a name list, deliberately: OpenAI spells its
+# non-reasoning chat variants with this marker, so the rule survives dotted point
+# releases and the next generation, whereas an enumerated tuple would have to guess
+# tomorrow's spelling and would silently rot when it guessed wrong. Being a marker
+# it is also BROADER than any list, and broad here means MORE MISSED WARNINGS: any
+# refusing deployment that happens to carry `-chat` in its name is excluded and gets
+# no warning at all. That is the best-effort direction this check already owns, not
+# a claim that the marker is exhaustive.
+_NON_REASONING_CHAT_MARKER = "-chat"
+
+
+def warn_if_judge_rejects_temperature(*, support_configured: bool) -> None:
+    """Log ONCE at boot if the judge model NAME matches a known refusing family.
+
+    `support_configured` is the caller's answer to "can these gates ever run on
+    this deploy?" - the two gates execute only on the support-widget path
+    (`support_bot` -> `run_deflection_pipeline`), and per AGENTS.md invariant 10 a
+    knowledge-assistant-only deploy leaves the widget surface unconfigured, so every
+    `/widget/*` route 503s and no judge call is ever made. Passing `False` returns
+    without logging: the message below is accurate in itself, but its PREMISE does
+    not hold for that operator - it would describe conversations latching in a
+    deploy that has no conversations. A correct warning shown to the wrong audience
+    is still wrong, and invariant 10 says such a deploy is UNAFFECTED by the support
+    surface. It is a required argument rather than an env read here so the caller
+    that owns the widget-surface predicate states it explicitly, and so both
+    directions are pinnable without booting the app.
+
+    Best-effort operator aid, nothing more, and wrong in both directions. It
+    compares the configured `JUDGE_MODEL` against the hand-maintained
+    `_TEMPERATURE_REFUSING_MODEL_PREFIXES`, less any name carrying the
+    `_NON_REASONING_CHAT_MARKER` convention, and warns when the pin is also in
+    effect. FALSE NEGATIVES: it does NOT guarantee detection, does not prevent the
+    breakage, and does not make the upgrade safe - a refusing deployment whose name
+    is not in that tuple, a newer model or an OpenAI-compatible endpoint under any
+    other name, is missed silently, and so is one whose name happens to carry the
+    `-chat` marker. That marker rule is deliberately broad, and broad means MORE
+    misses, not more false alarms. FALSE POSITIVES: a name in the tuple is a
+    heuristic, never an observation, so a matching deployment may accept
+    `temperature` perfectly well. The whole claim is that it reduces the chance of a
+    silent surprise for the families we already know about.
+
+    Because it can be wrong either way, the log line it emits is conditional and
+    tells the operator to VERIFY before changing configuration - a human acts on the
+    message, not on this docstring, so the message must hedge at least as carefully
+    as this does.
+
+    It exists because the pin is a NEW request parameter on an upgrade path: an
+    operator already running one of these models has a working deployment today, and
+    if that judge does refuse the parameter then every call 400s, both gates fail
+    closed on every turn, and per issue #105 the latch site cannot tell that from a
+    deliberate escalate, so affected conversations latch to `escalated` permanently.
+    Docs alone do not reach an operator mid-upgrade.
+
+    Boot-time only, by construction: it is called from the startup hook, never from
+    `_judge_parse` or either gate, so it adds nothing to the request path and can
+    never alter a gate decision. It never raises and never blocks startup - a
+    warning that could take the service down would be worse than the surprise it
+    warns about.
+    """
+    if not support_configured:
+        return
+    if get_judge_temperature() is None:
+        return
+    model = get_judge_model()
+    name = model.lower()
+    if not name.startswith(_TEMPERATURE_REFUSING_MODEL_PREFIXES):
+        return
+    if _NON_REASONING_CHAT_MARKER in name:
+        return
+    log.warning(
+        "judge_temperature.known_refusing_model JUDGE_MODEL=%r matches a model "
+        "family that COMMONLY refuses the `temperature` parameter. This is a name "
+        "match against escalation._TEMPERATURE_REFUSING_MODEL_PREFIXES, NOT an "
+        "observed refusal - this deployment may accept it perfectly well, so VERIFY "
+        "before changing configuration. The faithfulness and answer gates send "
+        "temperature=%s on every call; if this judge does refuse it, every judge "
+        "call 400s, both gates fail closed on every turn, and per issue #105 the "
+        "latch site cannot tell that from a deliberate escalate, so affected "
+        "conversations latch to status='escalated' permanently and repairing the "
+        "configuration does not un-latch them. Remedy IF it refuses: set "
+        "JUDGE_TEMPERATURE=none to omit the parameter; if it accepts, leave the pin "
+        "alone. Best-effort and known names only - a refusing deployment under any "
+        "other name, or under a name carrying the non-reasoning `-chat` marker that "
+        "this check treats as accepting, gets no warning at all.",
+        model,
+        get_judge_temperature(),
+    )
+
+
+async def _judge_parse(
+    judge_client: AsyncOpenAI,
+    *,
+    model: str,
+    messages: list[dict[str, str]],
+    response_format: type[BaseModel],
+) -> object:
+    """The ONE structured-output judge call both runtime gates make.
+
+    Exactly one call, with no exception: the sampling kwargs resolved from
+    `JUDGE_TEMPERATURE` are splatted straight in. There is deliberately no retry
+    and no per-model learning here. A judge deployment that will not accept the
+    `temperature` PARAMETER is a CONFIGURATION fact an operator states once with
+    `JUDGE_TEMPERATURE=none`, not something this module infers from a provider's
+    free-text 400 - see the `DEFAULT_JUDGE_TEMPERATURE` block for why that
+    inference is unsafe in both directions on a safety path, and for the separate
+    case of an endpoint refusing an operator-chosen VALUE as out of its range.
+
+    Every failure - auth, rate limit, timeout, network, any 400 - propagates
+    unchanged to the caller's fail-closed handler. This function exists so both
+    gates agree on sampling in one place rather than two.
+    """
+    return await judge_client.chat.completions.parse(
+        model=model,
+        messages=messages,
+        response_format=response_format,
+        **_judge_sampling_kwargs(),
+    )
+
+
 def _render_context(chunks: list[SearchDocumentsResult]) -> str:
     return "\n\n".join(f"[{i + 1}] {c.content}" for i, c in enumerate(chunks))
 
@@ -267,6 +553,8 @@ async def faithfulness_gate(
     (escalate), never open. This is the runtime gate, NOT the offline RAGAS
     metric (see the module banner); it never decomposes claims or makes a second
     call.
+
+    Sampled at `JUDGE_TEMPERATURE` (default 0) - see `get_judge_temperature`.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (
@@ -275,7 +563,8 @@ async def faithfulness_gate(
         "Is every claim in the ANSWER supported by the CONTEXT?"
     )
     try:
-        completion = await judge_client.chat.completions.parse(
+        completion = await _judge_parse(
+            judge_client,
             model=resolved_model,
             messages=[
                 {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
@@ -337,6 +626,23 @@ def _unfaithful(tag: str) -> FaithfulnessDecision:
 # the runtime companion to the OFFLINE-only `answer_relevancy` RAGAS metric
 # (`evals/retrieval/ragas.py`), which gates CI regressions, never an individual
 # customer reply.
+#
+# Issue #104: the rubric originally caught only the shape that ANNOUNCES itself —
+# a draft saying it lacks the information. It missed the shape where the CORPUS's
+# own answer is a deferral. Asked "what is the return shipping fee for a return
+# over 20 lbs?", the corpus says "quoted per-case for returns over 20 lbs"
+# (`db_seed/corpus/returns-process.md:33`); a draft restating that is faithful,
+# fluent, and occupies exactly the slot the question asked about, so the gate read
+# the slot as filled and auto-sent. The customer still has no fee. Same for a book
+# warranty "at the discretion of customer service"
+# (`db_seed/corpus/warranty-terms.md:29`).
+#
+# Those two shapes are ORTHOGONAL, and the fix has to name the second explicitly:
+# whether the draft admits ignorance is a fact about the DRAFTER, whether the
+# customer ends up holding the requested value is a fact about the ANSWER. Before
+# the added clause the gate keyed mostly on the first, which the drafter emits or
+# omits at its own sampling temperature — so the send/escalate decision partly rode
+# on a phrasing coin flip (`backend/test_answer_gate_rubric.py` pins both shapes).
 # -----------------------------------------------------------------------------
 
 _ANSWER_JUDGE_SYSTEM_PROMPT = (
@@ -346,7 +652,12 @@ _ANSWER_JUDGE_SYSTEM_PROMPT = (
     "specific information the customer asked for. A reply that says it does not "
     "have the information, that it cannot help, that it is unsure, or that it is "
     "deferring the customer to a human, or that answers only a DIFFERENT question "
-    "than the one asked, does NOT answer the question. Judge ONLY whether the "
+    "than the one asked, does NOT answer the question. A reply that only tells the "
+    "customer the answer is quoted case-by-case, is set at someone's discretion, is "
+    "decided by staff, or is otherwise not published does NOT answer the question "
+    "either: the customer still does not have the specific information they asked "
+    "for, however accurately or confidently the reply states that policy. Judge "
+    "ONLY whether the "
     "question is answered — not grounding, tone, or politeness (a blunt but "
     "responsive answer still answers; a warm apology that gives no information "
     "does not). Return `answers` and a `score` in [0,1] for how completely the "
@@ -369,7 +680,9 @@ class AnswerJudgment(BaseModel):
         description=(
             "True iff the ANSWER actually answers the customer's QUESTION with "
             "the specific information requested. False if it defers, says it "
-            "lacks the information, cannot help, or answers a different question."
+            "lacks the information, cannot help, answers a different question, "
+            "or only reports that the requested value is case-by-case, "
+            "discretionary, or unpublished."
         ),
     )
     score: float = Field(
@@ -418,6 +731,8 @@ async def answer_gate(
     choices, missing parsed payload — fails **closed**: `answers=False`
     (escalate), never open. Compares the QUESTION against the DRAFT only; grounding
     is `faithfulness_gate`'s job, not this gate's.
+
+    Sampled at `JUDGE_TEMPERATURE` (default 0) - see `get_judge_temperature`.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (
@@ -426,7 +741,8 @@ async def answer_gate(
         "Does the ANSWER actually answer the QUESTION?"
     )
     try:
-        completion = await judge_client.chat.completions.parse(
+        completion = await _judge_parse(
+            judge_client,
             model=resolved_model,
             messages=[
                 {"role": "system", "content": _ANSWER_JUDGE_SYSTEM_PROMPT},
@@ -466,11 +782,64 @@ async def answer_gate(
     )
 
 
+# The tags `_non_answer` is called with - the branches where the JUDGE ITSELF
+# failed, as opposed to `judge_unaddressed` / `score < cutoff`, which are verdicts
+# the judge actually reached. Both shapes fail closed to `answers=False`, so the
+# `reason` is the ONLY thing that tells them apart; a caller measuring what the
+# rubric concludes must not count a dead judge as a non-answer verdict (invariant
+# 12: measured nothing must never be reportable as a measurement). Note that
+# `judge_unaddressed` shares the `judge_` prefix, so this is an exact-match set
+# rather than a prefix test.
+JUDGE_FAILURE_TAGS = ("judge_error", "judge_no_choices", "judge_refusal", "judge_no_payload")
+
+
 def _non_answer(tag: str) -> AnswerDecision:
-    """The fail-closed decision: the draft did not answer, escalate."""
+    """The fail-closed decision: the judge itself failed, escalate.
+
+    NEVER raises, including on an unregistered tag. Every fail-closed branch of
+    `answer_gate` returns through here - one of them the blanket
+    `except Exception` handler - and that function's contract is that it always
+    yields an escalate decision on the customer request path. So an unregistered
+    tag logs and still escalates; it must not turn a graceful escalate into an
+    exception (AGENTS.md invariant 4).
+
+    The anti-drift check is a SOURCE-level property, so it is pinned statically by
+    `test_answer_gate_rubric.test_every_non_answer_tag_is_registered`: it reads
+    these call sites with `ast` and asserts set-equality with
+    `JUDGE_FAILURE_TAGS`. That holds unconditionally, unlike an `assert`, which
+    `python -O` strips out of an optimized deployment entirely.
+
+    Its scope is exactly the tags passed to `_non_answer`, and no wider: the test
+    walks CALLS to this helper, so a fail-closed branch that builds an
+    `AnswerDecision` directly is invisible to it - and `answer_gate` already
+    constructs decisions that way for its two real verdicts, so the pattern is at
+    hand. A new judge-failure branch MUST return through `_non_answer` for the guard
+    to see it; written any other way, `judge_failure_tag` reports the dead judge as
+    a real non-answer verdict, which is the invariant-12 drift the registry exists
+    to block.
+    """
+    if tag not in JUDGE_FAILURE_TAGS:
+        log.error(
+            "unregistered judge failure tag %r: judge_failure_tag() will report this "
+            "dead judge as a real non-answer verdict until the tag is added to "
+            "JUDGE_FAILURE_TAGS",
+            tag,
+        )
     return AnswerDecision(
         answers=False, addressed=False, score=0.0, reason=f"non_answer: {tag}"
     )
+
+
+def judge_failure_tag(reason: str) -> str | None:
+    """The `JUDGE_FAILURE_TAGS` entry an `AnswerDecision.reason` reports, if any.
+
+    `None` means the judge was reached and returned a verdict (including a
+    legitimate `judge_unaddressed`), so the decision reflects the rubric.
+    """
+    for tag in JUDGE_FAILURE_TAGS:
+        if reason == f"non_answer: {tag}":
+            return tag
+    return None
 
 
 # -----------------------------------------------------------------------------

@@ -60,6 +60,7 @@ from escalation import (
     GENERIC_DEFERRAL,
     DeflectionResult,
     EscalationConfig,
+    warn_if_judge_rejects_temperature,
 )
 from widget_keys import (
     WILDCARD_ORIGIN,
@@ -846,6 +847,26 @@ async def _on_startup() -> None:
     # key) fails CLOSED at boot rather than on the first upload. Default
     # PARSER=docling, so today's behavior is unchanged.
     get_selected_parser()
+    # Issue #104: the runtime gates pin JUDGE_TEMPERATURE, which is a NEW request
+    # parameter some judge deployments refuse. Surface the known-refusing names
+    # alongside the other boot-time configuration checks - and ahead of the slow
+    # warmup below - rather than letting the operator discover it as both gates
+    # failing closed on live turns. Best-effort and advisory only: it warns about
+    # names we already know, never blocks startup, and never touches a gate.
+    #
+    # SCOPED to the widget surface, deliberately - do NOT hoist this out of the
+    # predicate. Those gates run only on the support path, whose endpoints all 503
+    # without the service role (same reasoning as the rate limiter below), so on a
+    # knowledge-assistant-only deploy no judge call is ever made and the warning's
+    # premise does not hold for the operator reading it. AGENTS.md invariant 10
+    # says such a deploy is UNAFFECTED by the support surface; support-widget alarm
+    # noise about a subsystem it does not run makes it affected. Note this is a
+    # different defect class from prose that overclaims what the code guarantees:
+    # the message is accurate, it was simply shown to the wrong audience, and who
+    # sees an operator-facing message is part of whether it is correct.
+    warn_if_judge_rejects_temperature(
+        support_configured=bool(SUPABASE_SERVICE_ROLE_KEY)
+    )
     # US-018: front-load docling's heavy import + model init (only when
     # PARSER=docling, the default) so the first file-upload ingest doesn't pay
     # that multi-second cost on the request path; a non-docling parser skips it.

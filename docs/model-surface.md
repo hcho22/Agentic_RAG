@@ -104,7 +104,8 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 | `OPENAI_SUBAGENT_MODEL` | Document subagent | `OPENAI_MODEL` |
 | `OPENAI_RERANK_MODEL` | `llm` reranker (only when `RERANKER=llm`, or the eval runner's `--reranker llm`) | `OPENAI_MODEL` |
 | `EMBEDDER_MODEL` | Embedder | `EMBEDDING_MODEL` → `text-embedding-3-small` |
-| `JUDGE_MODEL` | Runtime faithfulness gate (US-048) | `gpt-4o-mini` (does **not** chain to `OPENAI_MODEL`) |
+| `JUDGE_MODEL` | Runtime faithfulness gate (US-048) + answer-completeness gate (issue #97) | `gpt-4o-mini` (does **not** chain to `OPENAI_MODEL`) |
+| `JUDGE_TEMPERATURE` | Runtime faithfulness + answer-completeness gates | `0` (unset **or** blank); the literal `none` omits the parameter |
 | `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (OpenAI proper, no `base_url`) / `completions` (Azure or `openai` + `base_url`) |
 
 > **`JUDGE_MODEL` is a `judge`-role selector, not an answerer one.** Its
@@ -113,7 +114,103 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > model **without** chaining through `OPENAI_MODEL` — the per-reply runtime gate
 > stays cheap even behind a large answerer. On a non-OpenAI judge, set
 > `JUDGE_MODEL` to your deployment/model id; an unset/wrong value just makes the
-> judge call fail, which fails **closed** (escalate), never auto-sends a reply.
+> judge call fail, which fails **closed** (escalate), never auto-sends a reply -
+> but read the residual-risk paragraph under `JUDGE_TEMPERATURE` below before
+> repointing production: a judge that fails on *every* call latches the
+> conversations it hits to `escalated` permanently (issue #105).
+
+> **`JUDGE_TEMPERATURE` pins the two runtime gates' sampler.** Both gates fail
+> **closed**, and a gate that returns a different verdict on identical input is
+> sampling one rather than deciding it - the 2026-08-03 E7 investigation measured
+> the answer gate returning `answers=true` on 2 of 5 identical calls for the same
+> (question, draft) pair (issue #104). Both gates therefore send `temperature=0`
+> by default. That **removes the sampler** as a source of variance in the
+> send/escalate verdict; it is best-effort, not a guarantee - no `seed` is passed
+> and provider-side temperature 0 is itself best-effort, so a differing verdict on
+> an identical pair is unlikely rather than impossible.
+>
+> **Two different rejections, two different remedies.** Do not reach for the
+> opt-out on both.
+>
+> 1. **The deployment rejects the `temperature` *argument*.** First-party OpenAI
+>    **reasoning models** (o-series, `gpt-5-*`) do this, at *any* value including
+>    the shipped default, so it is a 400 on **every** call from the moment you
+>    point `JUDGE_MODEL` there. **Remedy: `JUDGE_TEMPERATURE=none`**, which omits
+>    the parameter entirely. No number works.
+> 2. **The endpoint rejects the *value* as outside its own accepted range** (an
+>    Anthropic-compatible endpoint caps at 1.0 and answers `temperature: Input
+>    should be less than or equal to 1`). This **cannot happen at the default**:
+>    the default is `0`, which is inside every provider's range including `[0,1]`.
+>    It only fires once you have explicitly set a number above that endpoint's cap.
+>    **Remedy: set a value that endpoint accepts** - `0` keeps the gates pinned.
+>    `JUDGE_TEMPERATURE=none` also stops the 400, but it un-pins a safety gate you
+>    could have kept pinned, so use it only if you would rather send nothing at all.
+>
+> The knob validates `[0,2]` (OpenAI's range) and that is unchanged - but it does
+> **not** protect you from case 2, and is not trying to: a validator cannot know
+> each bring-your-own endpoint's range. Clearing `[0,2]` is necessary, not
+> sufficient.
+>
+> Case 1 is also flagged **at boot**: startup logs a warning when `JUDGE_MODEL`
+> matches a **known** reasoning-model name and the pin is in effect. That check is
+> a hand-maintained name match (`_TEMPERATURE_REFUSING_MODEL_PREFIXES` in
+> `backend/escalation.py` - edit it when a new refusing model ships), minus any
+> name carrying the non-reasoning `-chat` marker (`_NON_REASONING_CHAT_MARKER`,
+> e.g. `gpt-5-chat-latest`). It is **best-effort only**, wrong in both directions.
+> It does not guarantee detection, does not prevent the breakage, and does not
+> make the upgrade safe: a judge model it does not recognise - anything newer than
+> the list, or an OpenAI-compatible endpoint under another name - gets **no
+> warning at all**. The `-chat` exclusion is a naming *convention* rather than a
+> list, so it holds across dotted point releases instead of rotting, but it is
+> correspondingly broad: it errs toward **more missed warnings**, never toward
+> more false alarms, so a refusing deployment whose name happens to carry `-chat`
+> is also silently skipped. And a name it *does* match is a family guess rather than
+> an observed refusal, so **the warning is not proof your judge rejects the
+> parameter** - verify that judge calls are actually 400ing before setting
+> `JUDGE_TEMPERATURE=none`, or you will un-pin a gate that was working. It reduces
+> the chance of a silent surprise; it is not a safety net. It never blocks startup
+> and never changes a gate decision.
+>
+> The warning is also scoped to the **support-widget** surface: those gates only
+> run on the widget path, so a knowledge-assistant-only deploy (no
+> `SUPABASE_SERVICE_ROLE_KEY`, every `/widget/*` route 503s) makes no judge call
+> and gets no warning regardless of `JUDGE_MODEL` / `JUDGE_TEMPERATURE`. Nothing
+> in this section applies to such a deploy.
+>
+> The remedy is deliberately a typed-out configuration statement rather than
+> something the gates infer from the provider's error text. Classifying free-text
+> 400s from arbitrary providers on a safety path is unsafe in *both* directions -
+> read too loosely, a gateway echoing the request payload into an unrelated error
+> un-pins a safety gate; read too strictly, a real rejection goes unrecognised and
+> the gate fails closed anyway. So a judge call is exactly one call with no retry,
+> and every failure - auth, rate limit, timeout, network, any 400 - fails closed.
+>
+> **Why that matters, and the residual risk.** A judge that fails on *every* call
+> makes both gates fail closed, `run_deflection_pipeline` returns
+> `action='escalated'`, and the latch site in
+> `backend/main.py` tests only `result.turn.escalated` - it cannot tell that from
+> a **deliberate** ADR-0003 escalate, so it calls `_escalate_conversation_safe`
+> and pins `conversations.status='escalated'`. That transition is one-way and
+> DB-trigger-enforced (AGENTS.md invariant 5), so the blast radius is **permanent
+> per-conversation bot silence**, not merely lost deflection. Repairing the
+> configuration stops NEW conversations from latching; it does **not** un-latch
+> the ones already latched, which stay `escalated` with the bot silent in them,
+> because the status transition cannot be reversed. The failure is not
+> self-healing, so verify a new `JUDGE_MODEL` answers before pointing production
+> at it. The underlying defect - that a transient or misconfigured judge failure
+> is indistinguishable from a deliberate escalate
+> at the latch site, contradicting both invariant 8 ("a degraded/transient failure
+> defers this turn but does NOT latch") and the `_escalate_conversation_safe`
+> docstring - is **not yet fixed**; issue #105 tracks it.
+>
+> **How the knob resolves.** The literal `none` is the **only** way to un-pin -
+> unset and blank both mean the pinned default, so a bare `-e JUDGE_TEMPERATURE`
+> or a trailing `JUDGE_TEMPERATURE=` in
+> a `.env` cannot silently return a safety gate to sampling. A value that is not
+> a number, not finite, or outside `[0,2]` logs a warning and falls back to `0`
+> rather than failing the boot: a fat-fingered knob must not take a safety gate
+> offline. Setting a real number is an explicit operator decision to give up that
+> determinism.
 
 Rerankers (`COHERE_RERANK_MODEL` / `VOYAGE_RERANK_MODEL`) are a **separate
 provider axis** (dedicated rerank endpoints) and are not part of this surface.

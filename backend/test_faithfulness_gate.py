@@ -21,6 +21,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import types
@@ -38,6 +39,8 @@ from escalation import (  # noqa: E402
     FaithfulnessJudgment,
     faithfulness_gate,
     get_judge_model,
+    get_judge_temperature,
+    warn_if_judge_rejects_temperature,
 )
 from retrieval import SearchDocumentsResult  # noqa: E402
 
@@ -70,13 +73,22 @@ class _FakeCompletions:
         self.calls = 0
         self.model_used: str | None = None
         self.messages_used: list[dict[str, str]] | None = None
+        self.extra_kwargs: dict[str, Any] = {}
 
     async def parse(
-        self, *, model: str, messages: list[dict[str, str]], response_format: Any
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        response_format: Any,
+        **kwargs: Any,
     ) -> Any:
         self.calls += 1
         self.model_used = model
         self.messages_used = messages
+        # Issue #104: the gate pins the sampler, so the kwargs it splats in are
+        # part of its contract and get recorded like `model` / `messages`.
+        self.extra_kwargs = kwargs
         return self._behavior()  # may raise
 
 
@@ -92,6 +104,16 @@ class _FakeJudge:
 def _client(behavior: Callable[[], Any]) -> tuple[AsyncOpenAI, _FakeJudge]:
     fake = _FakeJudge(behavior)
     return cast(AsyncOpenAI, fake), fake
+
+
+def _judge_error(message: str) -> Exception:
+    """A judge-call failure, carrying nothing but its message.
+
+    Deliberately status-free: `_judge_parse` treats EVERY exception identically,
+    so an HTTP status is not part of the contract and attaching one here would
+    imply the gate reads it.
+    """
+    return Exception(message)
 
 
 def _completion(
@@ -224,6 +246,244 @@ def test_judge_model_selector() -> None:
     print("ok: JUDGE_MODEL selector — cheap default, no OPENAI_MODEL chaining")
 
 
+def test_judge_sampling_is_pinned_deterministic() -> None:
+    """Issue #104: a fail-closed safety gate must not SAMPLE its verdict.
+
+    The call pins `temperature=0` by default; the typed-out `JUDGE_TEMPERATURE=none`
+    omits the parameter entirely (for a BYO judge model that rejects it, ADR-0006)
+    rather than wedging that deployment at a 400 forever; a malformed, non-finite or
+    out-of-range value falls back to the deterministic default instead of taking the
+    gate offline.
+
+    A BLANK value is pinned here explicitly, because it is the accidental state (a
+    bare `-e JUDGE_TEMPERATURE`, an empty configMap value, a trailing
+    `JUDGE_TEMPERATURE=` in a .env) and it must read as the default, never as the
+    opt-out - an accident must not silently return a safety gate to sampling.
+    """
+    saved = os.environ.get("JUDGE_TEMPERATURE")
+    try:
+        os.environ.pop("JUDGE_TEMPERATURE", None)
+        _check(
+            get_judge_temperature() == 0.0,
+            f"default judge temperature must be 0.0, got {get_judge_temperature()!r}",
+        )
+        _, fake = _run(_judgment(True, 0.9), "x")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"temperature": 0.0},
+            "the faithfulness call must pin temperature=0 by default, got "
+            f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+
+        for blank in ("", "   "):
+            os.environ["JUDGE_TEMPERATURE"] = blank
+            _check(
+                get_judge_temperature() == 0.0,
+                f"a blank JUDGE_TEMPERATURE ({blank!r}) must mean the pinned default, "
+                f"not the un-pin escape hatch, got {get_judge_temperature()!r}",
+            )
+            _, fake = _run(_judgment(True, 0.9), "x")
+            _check(
+                cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+                == {"temperature": 0.0},
+                f"a blank JUDGE_TEMPERATURE ({blank!r}) must still pin temperature=0, "
+                f"got {cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+            )
+
+        os.environ["JUDGE_TEMPERATURE"] = "none"
+        _check(get_judge_temperature() is None, "'none' must mean: send no temperature")
+        _, fake = _run(_judgment(True, 0.9), "x")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs == {},
+            "JUDGE_TEMPERATURE=none must omit the parameter entirely",
+        )
+
+        os.environ["JUDGE_TEMPERATURE"] = "not-a-number"
+        _check(
+            get_judge_temperature() == 0.0,
+            "a malformed JUDGE_TEMPERATURE must fall back to the deterministic default",
+        )
+
+        # A value the judge API would 400 on fails both gates closed on every turn,
+        # and the latch site cannot tell that from a deliberate escalate - so it
+        # permanently silences the conversations it hits. It falls back rather than
+        # shipping. (Unlike a model that rejects the PARAMETER, an out-of-range
+        # value is the operator's own typo, so it is corrected here rather than
+        # retried at call time.)
+        for rejected in ("nan", "inf", "-inf", "50", "-0.5", "2.5"):
+            os.environ["JUDGE_TEMPERATURE"] = rejected
+            _check(
+                get_judge_temperature() == 0.0,
+                f"JUDGE_TEMPERATURE={rejected!r} is not a finite value the judge API "
+                f"accepts and must fall back to the deterministic default, got "
+                f"{get_judge_temperature()!r}",
+            )
+
+        # In-range numbers stay an explicit operator decision and are honoured.
+        for accepted, want in (("0.7", 0.7), ("0", 0.0), ("2", 2.0)):
+            os.environ["JUDGE_TEMPERATURE"] = accepted
+            _check(
+                get_judge_temperature() == want,
+                f"JUDGE_TEMPERATURE={accepted!r} must be honoured as {want}, got "
+                f"{get_judge_temperature()!r}",
+            )
+    finally:
+        if saved is None:
+            os.environ.pop("JUDGE_TEMPERATURE", None)
+        else:
+            os.environ["JUDGE_TEMPERATURE"] = saved
+    print("ok: judge sampling pinned to temperature=0, with a documented escape hatch")
+
+
+def test_boot_warning_for_known_temperature_refusing_models() -> None:
+    """The boot check warns about KNOWN refusing judge models, and only those.
+
+    Pins what it is and what it is not: it fires on a known reasoning-model name
+    while the pin is in effect, stays quiet once the operator has typed out the
+    opt-out, and stays quiet for a name it does not recognise (best-effort by
+    construction - an unrecognised refusing deployment gets no warning at all). It
+    is also SCOPED to the widget surface (AGENTS.md invariant 10): with support
+    unconfigured the gates it warns about can never run, so it must stay silent for
+    EVERY model/pin combination that would otherwise warn. It must also never raise
+    and never move a gate verdict, since it is an advisory boot-time log rather than
+    a gate input.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture()
+    escalation_log = logging.getLogger("agentic_rag.escalation")
+    escalation_log.addHandler(handler)
+    saved = {k: os.environ.get(k) for k in ("JUDGE_MODEL", "JUDGE_TEMPERATURE")}
+    try:
+        for model in ("o4-mini", "gpt-5-mini", "O3", "gpt-5.1-mini"):
+            for temp in (None, "0", "0.7"):
+                records.clear()
+                os.environ["JUDGE_MODEL"] = model
+                if temp is None:
+                    os.environ.pop("JUDGE_TEMPERATURE", None)
+                else:
+                    os.environ["JUDGE_TEMPERATURE"] = temp
+                warn_if_judge_rejects_temperature(support_configured=True)
+                _check(
+                    len(records) == 1,
+                    f"JUDGE_MODEL={model!r} with JUDGE_TEMPERATURE={temp!r} must warn "
+                    f"exactly once, got {len(records)} records",
+                )
+                message = records[0].getMessage()
+                _check(
+                    "JUDGE_TEMPERATURE=none" in message,
+                    f"the warning must name the exact remedy, got {message!r}",
+                )
+                _check(
+                    "fail closed" in message.lower() and "#105" in message,
+                    "the warning must name the consequence (both gates fail closed; "
+                    f"issue #105 permanent latching), got {message!r}",
+                )
+                # A name match is a heuristic, not an observed refusal, so the
+                # message must stay conditional and tell the operator to verify
+                # before un-pinning a gate that may well be working.
+                _check(
+                    "NOT an observed refusal" in message
+                    and "VERIFY" in message
+                    and "if it refuses" in message.lower(),
+                    "the warning must be conditional and tell the operator to "
+                    f"verify before changing configuration, got {message!r}",
+                )
+
+            # The typed-out opt-out is the remedy, so it must silence the warning.
+            records.clear()
+            os.environ["JUDGE_TEMPERATURE"] = "none"
+            warn_if_judge_rejects_temperature(support_configured=True)
+            _check(
+                not records,
+                f"JUDGE_MODEL={model!r} with the opt-out set must NOT warn, got "
+                f"{[r.getMessage() for r in records]!r}",
+            )
+
+        # A name the list does not know gets no warning - the check is a
+        # hand-maintained name match, not a capability probe. `gpt-5-chat-latest`
+        # matches the `gpt-5` prefix but is the NON-reasoning variant and takes
+        # `temperature` normally, so warning on it would push an operator to un-pin
+        # a working gate. The exclusion is the `-chat` MARKER rather than a spelling,
+        # so a dotted point release stays excluded too - an enumerated list would
+        # have re-acquired that false positive one naming generation later.
+        for model in (
+            None,
+            "gpt-4o-mini",
+            "claude-haiku-judge",
+            "my-o3-lookalike",
+            "gpt-5-chat-latest",
+            "GPT-5-Chat-Latest",
+            "gpt-5.1-chat-latest",
+        ):
+            records.clear()
+            if model is None:
+                os.environ.pop("JUDGE_MODEL", None)
+            else:
+                os.environ["JUDGE_MODEL"] = model
+            os.environ["JUDGE_TEMPERATURE"] = "0"
+            warn_if_judge_rejects_temperature(support_configured=True)
+            _check(
+                not records,
+                f"JUDGE_MODEL={model!r} is not a known refuser and must NOT warn, got "
+                f"{[r.getMessage() for r in records]!r}",
+            )
+
+        # Invariant 10: the gates only run on the support-widget path, so a deploy
+        # with that surface unconfigured must get NO warning whatever the judge
+        # configuration says - the message would describe conversations latching in
+        # a deploy that has none. Same models and pins that warned above.
+        for model in ("o4-mini", "gpt-5-mini", "O3", "gpt-5.1-mini"):
+            for temp in (None, "0", "0.7"):
+                records.clear()
+                os.environ["JUDGE_MODEL"] = model
+                if temp is None:
+                    os.environ.pop("JUDGE_TEMPERATURE", None)
+                else:
+                    os.environ["JUDGE_TEMPERATURE"] = temp
+                warn_if_judge_rejects_temperature(support_configured=False)
+                _check(
+                    not records,
+                    f"JUDGE_MODEL={model!r} with JUDGE_TEMPERATURE={temp!r} must NOT "
+                    "warn when the widget surface is unconfigured, got "
+                    f"{[r.getMessage() for r in records]!r}",
+                )
+
+        # The warning is advisory: it never raises, and a gate evaluated on either
+        # side of it returns the identical verdict.
+        os.environ["JUDGE_MODEL"] = "o4-mini"
+        os.environ["JUDGE_TEMPERATURE"] = "0"
+        before, _ = _run(_judgment(True, 0.9), "Returns within 30 days.")
+        warn_if_judge_rejects_temperature(support_configured=True)
+        after, fake = _run(_judgment(True, 0.9), "Returns within 30 days.")
+        _check(
+            before == after and after.faithful is True,
+            f"the boot warning must not alter a gate decision, got {before!r} then "
+            f"{after!r}",
+        )
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"temperature": 0.0},
+            "the boot warning must not change what the gate sends, got "
+            f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+    finally:
+        escalation_log.removeHandler(handler)
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    print(
+        "ok: boot warning fires for known temperature-refusing judge models only, "
+        "and only where the widget surface is configured"
+    )
+
+
 def test_context_and_draft_reach_the_judge() -> None:
     """The judge actually receives the draft and the chunk contents (so a 'zero'
     isn't a structurally-blind pass)."""
@@ -233,6 +493,54 @@ def test_context_and_draft_reach_the_judge() -> None:
     _check("Returns within 30 days." in user, "draft must be in the judge prompt")
     _check("return window is 30 days" in user, "chunk content must be in the judge prompt")
     print("ok: draft + chunk content are passed to the judge")
+
+
+def test_every_judge_failure_fails_closed_in_one_call() -> None:
+    """No error shape is ever retried: every failure is one call, then escalate.
+
+    `_judge_parse` makes exactly one call with no exception at all. A judge
+    deployment that will not accept the `temperature` PARAMETER is a CONFIGURATION
+    fact an operator states once with `JUDGE_TEMPERATURE=none`, and an endpoint
+    refusing an operator-chosen VALUE as out of its narrower range is corrected by
+    choosing a value it accepts; neither is inferred from the provider's wording at
+    call time, so both are pinned here as just another fail-closed error. The
+    errors below therefore carry only a message - the gate never reads a status.
+    """
+    # Neutralize an ambient JUDGE_TEMPERATURE. `none` is the documented escape
+    # hatch, so a developer shell may well export it, and this test's contract is
+    # about the call count rather than the shell's state.
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
+    try:
+        for label, exc in (
+            ("other 400", _judge_error("Invalid schema for response_format")),
+            ("rate limit", _judge_error("Rate limit reached for requests")),
+            ("auth", _judge_error("Incorrect API key provided")),
+            (
+                "400 refusing the parameter",
+                _judge_error(
+                    "Unsupported parameter: 'temperature' is not supported with "
+                    "this model."
+                ),
+            ),
+            (
+                "400 refusing the value",
+                _judge_error("temperature: Input should be less than or equal to 1"),
+            ),
+        ):
+            def boom(e: Exception = exc) -> Any:
+                raise e
+
+            d, fake = _run(boom, "Returns within 30 days.")
+            _check(d.faithful is False, f"{label}: must fail CLOSED, got {d!r}")
+            _check(
+                d.reason == "unfaithful: judge_error",
+                f"{label}: must stay a judge_error, got {d.reason!r}",
+            )
+            _check(fake.calls == 1, f"{label}: must not retry, got {fake.calls} calls")
+    finally:
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
+    print("ok: every judge failure fails closed in exactly one call, never retried")
 
 
 def test_decision_is_frozen() -> None:
@@ -254,7 +562,10 @@ def main() -> int:
         test_refusal_and_malformed_responses_fail_closed,
         test_score_clamped_to_unit_interval,
         test_judge_model_selector,
+        test_judge_sampling_is_pinned_deterministic,
+        test_boot_warning_for_known_temperature_refusing_models,
         test_context_and_draft_reach_the_judge,
+        test_every_judge_failure_fails_closed_in_one_call,
         test_decision_is_frozen,
     ]
     for t in tests:

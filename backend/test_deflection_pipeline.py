@@ -141,7 +141,9 @@ class _JudgeCompletions:
     def calls(self) -> int:
         return self.faithfulness_calls + self.answer_calls
 
-    async def parse(self, *, model: str, messages: Any, response_format: Any) -> Any:
+    async def parse(
+        self, *, model: str, messages: Any, response_format: Any, **kwargs: Any
+    ) -> Any:
         if response_format.__name__ == "AnswerJudgment":
             self.answer_calls += 1
             parsed = self.answer_parsed

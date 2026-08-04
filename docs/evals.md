@@ -106,13 +106,23 @@ python -m evals.retrieval.runner --include-e6
 python -m evals.retrieval.runner --mode hybrid --reranker llm
 
 # Eval-harness guards (US-107 / invariant 12). Fully offline - no Supabase, no
-# secrets, no network - so they run anywhere and are the two modules the per-PR
-# `eval-harness-guards` job executes. They pin the rule that a harness which
-# measured nothing refuses to publish a number for it, while a genuine miss
+# secrets, no network - so they run anywhere. They pin the rule that a harness
+# which measured nothing refuses to publish a number for it, while a genuine miss
 # still scores 0.000.
 python -m evals.retrieval.test_empty_gold_guard          # authored gold (E4/E6 scorers)
 python -m evals.permissions_scale.test_degenerate_guard  # derived gold (scale runner)
+
+# Answer/faithfulness-gate guards (issue #104), offline for the same reason - the
+# two gate modules drive fake judge clients, and the rubric module reads the
+# eval-side rubric via `ast` rather than importing the runner. These three plus
+# the two above are the five modules the per-PR `eval-harness-guards` job runs.
+python -m backend.test_answer_gate_rubric   # runtime/offline answer rubrics stay in LOCKSTEP (§6)
+python -m backend.test_answer_gate          # answer gate: JUDGE_TEMPERATURE pin sent, fail-closed paths
+python -m backend.test_faithfulness_gate    # same for the faithfulness gate + the boot-warning scoping
 ```
+
+`test_answer_gate_rubric` additionally has a LIVE layer that makes real judge calls to check the rubric still *discriminates* (a recorded fixture would only replay a canned verdict).
+It skips cleanly with no keys, so CI runs only its offline lockstep half - run it with `OPENAI_API_KEY` + `ANTHROPIC_API_KEY` set whenever you edit either rubric.
 
 The runner writes `evals/retrieval/results/<ISO-timestamp>.json` (full per-question detail + aggregates) and `evals/retrieval/summary.md` (two markdown tables ready to drop between the EVAL_SUMMARY markers in the next section).
 
@@ -247,6 +257,8 @@ The **E7** eval scores the support-face *deflection pipeline* (escalate-vs-answe
 It runs the escalation golden set (`evals/retrieval/escalation_gold.yaml`) through `python -m evals.retrieval.e7_runner` over three hand-authored populations — **P1a** (genuinely no context), **P2** (answerable + faithful), **P3** (strong retrieval but no grounded answer that answers the question, the moat) — plus the derived **P1b** (a P2 question replayed under a no-access viewer).
 
 The P2/P3 legs mirror the runtime deflection pipeline's **two** content gates (`_run_judged_leg`), not one: after the retrieval gate and draft, an offline cross-family Claude judge scores **faithfulness** (`runner.judge_answer`) and, on the would-be-answered path, **answer-completeness** (`runner.judge_answering`, the issue-#97 gate). A P3 draft is caught by whichever content gate it fails: an ungrounded draft trips the faithfulness leg, and a grounded-but-non-answering draft — a faithful "the corpus doesn't cover jewelry" deferral, which the drafter is *instructed* to produce rather than guess — trips the answer leg. Both are the moat working; only a draft that is faithful **and** answers auto-resolves. Modeling the answer leg is the **issue-#96 fix**: before it, every grounded P3 deferral scored 5/5 faithful and auto-resolved as a false-resolve, so the P3 leg read a spurious 100% false-resolve and breached the ceiling even though the runtime pipeline (post issue #97) correctly escalates every one of those drafts.
+
+**Issue #104 sharpened what the answer leg asks.** As first written the rubric caught the draft that ANNOUNCES its own ignorance, and missed the case where the *corpus's* answer is itself a deferral. The 2026-08-03 sweep false-resolved `e7-p3-05` and `e7-p3-11` on exactly that: `returns-process` says over-20-lbs return shipping is "quoted per-case" and `warranty-terms` puts a book claim past 30 days "at the discretion of customer service", so a faithful restatement is fluent, lands on the asked slot, and still leaves the customer holding nothing. The rubric now states that a reply reporting only that the value is case-by-case / discretionary / unpublished does not answer. Two consequences for anyone editing it: the rubric here and `escalation._ANSWER_JUDGE_SYSTEM_PROMPT` must move in LOCKSTEP (they are independent strings by design, and they were measured disagreeing on 5 of 17 probes before this was pinned), and `backend/test_answer_gate_rubric.py` is the layer that checks a rubric edit still discriminates — the weekly sweep used to be the only one. Its offline half (the lockstep check) runs per-PR in the `eval-harness-guards` job of `retrieval-eval.yml`, triggered by a change to either rubric or to the guard itself; its live-judge half needs `OPENAI_API_KEY` + `ANTHROPIC_API_KEY` and is run by hand.
 
 This golden set is the **support-face layer** of the one layered format (§2.2, US-108): each row carries one `escalation` label, and the P2/P3 gold is authored as **US-107 content anchors** (`gold_anchors`, bare span or `{text, doc}`) on the same primitive as the base retrieval gold — not the legacy `gold_stable_ids` chunk-index list. `e7.resolve_escalation_gold` resolves those anchors to the current chunk `stable_id`(s) at eval time (fail-loud on zero-resolve) in the `--include-p1b` path, so the no-access P1b replay revokes exactly the resolved gold and a `chunk_size`/overlap re-seed needs zero re-labeling here too. A `no_context` (P1a) row carries no anchor by definition.
 
