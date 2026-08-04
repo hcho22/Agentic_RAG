@@ -392,6 +392,11 @@ def test_temperature_rejecting_model_falls_back_to_a_real_verdict() -> None:
     """
     saved_models = set(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
+    # Neutralize an ambient JUDGE_TEMPERATURE. `none` is the documented escape
+    # hatch, so a developer shell may well export it; left in place, `_judge_parse`
+    # takes its no-sampling branch, the fake never sees a temperature kwarg, and
+    # this test fails blaming the fallback for the shell's state.
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
     try:
         behavior = _RejectsTemperature(_judgment(True, 0.9))
         client, fake = _client(behavior)
@@ -429,6 +434,8 @@ def test_temperature_rejecting_model_falls_back_to_a_real_verdict() -> None:
     finally:
         _TEMPERATURE_REJECTING_MODELS.clear()
         _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
     print("ok: a temperature-rejecting judge falls back to a real verdict, once")
 
 
@@ -442,6 +449,11 @@ def test_unrelated_bad_request_still_fails_closed() -> None:
     """
     saved_models = set(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
+    # Neutralize an ambient JUDGE_TEMPERATURE. `none` is the documented escape
+    # hatch, so a developer shell may well export it; left in place, `_judge_parse`
+    # takes its no-sampling branch, the fake never sees a temperature kwarg, and
+    # this test fails blaming the fallback for the shell's state.
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
     try:
         for label, exc in (
             ("other 400", _bad_request("Invalid schema for response_format")),
@@ -468,6 +480,8 @@ def test_unrelated_bad_request_still_fails_closed() -> None:
     finally:
         _TEMPERATURE_REJECTING_MODELS.clear()
         _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
     print("ok: every non-temperature failure still fails closed in one call")
 
 

@@ -132,8 +132,10 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > (o-series, `gpt-5-*`), which are a plausible `JUDGE_MODEL` choice. Both gates
 > therefore retry that one call **without** `temperature` when (and only when) the
 > 400 specifically names the parameter, use the result normally, and remember the
-> model id - so a rejecting model costs one extra call once per process, then
-> none. The fallback is **not** a judge failure: it yields a real verdict, never
+> model id - so a rejecting model costs one extra call, paid once per model after
+> that first rejection is recorded, then none. Judge calls already in flight when
+> it lands each pay their own rejected attempt; that is bounded to the first burst
+> and self-corrects, and is deliberately not locked on the request path. The fallback is **not** a judge failure: it yields a real verdict, never
 > `judge_error`, and never fails a gate closed. It logs one `warning` per model
 > naming it and stating the gates are running **unpinned** for it. Any other
 > failure - auth, rate limit, timeout, network, any other 400 - still fails closed

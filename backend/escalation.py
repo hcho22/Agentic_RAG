@@ -75,6 +75,7 @@ import functools
 import logging
 import math
 import os
+import re
 from typing import Literal
 
 import httpx
@@ -380,6 +381,18 @@ _TEMPERATURE_REJECTION_MARKERS = (
     "deprecated",
 )
 
+# How close a marker must sit to the `temperature` token to be read as describing
+# IT. The provider messages above all put the two within a clause of each other
+# ("Unsupported parameter: 'temperature'", "`temperature` is deprecated"), so a
+# tight window matches every real case while refusing a marker that happens to
+# appear elsewhere in the same string — see `_is_temperature_rejection`.
+_TEMPERATURE_ANCHOR_CHARS = 32
+
+_TEMPERATURE_TOKEN = re.compile(r"\btemperature\b")
+
+# Quote characters a provider may wrap the parameter name in.
+_QUOTES = ("'", '"', "`")
+
 
 def _looks_like_bad_request(e: BaseException) -> bool:
     """True when `e` is the provider refusing the REQUEST (400), not failing it.
@@ -395,19 +408,69 @@ def _looks_like_bad_request(e: BaseException) -> bool:
     return type(e).__name__ in ("BadRequestError", "InvalidRequestError")
 
 
+def _structured_param(e: BaseException) -> str | None:
+    """The parameter name the provider blamed, when it says so in structured form.
+
+    `None` means the provider did not name one — NOT that it named something else.
+    The caller needs that distinction: a populated `param` is authoritative, so a
+    `param` naming a DIFFERENT argument is a definitive "not a temperature
+    rejection" rather than a reason to go guessing in the message text.
+    """
+    body = getattr(e, "body", None)
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    param = (error if isinstance(error, dict) else body).get("param")
+    return None if param is None else str(param)
+
+
 def _is_temperature_rejection(e: BaseException) -> bool:
-    """True only for a 400 that specifically names `temperature` as the problem."""
+    """True only for a 400 that specifically blames the `temperature` PARAMETER.
+
+    Two paths, in order of trustworthiness:
+
+    1. The provider names the offending parameter itself (OpenAI populates
+       `body.error.param`). That is authoritative and decides the answer outright
+       — including a decisive **False** when it names something else.
+    2. Otherwise, fall back to the message text, but the marker must be ANCHORED
+       to the temperature token rather than merely present in the same string.
+
+    The anchoring is what stops an unrelated 400 from un-pinning a safety gate. A
+    gateway or proxy that echoes the request payload into its error text carries
+    `"temperature": 0.0` in that text, so an unanchored check reads
+    ``Unsupported parameter: 'response_format' is not supported … {"temperature":
+    0.0}`` as a temperature rejection. The marker there describes
+    `response_format` and sits far from the echoed token, so requiring adjacency
+    rejects it while still matching every real message in
+    `_TEMPERATURE_REJECTION_MARKERS`'s comment.
+    """
     if not _looks_like_bad_request(e):
         return False
+
+    param = _structured_param(e)
+    if param is not None:
+        return param.lower() == "temperature"
+
     message = str(e).lower()
-    param = ""
-    body = getattr(e, "body", None)
-    if isinstance(body, dict):
-        error = body.get("error")
-        param = str((error if isinstance(error, dict) else body).get("param") or "")
-    if "temperature" not in message and param.lower() != "temperature":
-        return False
-    return any(marker in message for marker in _TEMPERATURE_REJECTION_MARKERS)
+    for match in _TEMPERATURE_TOKEN.finditer(message):
+        tail = message[match.end() :]
+        if tail[:1] in _QUOTES:
+            tail = tail[1:]
+        # A mention immediately followed by `:` is a JSON KEY, not the subject of a
+        # sentence - the request payload echoed back into an error about something
+        # else (`... {"temperature": 0.0}`). Distance alone cannot separate those,
+        # because an echoed payload can sit right next to a marker describing a
+        # different argument (`... is not supported. body: {"temperature": 0.0}`).
+        # Every genuine message makes the token the subject instead.
+        if tail.lstrip()[:1] == ":":
+            continue
+        before = message[max(0, match.start() - _TEMPERATURE_ANCHOR_CHARS) : match.start()]
+        if any(
+            m in before or m in tail[:_TEMPERATURE_ANCHOR_CHARS]
+            for m in _TEMPERATURE_REJECTION_MARKERS
+        ):
+            return True
+    return False
 
 
 def _note_temperature_rejection(model: str) -> None:
@@ -437,14 +500,25 @@ async def _judge_parse(
     """The ONE structured-output judge call both runtime gates make.
 
     Normally exactly one call. A model that rejects the `temperature` parameter
-    costs one extra call ONCE - the rejection is remembered per model id, so every
-    later call for that model sends no temperature and is a single call again.
+    costs one extra call, paid once per model after the first rejection is
+    RECORDED: every later call for that model sends no temperature and is a single
+    call again. Concurrency caveat — the record is written only when the retry
+    returns, so judge calls already in flight against a rejecting model each pay
+    their own rejected attempt. That is bounded to the first burst and
+    self-corrects; it is not worth a lock on the request path.
 
-    The retry fires ONLY on a 400 that names `temperature` (`_is_temperature_rejection`).
-    It is not a judge failure: it yields a REAL verdict, never `judge_error`, so it
-    cannot fail the gate closed or reach the escalation latch. Every other failure -
-    auth, rate limit, timeout, network, any other 400 - propagates unchanged to the
-    caller's fail-closed handler.
+    The retry fires ONLY on a 400 that blames `temperature`
+    (`_is_temperature_rejection`). It is not a judge failure: it yields a REAL
+    verdict, never `judge_error`, so it cannot fail the gate closed or reach the
+    escalation latch. Every other failure - auth, rate limit, timeout, network, any
+    other 400 - propagates unchanged to the caller's fail-closed handler.
+
+    The rejection is recorded only AFTER the un-pinned retry SUCCEEDS, because the
+    retry is the only thing that actually confirms the diagnosis. Recording first
+    would let a misread 400 un-pin the gate permanently for the process — silently
+    switching off the determinism this module exists to establish — on the strength
+    of a guess about an error string. Recording last bounds a misdiagnosis to one
+    wasted call.
     """
     call = functools.partial(
         judge_client.chat.completions.parse,
@@ -460,8 +534,20 @@ async def _judge_parse(
     except Exception as e:  # noqa: BLE001 — re-raised unless it is a parameter rejection
         if not _is_temperature_rejection(e):
             raise
+        rejection = e
+
+    try:
+        result = await call()
+    except Exception as retry_error:
+        # The un-pinned retry failed too, so `temperature` was never the problem.
+        # Do NOT record the model: the pin stays on, and the cost of the misread is
+        # one wasted call rather than a gate that samples for the rest of the
+        # process. Surface the ORIGINAL failure so the caller fails closed on the
+        # real error, with the retry attached as its cause.
+        raise rejection from retry_error
+
     _note_temperature_rejection(model)
-    return await call()
+    return result
 
 
 def _render_context(chunks: list[SearchDocumentsResult]) -> str:
@@ -487,9 +573,10 @@ async def faithfulness_gate(
     call.
 
     Sampled at `JUDGE_TEMPERATURE` (default 0) - see `get_judge_temperature`. A
-    judge model that REJECTS the `temperature` parameter costs one extra call
-    once per process (`_judge_parse` retries without it and remembers the
-    model), then none.
+    judge model that REJECTS the `temperature` parameter costs one extra call,
+    paid once per model after the first rejection is recorded (`_judge_parse`
+    retries without it and remembers the model), then none - though calls already
+    in flight when that first rejection lands each pay their own.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (
@@ -668,9 +755,10 @@ async def answer_gate(
     is `faithfulness_gate`'s job, not this gate's.
 
     Sampled at `JUDGE_TEMPERATURE` (default 0) - see `get_judge_temperature`. A
-    judge model that REJECTS the `temperature` parameter costs one extra call
-    once per process (`_judge_parse` retries without it and remembers the
-    model), then none.
+    judge model that REJECTS the `temperature` parameter costs one extra call,
+    paid once per model after the first rejection is recorded (`_judge_parse`
+    retries without it and remembers the model), then none - though calls already
+    in flight when that first rejection lands each pay their own.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (

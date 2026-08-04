@@ -116,6 +116,15 @@ def _api_error(message: str, status_code: int) -> Exception:
     return e
 
 
+def _raises(e: BaseException) -> Callable[[], Any]:
+    """A judge behavior that always raises `e`."""
+
+    def behavior() -> Any:
+        raise e
+
+    return behavior
+
+
 class _RejectsTemperature:
     """A judge model that 400s on any call carrying `temperature`.
 
@@ -311,6 +320,11 @@ def test_temperature_rejecting_model_falls_back_to_a_real_verdict() -> None:
     """
     saved_models = set(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
+    # Neutralize an ambient JUDGE_TEMPERATURE. `none` is the documented escape
+    # hatch, so a developer shell may well export it; left in place, `_judge_parse`
+    # takes its no-sampling branch, the fake never sees a temperature kwarg, and
+    # this test fails blaming the fallback for the shell's state.
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
     try:
         behavior = _RejectsTemperature(_judgment(True, 0.9))
         client, fake = _client(behavior)
@@ -346,7 +360,100 @@ def test_temperature_rejecting_model_falls_back_to_a_real_verdict() -> None:
     finally:
         _TEMPERATURE_REJECTING_MODELS.clear()
         _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
     print("ok: a temperature-rejecting judge falls back to a real verdict, once")
+
+
+def test_echoed_payload_400_does_not_unpin_the_gate() -> None:
+    """A 400 about ANOTHER parameter must not un-pin the gate just for saying
+    "temperature" somewhere.
+
+    Gateways and proxies (LiteLLM, some Azure front-ends) echo the request payload
+    into their error text, and that payload carries `"temperature": 0.0`. An
+    unanchored check reads the marker attached to `response_format` as a
+    temperature rejection and switches off the determinism pin permanently, for
+    the rest of the process, over an unrelated failure. The marker has to be
+    anchored to the temperature token, and the structured `param` - which names
+    the real culprit - is authoritative when present.
+    """
+    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
+    try:
+        echoed = _api_error(
+            "Unsupported parameter: 'response_format' is not supported with this "
+            'model. Request body: {"model": "o4-mini", "temperature": 0.0}',
+            400,
+        )
+        d, fake = _run(_raises(echoed), "The fee is $14.95.")
+        _check(
+            d.answers is False and d.reason.startswith("non_answer: judge_error"),
+            f"an unrelated 400 must still fail closed, got {d!r}",
+        )
+        _check(fake.calls == 1, f"it must NOT be retried, got {fake.calls} calls")
+        _check(
+            get_judge_model() not in _TEMPERATURE_REJECTING_MODELS,
+            "an unrelated 400 must NEVER un-pin the gate for this model",
+        )
+
+        # Same shape, but the provider names the offending parameter in structured
+        # form. That is authoritative and must decide it outright.
+        structured = _api_error("Unsupported parameter: temperature is bad", 400)
+        structured.body = {"error": {"param": "response_format"}}  # type: ignore[attr-defined]
+        d2, fake2 = _run(_raises(structured), "The fee is $14.95.")
+        _check(
+            d2.answers is False and fake2.calls == 1,
+            f"a structured param naming another argument must not retry, got {d2!r}",
+        )
+        _check(
+            get_judge_model() not in _TEMPERATURE_REJECTING_MODELS,
+            "a structured param naming another argument must not un-pin the gate",
+        )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
+    print("ok: an echoed-payload 400 fails closed and leaves the pin ON")
+
+
+def test_failed_retry_does_not_record_the_model() -> None:
+    """If the un-pinned retry ALSO fails, temperature was never the problem.
+
+    The retry is the only thing that confirms the diagnosis, so the model must not
+    be recorded until it succeeds - otherwise one misread error un-pins the gate
+    for the rest of the process. A misdiagnosis has to cost one wasted call, not
+    the determinism property. The caller must also see the ORIGINAL failure, not
+    the second-order one from the retry.
+    """
+    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
+    try:
+        original = _api_error(
+            "Unsupported parameter: 'temperature' is not supported with this model.", 400
+        )
+
+        def always_fails() -> Any:
+            raise original
+
+        d, fake = _run(always_fails, "The fee is $14.95.")
+        _check(
+            d.answers is False and d.reason.startswith("non_answer: judge_error"),
+            f"a retry that also fails must fail closed, got {d!r}",
+        )
+        _check(fake.calls == 2, f"one pinned attempt plus one retry, got {fake.calls}")
+        _check(
+            get_judge_model() not in _TEMPERATURE_REJECTING_MODELS,
+            "a retry that FAILED must not leave the gate permanently un-pinned",
+        )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
+    print("ok: a failed retry leaves the pin ON and surfaces the original error")
 
 
 def test_unrelated_bad_request_still_fails_closed() -> None:
@@ -358,6 +465,11 @@ def test_unrelated_bad_request_still_fails_closed() -> None:
     """
     saved_models = set(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
+    # Neutralize an ambient JUDGE_TEMPERATURE. `none` is the documented escape
+    # hatch, so a developer shell may well export it; left in place, `_judge_parse`
+    # takes its no-sampling branch, the fake never sees a temperature kwarg, and
+    # this test fails blaming the fallback for the shell's state.
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
     try:
         for label, exc in (
             ("other 400", _api_error("Invalid schema for response_format", 400)),
@@ -382,6 +494,8 @@ def test_unrelated_bad_request_still_fails_closed() -> None:
     finally:
         _TEMPERATURE_REJECTING_MODELS.clear()
         _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
     print("ok: every non-temperature failure still fails closed in one call")
 
 
@@ -406,6 +520,8 @@ def main() -> int:
         test_question_and_draft_reach_the_judge,
         test_judge_sampling_is_pinned_deterministic,
         test_temperature_rejecting_model_falls_back_to_a_real_verdict,
+        test_echoed_payload_400_does_not_unpin_the_gate,
+        test_failed_retry_does_not_record_the_model,
         test_unrelated_bad_request_still_fails_closed,
         test_decision_is_frozen,
     ]
