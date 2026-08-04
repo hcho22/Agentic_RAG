@@ -190,6 +190,12 @@ jobs:
               # eval-side rubric lives under evals/retrieval/ above.
               - 'backend/escalation.py'
               - 'backend/test_answer_gate_rubric.py'
+              # The same guard also reads backend/main.py's SOURCE, to pin that
+              # the judge boot warning is still called there and still wired to
+              # the SUPABASE_SERVICE_ROLE_KEY widget-surface predicate (AGENTS.md
+              # invariant 10). The edit that breaks that scoping is a main.py-only
+              # edit, which without this entry would run no guard at all.
+              - 'backend/main.py'
               - '.github/workflows/retrieval-eval.yml'
 
   # Invariant 12 ("measured nothing must never be reportable as a measurement")

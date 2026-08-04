@@ -79,7 +79,9 @@ model at all, so it runs in the always-on layer and is what actually catches the
 two implementations drifting apart.
 
 Layers (the project convention — see CLAUDE.md "How to test"):
-  * unit layer, ALWAYS runs, no network/keys/DB: rubric lockstep + rule presence.
+  * unit layer, ALWAYS runs, no network/keys/DB: rubric lockstep + rule presence,
+    plus the two source-level structural checks (the `_non_answer` tag registry
+    and the boot warning's call-site wiring in `main.py`).
   * integration layer, SKIPS CLEANLY without keys: live discrimination on both
     implementations.
 
@@ -124,6 +126,16 @@ _RUNNER_SRC = ROOT / "evals" / "retrieval" / "runner.py"
 # check below.
 _ESCALATION_SRC = ROOT / "backend" / "escalation.py"
 
+# The app's own source, read the same way again for the boot-warning CALL-SITE
+# check below. Read, never imported: `main` pulls the ML stack and the whole
+# service surface, neither of which this offline guard job installs.
+_MAIN_SRC = ROOT / "backend" / "main.py"
+
+# The env var that decides whether the support-widget surface exists at all
+# (AGENTS.md invariant 10), and therefore whether the two runtime gates can ever
+# run. The boot warning must be wired to it.
+_WIDGET_SURFACE_ENV = "SUPABASE_SERVICE_ROLE_KEY"
+
 
 def _check(cond: bool, msg: str) -> None:
     if not cond:
@@ -153,6 +165,42 @@ def _runtime_tool_description() -> str:
     return AnswerJudgment.model_fields["answers"].description or ""
 
 
+def _calls_to(path: Path, func_name: str) -> list[ast.Call]:
+    """Every `func_name(...)` call node in `path`'s source.
+
+    Matches a BARE-NAME call, which is how both call sites checked below are
+    written (each module imports the callee by name). A qualified call
+    (`escalation.func(...)`) is deliberately not matched — that errs toward the
+    safe direction, because each caller below asserts on the calls it finds and
+    fails loudly when it finds none, rather than passing on an empty set.
+    """
+    calls: list[ast.Call] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == func_name:
+                calls.append(node)
+    return calls
+
+
+def _names_in(node: ast.AST) -> set[str]:
+    """Every identifier and string literal appearing anywhere under `node`.
+
+    Used to ask whether an argument expression MENTIONS a given name. It reads
+    textual reference only: it says nothing about what the expression computes,
+    so a caller must not read a hit as the expression being correct.
+    """
+    found: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name):
+            found.add(child.id)
+        elif isinstance(child, ast.Attribute):
+            found.add(child.attr)
+        elif isinstance(child, ast.Constant) and isinstance(child.value, str):
+            found.add(child.value)
+    return found
+
+
 def _non_answer_call_tags(path: Path) -> set[str]:
     """Every tag literal `_non_answer(...)` is called with in `path`'s source.
 
@@ -160,12 +208,7 @@ def _non_answer_call_tags(path: Path) -> set[str]:
     computed tag would slip past the registry check below unseen.
     """
     tags: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if not (isinstance(func, ast.Name) and func.id == "_non_answer"):
-            continue
+    for node in _calls_to(path, "_non_answer"):
         if len(node.args) != 1 or not isinstance(node.args[0], ast.Constant):
             raise AssertionError(
                 f"{path.name}:{node.lineno}: _non_answer must be called with one "
@@ -287,6 +330,68 @@ def test_non_answer_fails_closed_for_an_unregistered_tag() -> None:
         "the drift test_every_non_answer_tag_is_registered exists to block",
     )
     print("ok: _non_answer escalates rather than raising on an unregistered tag")
+
+
+def test_boot_warning_call_site_is_wired_to_the_widget_surface() -> None:
+    """`main.py` must CALL the boot warning, passing an argument that mentions
+    `SUPABASE_SERVICE_ROLE_KEY`.
+
+    WHAT THIS PROVES, exactly: a source-level structural property of the call
+    site — the call exists in `backend/main.py`, and the value it passes is
+    derived from the widget-surface env var rather than hard-coded or dropped.
+    That is the regression it is here for: `warn_if_judge_rejects_temperature`'s
+    scoping to the support surface (AGENTS.md invariant 10) lives entirely in
+    `main.py`, where an edit that hoists the call out of that predicate, passes a
+    constant, or deletes the call altogether otherwise leaves the whole suite
+    green.
+
+    WHAT IT DOES NOT PROVE — do not read it as more than the above:
+      * NOT that the warning is correctly scoped at RUNTIME. It never boots the
+        app, never imports `main`, and observes no log record.
+      * NOT that `SUPABASE_SERVICE_ROLE_KEY` is the RIGHT condition. It only
+        checks that the argument mentions that name.
+      * NOT that the predicate has the right SENSE. `support_configured=not
+        SUPABASE_SERVICE_ROLE_KEY` — the exact inversion of the intended
+        scoping — satisfies this check.
+    `test_boot_warning_for_known_temperature_refusing_models` in
+    `backend/test_faithfulness_gate.py` covers the other half: what the function
+    DOES given each value of that parameter. Together they cover wiring plus
+    behaviour; neither, alone or together, is an end-to-end runtime check.
+
+    SOURCE, not runtime, deliberately. The call site only executes inside
+    FastAPI's startup hook, and every test module that imports `main` does so
+    behind a skip-on-failure guard (missing Supabase env, or the ML import stack
+    the offline guard job does not install), so a runtime version of this check
+    would go quiet in exactly the CI job that is supposed to enforce it. A guard
+    that can silently skip is how this project published zero recall for 42
+    nights; keep this one unconditional rather than "upgrading" it to a skipping
+    integration test.
+    """
+    calls = _calls_to(_MAIN_SRC, "warn_if_judge_rejects_temperature")
+    _check(
+        bool(calls),
+        f"{_MAIN_SRC.name} must call warn_if_judge_rejects_temperature at boot - "
+        "issue #104's judge pin is a new request parameter, and the warning is the "
+        "only thing that tells a mid-upgrade operator about it",
+    )
+    for call in calls:
+        args = [kw.value for kw in call.keywords if kw.arg] + list(call.args)
+        _check(
+            bool(args),
+            f"{_MAIN_SRC.name}:{call.lineno}: warn_if_judge_rejects_temperature "
+            "must be passed the widget-surface predicate, not called bare",
+        )
+        mentioned = set().union(*(_names_in(a) for a in args))
+        _check(
+            _WIDGET_SURFACE_ENV in mentioned,
+            f"{_MAIN_SRC.name}:{call.lineno}: the argument to "
+            f"warn_if_judge_rejects_temperature must derive from "
+            f"{_WIDGET_SURFACE_ENV} (got {sorted(mentioned)}). The gates run only "
+            "on the support path, so per AGENTS.md invariant 10 a "
+            "knowledge-assistant-only deploy must never see this warning - it "
+            "would describe conversations latching in a deploy that has none.",
+        )
+    print(f"ok: the boot warning is called in {_MAIN_SRC.name}, wired to the widget surface")
 
 
 # --- integration layer (skips cleanly without keys) ------------------------
@@ -607,6 +712,7 @@ def main() -> int:
         test_both_tool_schemas_describe_the_disposition_case,
         test_every_non_answer_tag_is_registered,
         test_non_answer_fails_closed_for_an_unregistered_tag,
+        test_boot_warning_call_site_is_wired_to_the_widget_surface,
         test_live_rubric_discrimination,
     ]
     # A skipped group measured NOTHING and must never be counted into the passing
