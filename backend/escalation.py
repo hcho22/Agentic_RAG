@@ -30,7 +30,8 @@ machineries on two different latency budgets. ("Exactly one" has one bounded
 exception, shared by both gates: a judge model that REJECTS the `temperature`
 parameter - OpenAI's o-series and `gpt-5-*` do - costs ONE extra call the first
 time it is seen, after which `_judge_parse` remembers it and sends no
-temperature, so every later call is a single call again.)
+temperature, so every later call is a single call again, bar one periodic
+re-probe that lets a misread rejection heal itself.)
 
 Issue #97: `answer_gate` is a SECOND, distinct runtime judge — grounding and
 answering are orthogonal, and the faithfulness gate only checks the former. A
@@ -290,7 +291,10 @@ DEFAULT_JUDGE_TEMPERATURE = 0.0
 # it is a 400 on every call, which fails both gates closed on every turn - and the
 # latch site cannot tell that from a deliberate escalate, so the conversations it
 # hits are permanently silenced. Reachable by a fat-fingered digit, so it falls
-# back rather than shipping.
+# back rather than shipping. This is OpenAI's range and stays that way: a
+# bring-your-own endpoint with a NARROWER one is a provider disagreement no
+# validator can enumerate, so it is absorbed at call time by the un-pinned retry
+# (`_TEMPERATURE_REJECTION_MARKERS`), not by widening or forking this bound.
 _JUDGE_TEMPERATURE_MAX = 2.0
 
 
@@ -361,37 +365,81 @@ def _judge_sampling_kwargs() -> dict[str, float]:
 
 
 # Judge models observed to reject the `temperature` parameter, learned from the
-# provider's own 400 and remembered for the process lifetime. Without this, a
+# provider's own 400. Maps the model id to the number of un-pinned calls served
+# since the rejection was last confirmed, which is what makes the record
+# self-healing (`_temperature_reprobe_due`). Without the record at all, a
 # deployment on such a model would pay the rejected attempt on EVERY customer turn
 # - double latency and double spend forever - instead of once per model.
-_TEMPERATURE_REJECTING_MODELS: set[str] = set()
+_TEMPERATURE_REJECTING_MODELS: dict[str, int] = {}
 
-# Phrases a provider uses when it is the `temperature` PARAMETER itself it will not
-# accept, as opposed to any other 400. OpenAI reasoning models (o-series, `gpt-5-*`)
-# answer "Unsupported parameter: 'temperature' is not supported with this model" or
-# "Unsupported value: 'temperature' does not support 0.0 with this model";
-# Anthropic-compatible endpoints answer "`temperature` is deprecated for this
-# model". Deliberately narrow: anything this does not match keeps the existing
-# fail-closed behaviour untouched.
+# Un-pinned calls a recorded model serves before the pin is PROBED again. The
+# record is inferred from an error string, so a transient or gateway-originated 400
+# can enter a model into it by mistake and would otherwise leave both safety gates
+# sampling for the rest of the process, with one log line as the only trace. 500 is
+# chosen to be generous in the direction that costs nothing: both gates run per
+# customer turn, so it is a probe roughly every 250 turns - a genuinely rejecting
+# model pays one extra rejected call per ~0.2% of its judge calls, while a
+# mis-recorded one recovers its pin on its own instead of never.
+_TEMPERATURE_REPROBE_INTERVAL = 500
+
+# Phrases a provider uses when it is the `temperature` argument itself it will not
+# accept, as opposed to any other 400. Two families, both meaning "drop this
+# argument and the call succeeds":
+#
+#   * the PARAMETER is refused outright - OpenAI reasoning models (o-series,
+#     `gpt-5-*`) answer "Unsupported parameter: 'temperature' is not supported with
+#     this model" or "Unsupported value: 'temperature' does not support 0.0 with
+#     this model"; Anthropic-compatible endpoints answer "`temperature` is
+#     deprecated for this model";
+#   * the VALUE is out of the endpoint's range - `_JUDGE_TEMPERATURE_MAX` is
+#     OpenAI's range, but ADR-0006 lets an operator point `JUDGE_MODEL` at a
+#     bring-your-own endpoint that caps `temperature` at 1.0, which answers
+#     "temperature: Input should be less than or equal to 1". A validator cannot
+#     know each endpoint's range, so the range disagreement is absorbed here: the
+#     un-pinned retry succeeds and the turn survives, rather than 400ing on every
+#     call and failing both gates closed forever (issue #105).
+#
+# Deliberately narrow, and the retry still has to SUCCEED before anything is
+# recorded: anything this does not match keeps the existing fail-closed behaviour
+# untouched.
 _TEMPERATURE_REJECTION_MARKERS = (
+    # the parameter itself
     "unsupported parameter",
     "unsupported value",
     "not supported",
     "does not support",
     "deprecated",
+    # the value's range
+    "input should be",
+    "invalid value",
+    "out of range",
+    "must be less than",
+    "must be greater than",
+    "must be between",
+    "greater than the max",
+    "less than the min",
 )
 
 # How close a marker must sit to the `temperature` token to be read as describing
 # IT. The provider messages above all put the two within a clause of each other
 # ("Unsupported parameter: 'temperature'", "`temperature` is deprecated"), so a
 # tight window matches every real case while refusing a marker that happens to
-# appear elsewhere in the same string — see `_is_temperature_rejection`.
+# appear elsewhere in the same string — see `_is_temperature_rejection`. Measured
+# as the GAP between the two, not from the marker's start, so a long marker is not
+# quietly harder to anchor than a short one.
 _TEMPERATURE_ANCHOR_CHARS = 32
 
 _TEMPERATURE_TOKEN = re.compile(r"\btemperature\b")
 
 # Quote characters a provider may wrap the parameter name in.
 _QUOTES = ("'", '"', "`")
+
+# What a serialized VALUE starts with, used to tell `{"temperature": 0.0}` (a
+# request payload echoed into an error about something else) from
+# `Invalid value for 'temperature': must be between 0 and 1` (the token as the
+# SUBJECT of the message, which happens to be punctuated with a colon).
+_JSON_VALUE_STARTS = ("'", '"', "`", "{", "[", "-", "+", *"0123456789")
+_JSON_VALUE_LITERALS = ("true", "false", "null", "none", "nan", "inf")
 
 
 def _looks_like_bad_request(e: BaseException) -> bool:
@@ -424,8 +472,47 @@ def _structured_param(e: BaseException) -> str | None:
     return None if param is None else str(param)
 
 
+def _is_serialized_value(tail: str) -> bool:
+    """True when what follows a `temperature` mention is `: <serialized value>`.
+
+    That shape is the request payload echoed into an error text, not a sentence
+    about the parameter. Prose punctuated with a colon (`Invalid value for
+    'temperature': must be between 0 and 1`) continues with words, so it is NOT
+    read as a payload and stays eligible for the marker check below.
+    """
+    after = tail.lstrip()
+    if after[:1] != ":":
+        return False
+    value = after[1:].lstrip()
+    return value[:1] in _JSON_VALUE_STARTS or value.startswith(_JSON_VALUE_LITERALS)
+
+
+def _marker_adjacent(message: str, start: int, end: int) -> bool:
+    """True when a rejection marker sits within `_TEMPERATURE_ANCHOR_CHARS` of the
+    token spanning `[start, end)`.
+
+    Adjacency is the GAP between marker and token, on either side. Windowing from
+    the token instead would make a long marker ("greater than the max") need to fit
+    inside the window along with the gap, so the longest and most specific phrasings
+    would be the hardest ones to anchor - the opposite of what the anchor is for.
+    """
+    for marker in _TEMPERATURE_REJECTION_MARKERS:
+        pos = message.find(marker)
+        while pos != -1:
+            if 0 <= start - (pos + len(marker)) <= _TEMPERATURE_ANCHOR_CHARS:
+                return True
+            if 0 <= pos - end <= _TEMPERATURE_ANCHOR_CHARS:
+                return True
+            pos = message.find(marker, pos + 1)
+    return False
+
+
 def _is_temperature_rejection(e: BaseException) -> bool:
-    """True only for a 400 that specifically blames the `temperature` PARAMETER.
+    """True only for a 400 that specifically blames the `temperature` argument.
+
+    "Blames" covers both families in `_TEMPERATURE_REJECTION_MARKERS` - the
+    parameter refused outright, and its VALUE refused as out of the endpoint's
+    range - because dropping the argument is what recovers the call either way.
 
     Two paths, in order of trustworthiness:
 
@@ -442,7 +529,9 @@ def _is_temperature_rejection(e: BaseException) -> bool:
     0.0}`` as a temperature rejection. The marker there describes
     `response_format` and sits far from the echoed token, so requiring adjacency
     rejects it while still matching every real message in
-    `_TEMPERATURE_REJECTION_MARKERS`'s comment.
+    `_TEMPERATURE_REJECTION_MARKERS`'s comment - and where an echoed payload does
+    land next to an unrelated marker, `_is_serialized_value` reads it as the
+    payload it is.
     """
     if not _looks_like_bad_request(e):
         return False
@@ -454,30 +543,64 @@ def _is_temperature_rejection(e: BaseException) -> bool:
     message = str(e).lower()
     for match in _TEMPERATURE_TOKEN.finditer(message):
         tail = message[match.end() :]
-        if tail[:1] in _QUOTES:
+        quoted = tail[:1] in _QUOTES
+        if quoted:
             tail = tail[1:]
-        # A mention immediately followed by `:` is a JSON KEY, not the subject of a
-        # sentence - the request payload echoed back into an error about something
-        # else (`... {"temperature": 0.0}`). Distance alone cannot separate those,
-        # because an echoed payload can sit right next to a marker describing a
-        # different argument (`... is not supported. body: {"temperature": 0.0}`).
-        # Every genuine message makes the token the subject instead.
-        if tail.lstrip()[:1] == ":":
+        # A QUOTED mention immediately followed by `: <serialized value>` is a JSON
+        # KEY, not the subject of a sentence - the request payload echoed back into
+        # an error about something else (`... {"temperature": 0.0}`). Distance alone
+        # cannot separate those, because an echoed payload can sit right next to a
+        # marker describing a different argument (`... is not supported. body:
+        # {"temperature": 0.0}`). Both halves of the test matter: a serialized key is
+        # always quoted AND followed by a value, whereas a validator naming the field
+        # it rejects is followed by words (`Invalid value for 'temperature': must be
+        # between 0 and 1`) or not quoted at all (`temperature: Input should be less
+        # than or equal to 1`). Reading either of those as JSON would fail both gates
+        # closed on every call against an endpoint whose accepted range differs from
+        # `_JUDGE_TEMPERATURE_MAX`.
+        if quoted and _is_serialized_value(tail):
             continue
-        before = message[max(0, match.start() - _TEMPERATURE_ANCHOR_CHARS) : match.start()]
-        if any(
-            m in before or m in tail[:_TEMPERATURE_ANCHOR_CHARS]
-            for m in _TEMPERATURE_REJECTION_MARKERS
-        ):
+        if _marker_adjacent(message, match.start(), match.end()):
             return True
     return False
 
 
+def _temperature_reprobe_due(model: str) -> bool:
+    """True when `model`'s recorded rejection is old enough to be re-tested.
+
+    A model absent from the record is not "due" - it is simply pinned. This is the
+    read half of the self-healing record; see `_TEMPERATURE_REPROBE_INTERVAL` for
+    why the interval is what it is.
+    """
+    served = _TEMPERATURE_REJECTING_MODELS.get(model)
+    return served is not None and served >= _TEMPERATURE_REPROBE_INTERVAL
+
+
+def _count_unpinned_call(model: str) -> None:
+    """Charge one un-pinned call against `model`'s re-probe interval."""
+    _TEMPERATURE_REJECTING_MODELS[model] = _TEMPERATURE_REJECTING_MODELS.get(model, 0) + 1
+
+
 def _note_temperature_rejection(model: str) -> None:
-    """Record - and announce ONCE per model - that the pin is off for `model`."""
-    if model in _TEMPERATURE_REJECTING_MODELS:
+    """Record - and announce - that the pin is off for `model`, resetting its
+    re-probe interval.
+
+    Announced once when first recorded and once per CONFIRMED re-probe after that,
+    so a deployment running un-pinned keeps saying so in monitoring instead of
+    leaving one startup-era log line behind.
+    """
+    confirmed = model in _TEMPERATURE_REJECTING_MODELS
+    _TEMPERATURE_REJECTING_MODELS[model] = 0
+    if confirmed:
+        log.warning(
+            "judge model %r still rejects the `temperature` parameter on re-probe; "
+            "the runtime gates remain UNPINNED for it - their send/escalate verdict "
+            "is sampled. Point JUDGE_MODEL at a model that accepts the parameter to "
+            "get the pin back, or set JUDGE_TEMPERATURE=none to make the un-pinned "
+            "choice explicit.",
+            model,
+        )
         return
-    _TEMPERATURE_REJECTING_MODELS.add(model)
     log.warning(
         "judge model %r rejects the `temperature` parameter; retried without it and "
         "will omit it for this model from now on. The runtime gates are running "
@@ -486,6 +609,22 @@ def _note_temperature_rejection(model: str) -> None:
         "that accepts the parameter to get the pin back, or set "
         "JUDGE_TEMPERATURE=none to make the un-pinned choice explicit.",
         model,
+        model,
+    )
+
+
+def _clear_temperature_rejection(model: str) -> None:
+    """Forget `model`'s rejection after a re-probe the model ACCEPTED.
+
+    The record is inferred from an error string, so a transient or
+    gateway-originated 400 can enter a model into it by mistake. Recovery is logged
+    at the same level as the un-pinning warning, so the pair reads as a closed
+    episode rather than an unexplained silence.
+    """
+    _TEMPERATURE_REJECTING_MODELS.pop(model, None)
+    log.warning(
+        "judge model %r ACCEPTED the `temperature` parameter on re-probe; the earlier "
+        "rejection was transient or misread. The runtime gates are PINNED again for it.",
         model,
     )
 
@@ -501,8 +640,9 @@ async def _judge_parse(
 
     Normally exactly one call. A model that rejects the `temperature` parameter
     costs one extra call, paid once per model after the first rejection is
-    RECORDED: every later call for that model sends no temperature and is a single
-    call again. Concurrency caveat — the record is written only when the retry
+    RECORDED and once more per `_TEMPERATURE_REPROBE_INTERVAL` thereafter: every
+    other call for that model sends no temperature and is a single call again.
+    Concurrency caveat — the record is written only when the retry
     returns, so judge calls already in flight against a rejecting model each pay
     their own rejected attempt. That is bounded to the first burst and
     self-corrects; it is not worth a lock on the request path.
@@ -519,6 +659,12 @@ async def _judge_parse(
     switching off the determinism this module exists to establish — on the strength
     of a guess about an error string. Recording last bounds a misdiagnosis to one
     wasted call.
+
+    The record is also not permanent: every `_TEMPERATURE_REPROBE_INTERVAL`
+    un-pinned calls, one call PROBES the pin again. A model that really rejects the
+    parameter re-confirms it (and says so in the log); a model recorded by mistake
+    - a transient 400 whose text happened to anchor a marker - gets its pin back
+    without an operator noticing anything was wrong.
     """
     call = functools.partial(
         judge_client.chat.completions.parse,
@@ -526,15 +672,26 @@ async def _judge_parse(
         messages=messages,
         response_format=response_format,
     )
-    sampling = {} if model in _TEMPERATURE_REJECTING_MODELS else _judge_sampling_kwargs()
+    sampling = _judge_sampling_kwargs()
+    probing = False
+    if sampling and model in _TEMPERATURE_REJECTING_MODELS:
+        if _temperature_reprobe_due(model):
+            probing = True
+        else:
+            _count_unpinned_call(model)
+            sampling = {}
     if not sampling:
         return await call()
     try:
-        return await call(**sampling)
+        result = await call(**sampling)
     except Exception as e:  # noqa: BLE001 — re-raised unless it is a parameter rejection
         if not _is_temperature_rejection(e):
             raise
         rejection = e
+    else:
+        if probing:
+            _clear_temperature_rejection(model)
+        return result
 
     try:
         result = await call()
@@ -575,8 +732,9 @@ async def faithfulness_gate(
     Sampled at `JUDGE_TEMPERATURE` (default 0) - see `get_judge_temperature`. A
     judge model that REJECTS the `temperature` parameter costs one extra call,
     paid once per model after the first rejection is recorded (`_judge_parse`
-    retries without it and remembers the model), then none - though calls already
-    in flight when that first rejection lands each pay their own.
+    retries without it and remembers the model), then one per
+    `_TEMPERATURE_REPROBE_INTERVAL` re-probe - though calls already in flight when
+    that first rejection lands each pay their own.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (
@@ -757,8 +915,9 @@ async def answer_gate(
     Sampled at `JUDGE_TEMPERATURE` (default 0) - see `get_judge_temperature`. A
     judge model that REJECTS the `temperature` parameter costs one extra call,
     paid once per model after the first rejection is recorded (`_judge_parse`
-    retries without it and remembers the model), then none - though calls already
-    in flight when that first rejection lands each pay their own.
+    retries without it and remembers the model), then one per
+    `_TEMPERATURE_REPROBE_INTERVAL` re-probe - though calls already in flight when
+    that first rejection lands each pay their own.
     """
     resolved_model = model or get_judge_model()
     user_prompt = (

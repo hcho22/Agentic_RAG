@@ -390,7 +390,7 @@ def test_temperature_rejecting_model_falls_back_to_a_real_verdict() -> None:
     remembered, so the next call is a SINGLE call again - one 400 per process per
     model, not one per customer turn.
     """
-    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
     # Neutralize an ambient JUDGE_TEMPERATURE. `none` is the documented escape
     # hatch, so a developer shell may well export it; left in place, `_judge_parse`
@@ -447,7 +447,7 @@ def test_unrelated_bad_request_still_fails_closed() -> None:
     un-pinning a safety gate. Those keep the existing fail-closed behaviour,
     unchanged and in one call.
     """
-    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
     # Neutralize an ambient JUDGE_TEMPERATURE. `none` is the documented escape
     # hatch, so a developer shell may well export it; left in place, `_judge_parse`

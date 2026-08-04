@@ -16,8 +16,10 @@ Covers:
   * a non-answer / deferral -> fails (escalate);
   * EXACTLY ONE judge call per evaluation;
   * a forced judge exception -> non-answer (fail-closed, escalate);
-  * a judge model that REJECTS `temperature` -> retried once WITHOUT it, yielding a
-    real verdict rather than a fail-closed escalate, then remembered;
+  * a judge model that REJECTS `temperature` (by name, or by capping its range
+    below the validated `[0,2]`) -> retried once WITHOUT it, yielding a real
+    verdict rather than a fail-closed escalate, then remembered, and that record
+    re-probed so a misread rejection heals instead of un-pinning the gate forever;
   * the cutoff `>=` boundary, refusal / empty-choices / missing-payload
     fail-closed paths, score clamping to [0,1], and that the QUESTION + DRAFT (but
     NOT the chunks) reach the judge — grounding is the other gate's job.
@@ -42,6 +44,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from escalation import (  # noqa: E402
     _TEMPERATURE_REJECTING_MODELS,
+    _TEMPERATURE_REPROBE_INTERVAL,
     AnswerDecision,
     AnswerJudgment,
     answer_gate,
@@ -134,8 +137,11 @@ class _RejectsTemperature:
     to reach.
     """
 
-    def __init__(self, judgment: Callable[[], Any]) -> None:
+    def __init__(self, judgment: Callable[[], Any], message: str | None = None) -> None:
         self._judgment = judgment
+        self._message = message or (
+            "Unsupported parameter: 'temperature' is not supported with this model."
+        )
         self._completions: _FakeCompletions | None = None
 
     def bind(self, fake: _FakeJudge) -> None:
@@ -144,10 +150,7 @@ class _RejectsTemperature:
     def __call__(self) -> Any:
         assert self._completions is not None, "bind() the fake judge first"
         if "temperature" in self._completions.extra_kwargs:
-            raise _api_error(
-                "Unsupported parameter: 'temperature' is not supported with this model.",
-                400,
-            )
+            raise _api_error(self._message, 400)
         return self._judgment()
 
 
@@ -318,7 +321,7 @@ def test_temperature_rejecting_model_falls_back_to_a_real_verdict() -> None:
     so it never reaches the one-way conversation latch. It costs two calls the
     first time the rejecting model is seen and one call thereafter.
     """
-    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
     # Neutralize an ambient JUDGE_TEMPERATURE. `none` is the documented escape
     # hatch, so a developer shell may well export it; left in place, `_judge_parse`
@@ -376,26 +379,35 @@ def test_echoed_payload_400_does_not_unpin_the_gate() -> None:
     the rest of the process, over an unrelated failure. The marker has to be
     anchored to the temperature token, and the structured `param` - which names
     the real culprit - is authoritative when present.
+
+    The value/range markers are held to the same bar: a RANGE complaint about
+    another argument, echoed next to the payload, must not un-pin the gate either.
+    A serialized payload always QUOTES the key, which is what separates it from a
+    validator naming the field it rejects.
     """
-    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
     saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
     try:
-        echoed = _api_error(
+        echoed = (
             "Unsupported parameter: 'response_format' is not supported with this "
-            'model. Request body: {"model": "o4-mini", "temperature": 0.0}',
-            400,
+            'model. Request body: {"model": "o4-mini", "temperature": 0.0}'
         )
-        d, fake = _run(_raises(echoed), "The fee is $14.95.")
-        _check(
-            d.answers is False and d.reason.startswith("non_answer: judge_error"),
-            f"an unrelated 400 must still fail closed, got {d!r}",
+        ranged = (
+            "top_p: Input should be less than or equal to 1. Request body: "
+            '{"top_p": 4, "temperature": 0.0}'
         )
-        _check(fake.calls == 1, f"it must NOT be retried, got {fake.calls} calls")
-        _check(
-            get_judge_model() not in _TEMPERATURE_REJECTING_MODELS,
-            "an unrelated 400 must NEVER un-pin the gate for this model",
-        )
+        for label, text in (("parameter wording", echoed), ("range wording", ranged)):
+            d, fake = _run(_raises(_api_error(text, 400)), "The fee is $14.95.")
+            _check(
+                d.answers is False and d.reason.startswith("non_answer: judge_error"),
+                f"{label}: an unrelated 400 must still fail closed, got {d!r}",
+            )
+            _check(fake.calls == 1, f"{label}: it must NOT be retried, got {fake.calls} calls")
+            _check(
+                get_judge_model() not in _TEMPERATURE_REJECTING_MODELS,
+                f"{label}: an unrelated 400 must NEVER un-pin the gate for this model",
+            )
 
         # Same shape, but the provider names the offending parameter in structured
         # form. That is authoritative and must decide it outright.
@@ -418,6 +430,144 @@ def test_echoed_payload_400_does_not_unpin_the_gate() -> None:
     print("ok: an echoed-payload 400 fails closed and leaves the pin ON")
 
 
+def test_out_of_range_temperature_400_recovers_unpinned() -> None:
+    """An endpoint whose accepted range is NARROWER than `_JUDGE_TEMPERATURE_MAX`
+    must not wedge both gates.
+
+    `_JUDGE_TEMPERATURE_MAX` is OpenAI's range, but ADR-0006 lets an operator point
+    `JUDGE_MODEL` at a bring-your-own endpoint that caps `temperature` at 1.0. A
+    `JUDGE_TEMPERATURE=1.5` there passes the validator (which cannot know each
+    endpoint's range) and then 400s on EVERY call with range wording rather than
+    parameter wording. Untreated, that fails both gates closed on every turn and,
+    via issue #105, permanently latches every conversation it touches. Dropping the
+    argument makes the call succeed, so the same anchored retry absorbs it - the
+    validator catches a fat-fingered knob, this catches a provider disagreement.
+
+    Both punctuations are covered, because a colon after the token is exactly what
+    the echoed-payload guard keys on: an unquoted field name (`temperature: Input
+    should be ...`) and a quoted one whose colon is followed by PROSE rather than a
+    serialized value (`Invalid value for 'temperature': must be ...`).
+    """
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    saved_temp = os.environ.get("JUDGE_TEMPERATURE")
+    os.environ["JUDGE_TEMPERATURE"] = "1.5"
+    try:
+        for label, message in (
+            ("unquoted field", "temperature: Input should be less than or equal to 1"),
+            ("quoted field", "Invalid value for 'temperature': must be between 0 and 1"),
+        ):
+            _TEMPERATURE_REJECTING_MODELS.clear()
+            behavior = _RejectsTemperature(_judgment(True, 0.9), message)
+            client, fake = _client(behavior)
+            behavior.bind(fake)
+            d = asyncio.run(answer_gate(client, QUESTION, "The fee is $14.95.", CUTOFF))
+
+            _check(
+                d.answers is True,
+                f"{label}: a range rejection must still yield a verdict, got {d!r}",
+            )
+            _check(
+                d.reason == "answers",
+                f"{label}: a range rejection must not surface as a judge failure, got "
+                f"{d.reason!r}",
+            )
+            comp = cast(_FakeCompletions, fake.chat.completions)
+            _check(
+                comp.kwargs_history == [{"temperature": 1.5}, {}],
+                f"{label}: call 1 must carry the value and call 2 must omit it, got "
+                f"{comp.kwargs_history!r}",
+            )
+            _check(
+                get_judge_model() in _TEMPERATURE_REJECTING_MODELS,
+                f"{label}: the endpoint that refused the value must be remembered",
+            )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is None:
+            os.environ.pop("JUDGE_TEMPERATURE", None)
+        else:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
+    print("ok: an out-of-range temperature 400 recovers un-pinned instead of wedging")
+
+
+def test_recorded_rejection_is_reprobed_and_can_heal() -> None:
+    """The record is inferred from an error STRING, so it must be self-healing.
+
+    A transient or gateway-originated 400 whose text happens to anchor a marker can
+    enter a model into the record by mistake, and both safety gates would then
+    sample for the rest of the process with one log line as the only trace. So the
+    pin is PROBED again every `_TEMPERATURE_REPROBE_INTERVAL` un-pinned calls: a
+    model that really rejects it re-confirms and stays un-pinned, a mis-recorded one
+    gets its pin back on its own.
+    """
+    model = get_judge_model()
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
+    _TEMPERATURE_REJECTING_MODELS.clear()
+    saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
+    try:
+        # Below the interval: no probe, and each un-pinned call is charged against it.
+        _TEMPERATURE_REJECTING_MODELS[model] = 0
+        for expected in (1, 2, 3):
+            _, fake = _run(_judgment(True, 0.9), "The fee is $14.95.")
+            _check(
+                cast(_FakeCompletions, fake.chat.completions).kwargs_history == [{}],
+                "a recorded model must send no temperature between probes",
+            )
+            _check(
+                _TEMPERATURE_REJECTING_MODELS[model] == expected,
+                f"the un-pinned call must be counted, got "
+                f"{_TEMPERATURE_REJECTING_MODELS[model]!r}",
+            )
+
+        # At the interval, a model that GENUINELY rejects the parameter re-confirms:
+        # it pays the probe, falls back, and stays un-pinned with its interval reset.
+        _TEMPERATURE_REJECTING_MODELS[model] = _TEMPERATURE_REPROBE_INTERVAL
+        behavior = _RejectsTemperature(_judgment(True, 0.9))
+        client, fake = _client(behavior)
+        behavior.bind(fake)
+        d = asyncio.run(answer_gate(client, QUESTION, "The fee is $14.95.", CUTOFF))
+        _check(d.answers is True, f"the re-probe must still yield a verdict, got {d!r}")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).kwargs_history
+            == [{"temperature": 0.0}, {}],
+            "the probe must carry the pin and fall back when it is refused",
+        )
+        _check(
+            _TEMPERATURE_REJECTING_MODELS.get(model) == 0,
+            "a re-confirmed rejection must stay recorded with its interval reset, got "
+            f"{_TEMPERATURE_REJECTING_MODELS.get(model)!r}",
+        )
+
+        # At the interval, a model recorded BY MISTAKE accepts the probe and is
+        # forgotten - the gates are pinned again from the very next call.
+        _TEMPERATURE_REJECTING_MODELS[model] = _TEMPERATURE_REPROBE_INTERVAL
+        d2, fake2 = _run(_judgment(True, 0.9), "The fee is $14.95.")
+        _check(d2.answers is True, f"the healing probe must yield a verdict, got {d2!r}")
+        _check(
+            cast(_FakeCompletions, fake2.chat.completions).kwargs_history
+            == [{"temperature": 0.0}],
+            "a probe the model ACCEPTS is one pinned call, not a fallback",
+        )
+        _check(
+            model not in _TEMPERATURE_REJECTING_MODELS,
+            "a mis-recorded model must be forgotten once it accepts the parameter",
+        )
+        _, fake3 = _run(_judgment(True, 0.9), "The fee is $14.95.")
+        _check(
+            cast(_FakeCompletions, fake3.chat.completions).kwargs_history
+            == [{"temperature": 0.0}],
+            "after healing, the gate must be pinned again on every call",
+        )
+    finally:
+        _TEMPERATURE_REJECTING_MODELS.clear()
+        _TEMPERATURE_REJECTING_MODELS.update(saved_models)
+        if saved_temp is not None:
+            os.environ["JUDGE_TEMPERATURE"] = saved_temp
+    print("ok: a recorded rejection is re-probed, re-confirmed or healed")
+
+
 def test_failed_retry_does_not_record_the_model() -> None:
     """If the un-pinned retry ALSO fails, temperature was never the problem.
 
@@ -427,7 +577,7 @@ def test_failed_retry_does_not_record_the_model() -> None:
     the determinism property. The caller must also see the ORIGINAL failure, not
     the second-order one from the retry.
     """
-    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
     saved_temp = os.environ.pop("JUDGE_TEMPERATURE", None)
     try:
@@ -463,7 +613,7 @@ def test_unrelated_bad_request_still_fails_closed() -> None:
     would both hide it and return a safety gate to sampling, so the narrowness of
     the fallback is the safety property here, not an implementation detail.
     """
-    saved_models = set(_TEMPERATURE_REJECTING_MODELS)
+    saved_models = dict(_TEMPERATURE_REJECTING_MODELS)
     _TEMPERATURE_REJECTING_MODELS.clear()
     # Neutralize an ambient JUDGE_TEMPERATURE. `none` is the documented escape
     # hatch, so a developer shell may well export it; left in place, `_judge_parse`
@@ -521,6 +671,8 @@ def main() -> int:
         test_judge_sampling_is_pinned_deterministic,
         test_temperature_rejecting_model_falls_back_to_a_real_verdict,
         test_echoed_payload_400_does_not_unpin_the_gate,
+        test_out_of_range_temperature_400_recovers_unpinned,
+        test_recorded_rejection_is_reprobed_and_can_heal,
         test_failed_retry_does_not_record_the_model,
         test_unrelated_bad_request_still_fails_closed,
         test_decision_is_frozen,
