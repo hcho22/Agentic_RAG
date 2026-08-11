@@ -87,53 +87,26 @@ name: Retrieval eval (PR)
 
 on:
   pull_request:
-    # Workflow-level trigger = the UNION of the two jobs' path sets; the `changes`
-    # job (below) then splits the diff per-job so each deterministic gate runs only
-    # for a relevant change (retrieval paths -> the retrieval-eval job; the API-edge
-    # endpoint + RLS surface -> the au4-security-invariants job). The union is kept
-    # here so the workflow triggers whenever EITHER gate must run.
-    paths:
-      - 'backend/retrieval.py'
-      - 'backend/chunking.py'
-      - 'backend/embeddings.py'
-      # US-059: backend/escalation.py owns the deterministic retrieval gate the
-      # E7 per-PR tripwire (below) exercises, so a gate change must re-run it.
-      - 'backend/escalation.py'
-      - 'backend/**/*prompt*'
-      # US-105: AU4 (backend/test_au4_auth_attacks.py, the au4-security-invariants
-      # job below) is a deterministic per-PR security invariant. Its leak-critical
-      # surface is the RLS migrations (already listed), the permission resolver
-      # (backend/permissions.py), AND the API-edge endpoint logic in backend/main.py
-      # - the Phase 1 auth floor (`get_user`) and the Phase 3 widget transcript /
-      # first-message opaque-token binding checks it pins are endpoint-level, not
-      # RLS. A change to any of these must re-run the API-layer auth-attack suite
-      # before merge (the per-job `changes` filter routes it to AU4 only).
-      - 'backend/main.py'
-      - 'backend/permissions.py'
-      - 'backend/test_au4_auth_attacks.py'
-      # Issue #104: the answer-gate rubric guard must trigger on a change to
-      # ITSELF. Every other trigger for it (backend/escalation.py above,
-      # evals/retrieval/** below) is already in this union, so without this entry
-      # the one edit that escapes the guard is the edit that WEAKENS the guard -
-      # dropping a _SHARED_RULES rule, gutting _CASES, or neutering the lockstep
-      # assertions - which is precisely the failure mode it exists to catch.
-      - 'backend/test_answer_gate_rubric.py'
-      # Issue #104: the two runtime-gate modules pin the JUDGE_TEMPERATURE
-      # resolution matrix and that both gates actually SEND the pin, plus the
-      # fail-closed paths. Listed for the same reason as the rubric guard above:
-      # the one edit that escapes a guard must not be the edit that weakens it.
-      - 'backend/test_answer_gate.py'
-      - 'backend/test_faithfulness_gate.py'
-      - 'evals/retrieval/**'
-      # Invariant 12's two guard tests live under evals/retrieval/ and
-      # evals/permissions_scale/ and are enforced by the eval-harness-guards job
-      # below. The permissions-scale half has no other per-PR gate, so it is
-      # listed here for that job alone.
-      - 'evals/permissions_scale/**'
-      - 'db_seed/corpus/**'
-      - 'db_seed/corpus_seed.py'
-      - 'supabase/migrations/**'
-      - '.github/workflows/retrieval-eval.yml'
+    # Trigger on EVERY PR to the default branch, with NO workflow-level `paths:`
+    # filter. This workflow's deterministic security gates (E6 in the
+    # `retrieval-eval` job -> check "PR vs main"; AU4 in `au4-security-invariants`;
+    # the offline harness guards) are intended to become REQUIRED status checks in
+    # branch protection. GitHub blocks a PR forever if a required check is never
+    # reported, so the workflow must RUN on every PR - even a docs/frontend/CI-only
+    # diff that touches none of the eval paths - or those PRs would hang with the
+    # required checks pending.
+    #
+    # Per-job path routing is NOT lost by dropping `paths:` here: the `changes` job
+    # (dorny/paths-filter, below) is the single source of per-job path truth. On an
+    # unrelated diff every per-job filter reports false, so each heavy job is gated
+    # `false` by its `if: needs.changes.outputs.<x> == 'true'` and REPORTS "skipped"
+    # - which branch protection treats as a PASS. On an eval/backend-touching PR the
+    # relevant job(s) run and can hard-block on a real failure, unchanged. A bare
+    # (path-less) trigger + internal `if:` routing is the GitHub-recommended shape
+    # for a required check that must always report while only doing real work on a
+    # relevant diff.
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -145,9 +118,10 @@ concurrency:
 
 jobs:
   # US-105 (review follow-up): compute a per-job path split from the PR diff so the
-  # two deterministic gates trigger independently. The workflow-level `paths:` union
-  # (above) decides whether the workflow runs at all; this job then decides WHICH of
-  # the two jobs runs. The retrieval-eval job stays retrieval-only (it must not pay
+  # two deterministic gates trigger independently. The trigger is now path-less
+  # (`pull_request` on `branches: [main]`) and runs on EVERY PR to main, so this job
+  # is the sole per-job path arbiter - it decides WHICH of the two jobs runs. The
+  # retrieval-eval job stays retrieval-only (it must not pay
   # the dual-checkout + double corpus-seed cost on a main.py-only PR), while the AU4
   # job additionally covers the API-edge endpoint surface (backend/main.py), whose
   # Phase 1 auth floor + Phase 3 widget opaque-token binding checks are endpoint-
