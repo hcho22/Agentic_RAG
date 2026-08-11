@@ -118,9 +118,10 @@ concurrency:
 
 jobs:
   # US-105 (review follow-up): compute a per-job path split from the PR diff so the
-  # two deterministic gates trigger independently. The workflow-level `paths:` union
-  # (above) decides whether the workflow runs at all; this job then decides WHICH of
-  # the two jobs runs. The retrieval-eval job stays retrieval-only (it must not pay
+  # two deterministic gates trigger independently. The trigger is now path-less
+  # (`pull_request` on `branches: [main]`) and runs on EVERY PR to main, so this job
+  # is the sole per-job path arbiter - it decides WHICH of the two jobs runs. The
+  # retrieval-eval job stays retrieval-only (it must not pay
   # the dual-checkout + double corpus-seed cost on a main.py-only PR), while the AU4
   # job additionally covers the API-edge endpoint surface (backend/main.py), whose
   # Phase 1 auth floor + Phase 3 widget opaque-token binding checks are endpoint-
