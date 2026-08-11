@@ -151,6 +151,10 @@ is never replaced by a failure notice you could commit by accident.
 Pass `--summary <path>` to capture that notice as an artifact instead -
 that is what the nightly workflow does.
 
+Found a security issue? Report it privately through GitHub's
+**Security** tab -> **Report a vulnerability**, not a public issue -
+see [`SECURITY.md`](SECURITY.md) for the reporting channel and scope.
+
 ## Repository layout
 
 ```
