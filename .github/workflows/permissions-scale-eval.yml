@@ -146,6 +146,18 @@ jobs:
         # step when the job has failed, then we let the job's overall
         # exit code reflect the eval's verdict.
         if: always()
+        env:
+          # PR creation + auto-merge run under the fine-grained PAT, NOT the default
+          # GITHUB_TOKEN. A PR opened by GITHUB_TOKEN does not trigger the required
+          # check workflows (GitHub blocks recursive runs), so an auto-merging PR
+          # opened with it would sit forever waiting on checks that never start.
+          # The PAT (Contents + Pull requests read/write) is provisioned by the
+          # captain as the EVAL_PUBLISH_TOKEN repo secret; a missing secret fails
+          # this step loudly rather than silently falling back to a direct push that
+          # the required-checks ruleset on main would reject anyway. This step is
+          # if: always(), so it still publishes the evidence snapshot of a
+          # floor-breach run - the job stays red from the eval step regardless.
+          GH_TOKEN: ${{ secrets.EVAL_PUBLISH_TOKEN }}
         run: |
           DATE=$(date -u +"%Y-%m-%d")
           mkdir -p docs/permissions-scale-nightly
@@ -188,7 +200,27 @@ jobs:
           git add docs/permissions-scale-nightly || true
           if git diff --cached --quiet; then
             echo "no changes to commit — nightly produced no artifact"
-          else
-            git commit -m "chore(evals): permissions scale nightly ${DATE}"
-            git push
+            exit 0
           fi
+          # Publish via an auto-merging docs-only PR instead of a direct push to
+          # main. Once the required security-gate checks are enforced on main, a
+          # direct push (no PR, no checks) is rejected; a docs-only PR trips those
+          # checks as skipped=pass and merges cleanly. The branch name carries the
+          # run id + attempt so concurrent / re-run nightlies never collide.
+          BRANCH="eval-publish/permissions-scale-${DATE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git commit -m "chore(evals): permissions scale nightly ${DATE}"
+          # Push the commit to a fresh remote branch and rewind local main (below),
+          # leaving the checkout clean.
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          BODY=$(printf '%s\n' \
+            "Automated docs-only eval snapshot from the \`Permissions scale eval (nightly)\` workflow (run ${GITHUB_RUN_ID})." \
+            '' \
+            'Publishes the permissions-scale receipts under `docs/permissions-scale-nightly/` via an auto-merging PR instead of a direct `git push` to `main`, so the required security-gate checks on `main` are satisfied - a docs-only PR trips them as skipped=pass.' \
+            '' \
+            'Opened with the `EVAL_PUBLISH_TOKEN` fine-grained PAT so the required check workflows run; a PR opened with the default `GITHUB_TOKEN` would not trigger them. Auto-merge (squash) is enabled and it merges once checks pass.')
+          PR_URL=$(gh pr create --base main --head "$BRANCH" \
+            --title "chore(evals): permissions scale nightly ${DATE}" \
+            --body "${BODY}")
+          gh pr merge --auto --squash --delete-branch "$PR_URL"
+          echo "opened auto-merging PR: ${PR_URL}"
+          git reset --hard HEAD~1

@@ -78,7 +78,17 @@ jobs:
           python -m db_seed.corpus_seed
           python -m evals.retrieval.runner --out /tmp/nightly.json
 
-      - name: Publish to docs/nightly/
+      - name: Publish to docs/nightly/ via auto-merging PR
+        env:
+          # PR creation + auto-merge run under the fine-grained PAT, NOT the default
+          # GITHUB_TOKEN. A PR opened by GITHUB_TOKEN does not trigger the required
+          # check workflows (GitHub blocks recursive runs), so an auto-merging PR
+          # opened with it would sit forever waiting on checks that never start.
+          # The PAT (Contents + Pull requests read/write) is provisioned by the
+          # captain as the EVAL_PUBLISH_TOKEN repo secret; a missing secret fails
+          # this step loudly rather than silently falling back to a direct push that
+          # the required-checks ruleset on main would reject anyway.
+          GH_TOKEN: ${{ secrets.EVAL_PUBLISH_TOKEN }}
         run: |
           DATE=$(date -u +"%Y-%m-%d")
           mkdir -p docs/nightly
@@ -89,10 +99,32 @@ jobs:
           git add docs/nightly
           if git diff --cached --quiet; then
             echo "no changes to commit — nightly is a no-op against current main"
-          else
-            git commit -m "chore(evals): nightly retrieval eval ${DATE}"
-            git push
+            exit 0
           fi
+          # Publish via an auto-merging docs-only PR instead of a direct push to
+          # main. Once the required security-gate checks are enforced on main, a
+          # direct push (no PR, no checks) is rejected; a docs-only PR trips those
+          # checks as skipped=pass and merges cleanly. The branch name carries the
+          # run id + attempt so concurrent / re-run nightlies never collide.
+          BRANCH="eval-publish/retrieval-nightly-${DATE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git commit -m "chore(evals): nightly retrieval eval ${DATE}"
+          # Push the new commit to a fresh remote branch and open the PR, then
+          # rewind local main (git reset below). Not advancing the local branch is
+          # what lets this workflow's SECOND publish step (reranker) start from a
+          # clean main so its PR carries only its own snapshot, never this one.
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          BODY=$(printf '%s\n' \
+            "Automated docs-only eval snapshot from the \`Retrieval eval (nightly)\` workflow (run ${GITHUB_RUN_ID})." \
+            '' \
+            'Publishes the nightly retrieval receipts under `docs/nightly/` via an auto-merging PR instead of a direct `git push` to `main`, so the required security-gate checks on `main` are satisfied - a docs-only PR trips them as skipped=pass.' \
+            '' \
+            'Opened with the `EVAL_PUBLISH_TOKEN` fine-grained PAT so the required check workflows run; a PR opened with the default `GITHUB_TOKEN` would not trigger them. Auto-merge (squash) is enabled and it merges once checks pass.')
+          PR_URL=$(gh pr create --base main --head "$BRANCH" \
+            --title "chore(evals): nightly retrieval eval ${DATE}" \
+            --body "${BODY}")
+          gh pr merge --auto --squash --delete-branch "$PR_URL"
+          echo "opened auto-merging PR: ${PR_URL}"
+          git reset --hard HEAD~1
 
       - name: Reranker observability (hybrid + llm)
         # US-117: nightly reranker observability. Reruns the canonical hybrid
@@ -111,6 +143,11 @@ jobs:
           CORPUS_SEED_DATABASE_URL: ${{ env.DB_URL }}
           DATABASE_URL: ${{ env.DB_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Same fine-grained PAT the baseline publish uses (see that step's note).
+          # This step is continue-on-error, so a missing secret / failed publish
+          # is logged loudly but never blocks the critical-path baseline publish -
+          # exactly the isolation this observability step already carries.
+          GH_TOKEN: ${{ secrets.EVAL_PUBLISH_TOKEN }}
         run: |
           DATE=$(date -u +"%Y-%m-%d")
           mkdir -p docs/nightly
@@ -124,7 +161,25 @@ jobs:
           git add docs/nightly
           if git diff --cached --quiet; then
             echo "no reranker changes to commit — no-op against current main"
-          else
-            git commit -m "chore(evals): nightly reranker observability ${DATE}"
-            git push
+            exit 0
           fi
+          # Publish via its own auto-merging docs-only PR, separate from the
+          # baseline PR so the two never share a branch. See the baseline step for
+          # why publishing goes through a PR rather than a direct push to main.
+          BRANCH="eval-publish/retrieval-nightly-rerank-${DATE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git commit -m "chore(evals): nightly reranker observability ${DATE}"
+          # Push the commit to its own remote branch and rewind local main (below),
+          # same as the baseline publish step - the two never share a branch.
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          BODY=$(printf '%s\n' \
+            "Automated docs-only reranker-observability snapshot from the \`Retrieval eval (nightly)\` workflow (run ${GITHUB_RUN_ID})." \
+            '' \
+            'Publishes the nightly reranker receipt under `docs/nightly/` via an auto-merging PR instead of a direct `git push` to `main`, so the required security-gate checks on `main` are satisfied - a docs-only PR trips them as skipped=pass.' \
+            '' \
+            'Opened with the `EVAL_PUBLISH_TOKEN` fine-grained PAT so the required check workflows run; a PR opened with the default `GITHUB_TOKEN` would not trigger them. Auto-merge (squash) is enabled and it merges once checks pass.')
+          PR_URL=$(gh pr create --base main --head "$BRANCH" \
+            --title "chore(evals): nightly reranker observability ${DATE}" \
+            --body "${BODY}")
+          gh pr merge --auto --squash --delete-branch "$PR_URL"
+          echo "opened auto-merging PR: ${PR_URL}"
+          git reset --hard HEAD~1
