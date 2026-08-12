@@ -221,6 +221,6 @@ jobs:
           PR_URL=$(gh pr create --base main --head "$BRANCH" \
             --title "chore(evals): permissions scale nightly ${DATE}" \
             --body "${BODY}")
-          gh pr merge --auto --squash "$PR_URL"
+          gh pr merge --auto --squash --delete-branch "$PR_URL"
           echo "opened auto-merging PR: ${PR_URL}"
           git reset --hard HEAD~1

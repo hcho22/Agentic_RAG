@@ -122,7 +122,7 @@ jobs:
           PR_URL=$(gh pr create --base main --head "$BRANCH" \
             --title "chore(evals): nightly retrieval eval ${DATE}" \
             --body "${BODY}")
-          gh pr merge --auto --squash "$PR_URL"
+          gh pr merge --auto --squash --delete-branch "$PR_URL"
           echo "opened auto-merging PR: ${PR_URL}"
           git reset --hard HEAD~1
 
@@ -180,6 +180,6 @@ jobs:
           PR_URL=$(gh pr create --base main --head "$BRANCH" \
             --title "chore(evals): nightly reranker observability ${DATE}" \
             --body "${BODY}")
-          gh pr merge --auto --squash "$PR_URL"
+          gh pr merge --auto --squash --delete-branch "$PR_URL"
           echo "opened auto-merging PR: ${PR_URL}"
           git reset --hard HEAD~1
