@@ -10,3 +10,6 @@ tmp/
 
 # Build prompt: local-only, never publish (see .claude/launch/BUILD_LOG.md Q6)
 /gtm/
+
+# Launch war room: local-only, never publish
+.claude/launch/
