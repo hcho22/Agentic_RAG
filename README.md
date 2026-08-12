@@ -41,28 +41,40 @@ gold = top-5 at the most exhaustive sweep):
 > **These numbers were generated on 2026-05-14** (commit `393ffaf`, the
 > only commit `evals/permissions_scale/summary.md` has ever had, stamped
 > `47.93s wall`); 2026-05-31 is the last night a nightly independently
-> reproduced the same all-1.000 values, in its own separate run
-> (`56.95s wall`). This table is hand-transcribed, not generated, so it did
-> not track the nightly through two consecutive outages of this benchmark.
+> reproduced the same all-1.000 values before the outage, in its own
+> separate run (`56.95s wall`).
+> This table is hand-transcribed, not generated, so it did not track the
+> nightly through two consecutive outages of this benchmark.
 > From 2026-06-01 the runner died before rewriting its summary and the
 > nightly republished the checked-in table verbatim for 18 days; from
 > 2026-06-19 to 2026-07-30 the eval viewers had no `workspace_membership`
 > row, so the tenant-isolation clause hid the whole corpus from them and
-> every cell was a real, measured **0.000** for 42 days. The floor alarm
-> fired the whole time - the nightly was red every one of those nights -
-> but this page kept showing the numbers below regardless, which is the
-> failure that mattered. The seeding defect and the publish-a-zero path are
-> both fixed (see the paragraph after the table), but nothing automated
-> refreshes *this* table: the nightly writes its summary to a scratch path
-> and commits only `docs/permissions-scale-nightly/`. Updating the numbers
-> here is a deliberate manual step - run
+> every cell was a real, measured **0.000** for 42 days.
+> The floor alarm fired the whole time - the nightly was red every one of
+> those nights - but this page kept showing the numbers below regardless,
+> which is the failure that mattered.
+> **The benchmark recovered on 2026-07-31**: the seeding defect and the
+> publish-a-zero path were both fixed (see the paragraph after the table),
+> and that night's nightly measured the full all-1.000 table again in its
+> own run (`58.95s wall`).
+> Every nightly since has reproduced this same all-1.000 table, through
+> 2026-08-11 at the time of writing, with the recall-floor alarm green
+> throughout and no `DEGENERATE RUN` notice anywhere in the recovered
+> series.
+> Nothing automated refreshes *this* table, though: the nightly writes its
+> summary to a scratch path and commits only
+> `docs/permissions-scale-nightly/`, so keeping the numbers here current is
+> still a deliberate manual step - run
 > `python -m evals.permissions_scale.runner` and
 > `python -m docs._embed_eval_summaries` to regenerate the embedded table
 > in [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md), then
-> re-transcribe it here and commit. Until someone does that, the live
-> output in
-> [`docs/permissions-scale-nightly/`](docs/permissions-scale-nightly/) is
-> the number to trust, not this one.
+> re-transcribe it here and commit.
+> This table currently matches the recovered nightly exactly, but because
+> it is hand-copied it could drift again if the recall curve ever changes
+> at scale, so the live output in
+> [`docs/permissions-scale-nightly/`](docs/permissions-scale-nightly/)
+> remains the source of truth - it now corroborates the numbers below
+> rather than contradicting them.
 
 | Viewer | Visible chunks | Selectivity | ef_search=40 | ef_search=80 | ef_search=200 | ef_search=500 (gold) |
 |---|---|---|---|---|---|---|
