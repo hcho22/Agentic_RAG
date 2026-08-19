@@ -27,9 +27,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  # Need write access to push the nightly snapshot under
+  # contents: write - push the nightly snapshot under
   # docs/permissions-scale-nightly/.
+  # issues: write - the 'Alarm on stranded eval publish' step files / closes a
+  # deduped publish-failure issue when a snapshot cannot be published to main.
   contents: write
+  issues: write
 
 concurrency:
   group: permissions-scale-eval-nightly
@@ -140,6 +143,7 @@ jobs:
             --enforce-floor
 
       - name: Publish to docs/permissions-scale-nightly/
+        id: publish
         # Always publish, even when --enforce-floor failed the previous
         # step — the snapshot is the *evidence* of the failure and is
         # more useful committed than discarded. `if: always()` runs the
@@ -208,10 +212,23 @@ jobs:
           # checks as skipped=pass and merges cleanly. The branch name carries the
           # run id + attempt so concurrent / re-run nightlies never collide.
           BRANCH="eval-publish/permissions-scale-${DATE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Record the branch for the 'Alarm on stranded eval publish' step so a
+          # failure below names the exact branch the snapshot is stranded on.
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           git commit -m "chore(evals): permissions scale nightly ${DATE}"
           # Push the commit to a fresh remote branch and rewind local main (below),
           # leaving the checkout clean.
           git push origin "HEAD:refs/heads/${BRANCH}"
+          # Named-cause preflight: `gh pr create` authenticates with GH_TOKEN =
+          # EVAL_PUBLISH_TOKEN. When that secret resolves empty - as it did
+          # repo-wide from 2026-08-12, silently stranding 17 nights of receipts on
+          # their push branches - gh dies with the opaque "gh: ... set the GH_TOKEN
+          # environment variable" (exit 4). Fail here with a legible cause instead;
+          # the 'Alarm on stranded eval publish' step turns it into a visible issue.
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error title=Permissions-scale snapshot NOT published - EVAL_PUBLISH_TOKEN is empty::The ${DATE} permissions-scale snapshot was committed and pushed to \`${BRANCH}\` but no auto-merging PR was opened, so it is stranded there, unpublished to main. Set the EVAL_PUBLISH_TOKEN repo secret (fine-grained PAT: Contents + Pull requests read/write) and re-run."
+            exit 1
+          fi
           BODY=$(printf '%s\n' \
             "Automated docs-only eval snapshot from the \`Permissions scale eval (nightly)\` workflow (run ${GITHUB_RUN_ID})." \
             '' \
@@ -224,3 +241,70 @@ jobs:
           gh pr merge --auto --squash --delete-branch "$PR_URL"
           echo "opened auto-merging PR: ${PR_URL}"
           git reset --hard HEAD~1
+
+      # A red scheduled run alone is exactly what failed to alert anyone when
+      # EVAL_PUBLISH_TOKEN lapsed on 2026-08-12: the failure went unnoticed for a
+      # week while nights of receipts piled up on stranded push branches and
+      # `main` froze. File a deduped, visible issue whenever the publish step above
+      # fails so a future token lapse (or any publish failure) is impossible to
+      # miss, and auto-close it once a run publishes cleanly again. Runs under the
+      # default GITHUB_TOKEN - never the possibly-empty EVAL_PUBLISH_TOKEN - so it
+      # can file the alarm even when the publish token is precisely what is
+      # missing; it never pushes. It never fails the job on its own: a floor-breach
+      # run is already red from the eval step, and a clean publish must stay green.
+      - name: Alarm on stranded eval publish
+        if: always() && steps.publish.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          STRANDED_BRANCH: ${{ steps.publish.outputs.branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Resolve open issues via the REST issues endpoint, NOT `gh issue list
+          # --label`: the GraphQL search index it queries is only eventually
+          # consistent and has silently dropped freshly-labelled issues (see the
+          # weekly workflows' harness-failure steps), which would wedge a false
+          # alarm open. `?labels=` filters the primary store and is strongly
+          # consistent; drop anything with a `pull_request` key (a PR is an issue
+          # in this API) so a same-labelled PR is never mistaken for the finding.
+          open_issue_numbers() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=$1&state=open&per_page=100" \
+              --jq '.[] | select(.pull_request == null) | .number'
+          }
+          LABEL=permissions-scale-publish-failure
+          gh label create "${LABEL}" --color B60205 \
+            --description "Permissions-scale nightly snapshot failed to publish to main" --force || true
+          if [ "${PUBLISH_OUTCOME}" = "failure" ]; then
+            # A transient gh blip yields empty here, so err toward filing a
+            # possibly-duplicate (self-healing) issue rather than leaving the alarm
+            # unshouted (invariant 12: the path that should shout must not go quiet).
+            existing=$(open_issue_numbers "${LABEL}" || true)
+            if [ -z "${existing}" ]; then
+              gh issue create --label "${LABEL}" \
+                --title "Permissions-scale nightly: snapshot failed to publish to main" \
+                --body "$(printf '%s\n' \
+                  "The \`Permissions scale eval (nightly)\` publish step failed, so today's snapshot was NOT published to \`main\`." \
+                  "" \
+                  "The most common cause is an empty or unset \`EVAL_PUBLISH_TOKEN\` secret (the fine-grained PAT \`gh pr create\` authenticates with); that is exactly what stranded 17 nights of receipts from 2026-08-12. Check the publish step's log for the \`::error::\` line naming the cause." \
+                  "" \
+                  "Stranded branch: \`${STRANDED_BRANCH:-<not pushed - the publish step failed before creating the branch>}\`" \
+                  "" \
+                  "Fix: ensure the \`EVAL_PUBLISH_TOKEN\` repo secret holds a valid fine-grained PAT (Contents + Pull requests read/write), then re-run. A re-run publishes from its own fresh branch; delete any stranded branch once its snapshot has landed on main." \
+                  "" \
+                  "Run log: ${RUN_URL}" \
+                  "" \
+                  "This issue is deduped on the \`${LABEL}\` label and auto-closes as soon as a run publishes cleanly again.")"
+              echo "filed publish-failure issue"
+            else
+              echo "open publish-failure issue already exists - dedup, skipping"
+            fi
+          else
+            # Publish succeeded (or was a clean no-op): the mechanism is healthy, so
+            # retract any open publish-failure alarm. Non-fatal throughout - a
+            # transient gh blip here must not turn a healthy publish red.
+            for num in $(open_issue_numbers "${LABEL}" || true); do
+              gh issue close "${num}" \
+                --comment "Auto-closed: the permissions-scale nightly published cleanly again (${RUN_URL})." || true
+              echo "auto-closed publish-failure issue #${num}"
+            done
+          fi

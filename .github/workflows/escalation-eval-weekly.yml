@@ -175,6 +175,7 @@ jobs:
           fi
 
       - name: Publish to docs/escalation-weekly/
+        id: publish
         if: always() && steps.snapshot.outputs.present == 'true'
         env:
           # PR creation + auto-merge run under the fine-grained PAT, NOT the default
@@ -205,10 +206,23 @@ jobs:
           # checks as skipped=pass and merges cleanly. The branch name carries the
           # run id + attempt so concurrent / re-run runs never collide.
           BRANCH="eval-publish/escalation-weekly-${DATE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Record the branch for the 'Alarm on stranded eval publish' step so a
+          # failure below names the exact branch the snapshot is stranded on.
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           git commit -m "chore(evals): weekly E7 escalation eval ${DATE}"
           # Push the commit to a fresh remote branch and rewind local main (below),
           # leaving the checkout clean.
           git push origin "HEAD:refs/heads/${BRANCH}"
+          # Named-cause preflight: `gh pr create` authenticates with GH_TOKEN =
+          # EVAL_PUBLISH_TOKEN. When that secret resolves empty - as it did
+          # repo-wide from 2026-08-12, silently stranding 17 nights of receipts on
+          # their push branches - gh dies with the opaque "gh: ... set the GH_TOKEN
+          # environment variable" (exit 4). Fail here with a legible cause instead;
+          # the 'Alarm on stranded eval publish' step turns it into a visible issue.
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error title=E7 weekly snapshot NOT published - EVAL_PUBLISH_TOKEN is empty::The ${DATE} escalation snapshot was committed and pushed to \`${BRANCH}\` but no auto-merging PR was opened, so it is stranded there, unpublished to main. Set the EVAL_PUBLISH_TOKEN repo secret (fine-grained PAT: Contents + Pull requests read/write) and re-run."
+            exit 1
+          fi
           BODY=$(printf '%s\n' \
             "Automated docs-only eval snapshot from the \`Escalation eval (weekly)\` workflow (run ${GITHUB_RUN_ID})." \
             '' \
@@ -221,6 +235,67 @@ jobs:
           gh pr merge --auto --squash --delete-branch "$PR_URL"
           echo "opened auto-merging PR: ${PR_URL}"
           git reset --hard HEAD~1
+
+      # Distinct from the harness-failure step below (which fires when NO snapshot
+      # was produced): this fires when a snapshot WAS produced but could not be
+      # PUBLISHED to main - the exact failure mode of the 2026-08-12 token lapse,
+      # which stranded receipts on push branches unnoticed for a week. File a
+      # deduped, visible issue on a publish failure and auto-close it once a run
+      # publishes cleanly again. Runs under the default GITHUB_TOKEN - never the
+      # possibly-empty EVAL_PUBLISH_TOKEN - so it can file the alarm even when the
+      # publish token is precisely what is missing; it never pushes. It never fails
+      # the job on its own: a failed publish is already red from the step above.
+      - name: Alarm on stranded eval publish
+        if: always() && steps.publish.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+          STRANDED_BRANCH: ${{ steps.publish.outputs.branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # REST issues endpoint, not `gh issue list --label` (the GraphQL search
+          # index is only eventually consistent and has silently dropped freshly-
+          # labelled issues; see the harness-failure step below). Drop PRs.
+          open_issue_numbers() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=$1&state=open&per_page=100" \
+              --jq '.[] | select(.pull_request == null) | .number'
+          }
+          LABEL=e7-weekly-publish-failure
+          gh label create "${LABEL}" --color B60205 \
+            --description "E7 weekly snapshot failed to publish to main" --force || true
+          if [ "${PUBLISH_OUTCOME}" = "failure" ]; then
+            # A transient gh blip yields empty here, so err toward filing a
+            # possibly-duplicate (self-healing) issue rather than leaving the alarm
+            # unshouted (invariant 12: the path that should shout must not go quiet).
+            existing=$(open_issue_numbers "${LABEL}" || true)
+            if [ -z "${existing}" ]; then
+              gh issue create --label "${LABEL}" \
+                --title "E7 weekly: snapshot failed to publish to main" \
+                --body "$(printf '%s\n' \
+                  "The \`Escalation eval (weekly)\` publish step failed, so this week's snapshot was produced but NOT published to \`main\`." \
+                  "" \
+                  "The most common cause is an empty or unset \`EVAL_PUBLISH_TOKEN\` secret (the fine-grained PAT \`gh pr create\` authenticates with); that is exactly what stranded 17 nights of receipts from 2026-08-12. Check the publish step's log for the \`::error::\` line naming the cause." \
+                  "" \
+                  "Stranded branch: \`${STRANDED_BRANCH:-<not pushed - the publish step failed before creating the branch>}\`" \
+                  "" \
+                  "Fix: ensure the \`EVAL_PUBLISH_TOKEN\` repo secret holds a valid fine-grained PAT (Contents + Pull requests read/write), then re-run. A re-run publishes from its own fresh branch; delete any stranded branch once its snapshot has landed on main." \
+                  "" \
+                  "Run log: ${RUN_URL}" \
+                  "" \
+                  "This issue is deduped on the \`${LABEL}\` label and auto-closes as soon as a run publishes cleanly again.")"
+              echo "filed publish-failure issue"
+            else
+              echo "open publish-failure issue already exists - dedup, skipping"
+            fi
+          else
+            # Publish succeeded (or was a clean no-op): the mechanism is healthy, so
+            # retract any open publish-failure alarm. Non-fatal throughout.
+            for num in $(open_issue_numbers "${LABEL}" || true); do
+              gh issue close "${num}" \
+                --comment "Auto-closed: the E7 weekly published cleanly again (${RUN_URL})." || true
+              echo "auto-closed publish-failure issue #${num}"
+            done
+          fi
 
       # A missing snapshot IS a finding, and the most serious one this workflow
       # can produce: the false-resolve ceiling is fed SOLELY by the P3 leg scored
@@ -284,7 +359,7 @@ jobs:
                   "This issue is deduped on the \`${HARNESS_LABEL}\` label and auto-closes as soon as a run produces a snapshot again.")"
               echo "filed harness-failure issue"
             else
-              echo "open harness-failure issue already exists — dedup, skipping"
+              echo "open harness-failure issue already exists - dedup, skipping"
             fi
             exit 1
           fi
@@ -351,7 +426,7 @@ jobs:
                 --body "${body}"
               echo "filed E7 weekly gate issue"
             else
-              echo "open E7 weekly gate issue already exists — dedup, skipping"
+              echo "open E7 weekly gate issue already exists - dedup, skipping"
             fi
           elif [ "${EVENT_NAME}" = "schedule" ]; then
             # Green scheduled run: auto-close stale gate issues. Only a scheduled

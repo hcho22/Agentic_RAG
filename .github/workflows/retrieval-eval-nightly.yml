@@ -17,8 +17,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  # Need write access to commit the nightly snapshot to docs/nightly/.
+  # contents: write - commit the nightly snapshot to docs/nightly/.
+  # issues: write - the 'Alarm on stranded eval publish' step files / closes a
+  # deduped publish-failure issue when a snapshot cannot be published to main.
   contents: write
+  issues: write
 
 concurrency:
   group: retrieval-eval-nightly
@@ -79,6 +82,7 @@ jobs:
           python -m evals.retrieval.runner --out /tmp/nightly.json
 
       - name: Publish to docs/nightly/ via auto-merging PR
+        id: publish_baseline
         env:
           # PR creation + auto-merge run under the fine-grained PAT, NOT the default
           # GITHUB_TOKEN. A PR opened by GITHUB_TOKEN does not trigger the required
@@ -107,12 +111,25 @@ jobs:
           # checks as skipped=pass and merges cleanly. The branch name carries the
           # run id + attempt so concurrent / re-run nightlies never collide.
           BRANCH="eval-publish/retrieval-nightly-${DATE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Record the branch for the 'Alarm on stranded eval publish' step so a
+          # failure below names the exact branch the snapshot is stranded on.
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           git commit -m "chore(evals): nightly retrieval eval ${DATE}"
           # Push the new commit to a fresh remote branch and open the PR, then
           # rewind local main (git reset below). Not advancing the local branch is
           # what lets this workflow's SECOND publish step (reranker) start from a
           # clean main so its PR carries only its own snapshot, never this one.
           git push origin "HEAD:refs/heads/${BRANCH}"
+          # Named-cause preflight: `gh pr create` authenticates with GH_TOKEN =
+          # EVAL_PUBLISH_TOKEN. When that secret resolves empty - as it did
+          # repo-wide from 2026-08-12, silently stranding 17 nights of receipts on
+          # their push branches - gh dies with the opaque "gh: ... set the GH_TOKEN
+          # environment variable" (exit 4). Fail here with a legible cause instead;
+          # the 'Alarm on stranded eval publish' step turns it into a visible issue.
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error title=Nightly snapshot NOT published - EVAL_PUBLISH_TOKEN is empty::The ${DATE} nightly snapshot was committed and pushed to \`${BRANCH}\` but no auto-merging PR was opened, so it is stranded there, unpublished to main. Set the EVAL_PUBLISH_TOKEN repo secret (fine-grained PAT: Contents + Pull requests read/write) and re-run."
+            exit 1
+          fi
           BODY=$(printf '%s\n' \
             "Automated docs-only eval snapshot from the \`Retrieval eval (nightly)\` workflow (run ${GITHUB_RUN_ID})." \
             '' \
@@ -127,6 +144,7 @@ jobs:
           git reset --hard HEAD~1
 
       - name: Reranker observability (hybrid + llm)
+        id: publish_rerank
         # US-117: nightly reranker observability. Reruns the canonical hybrid
         # path with the `llm` reranker on top (the same
         # backend/main.py:_retrieve_for_agent path production uses), published
@@ -167,10 +185,20 @@ jobs:
           # baseline PR so the two never share a branch. See the baseline step for
           # why publishing goes through a PR rather than a direct push to main.
           BRANCH="eval-publish/retrieval-nightly-rerank-${DATE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Record the branch for the 'Alarm on stranded eval publish' step.
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           git commit -m "chore(evals): nightly reranker observability ${DATE}"
           # Push the commit to its own remote branch and rewind local main (below),
           # same as the baseline publish step - the two never share a branch.
           git push origin "HEAD:refs/heads/${BRANCH}"
+          # Named-cause preflight (see the baseline step for the full rationale).
+          # This step is continue-on-error, so the exit 1 is swallowed and never
+          # blocks the critical-path baseline publish - the annotation and the
+          # alarm issue are what make the stranded reranker snapshot visible.
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error title=Reranker snapshot NOT published - EVAL_PUBLISH_TOKEN is empty::The ${DATE} reranker-observability snapshot was committed and pushed to \`${BRANCH}\` but no auto-merging PR was opened, so it is stranded there, unpublished to main. Set the EVAL_PUBLISH_TOKEN repo secret (fine-grained PAT: Contents + Pull requests read/write) and re-run."
+            exit 1
+          fi
           BODY=$(printf '%s\n' \
             "Automated docs-only reranker-observability snapshot from the \`Retrieval eval (nightly)\` workflow (run ${GITHUB_RUN_ID})." \
             '' \
@@ -183,3 +211,76 @@ jobs:
           gh pr merge --auto --squash --delete-branch "$PR_URL"
           echo "opened auto-merging PR: ${PR_URL}"
           git reset --hard HEAD~1
+
+      # A red scheduled run alone is exactly what failed to alert anyone when
+      # EVAL_PUBLISH_TOKEN lapsed on 2026-08-12: the failure went unnoticed for a
+      # week while 17 nights of receipts piled up on stranded push branches and
+      # `main` froze. File a deduped, visible issue whenever a publish step above
+      # fails so a future token lapse (or any publish failure) is impossible to
+      # miss, and auto-close it once a run publishes cleanly again. Runs under the
+      # default GITHUB_TOKEN - never the possibly-empty EVAL_PUBLISH_TOKEN - so it
+      # can file the alarm even when the publish token is precisely what is
+      # missing; it never pushes. It never fails the job on its own: a failed
+      # baseline publish is already red from its step, and the reranker publish is
+      # deliberately continue-on-error, so its failure must stay non-blocking.
+      - name: Alarm on stranded eval publish
+        if: always() && (steps.publish_baseline.outcome != 'skipped' || steps.publish_rerank.outcome != 'skipped')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASELINE_OUTCOME: ${{ steps.publish_baseline.outcome }}
+          BASELINE_BRANCH: ${{ steps.publish_baseline.outputs.branch }}
+          RERANK_OUTCOME: ${{ steps.publish_rerank.outcome }}
+          RERANK_BRANCH: ${{ steps.publish_rerank.outputs.branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Resolve open issues carrying a label via the REST issues endpoint, NOT
+          # `gh issue list --label`: the GraphQL search index it queries is only
+          # eventually consistent and has silently dropped freshly-labelled issues
+          # (see the sibling weekly workflows' harness-failure steps), which would
+          # wedge a false alarm open. `?labels=` filters the primary store and is
+          # strongly consistent; drop anything with a `pull_request` key (a PR is
+          # an issue in this API) so a same-labelled PR is never mistaken for it.
+          open_issue_numbers() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=$1&state=open&per_page=100" \
+              --jq '.[] | select(.pull_request == null) | .number'
+          }
+          LABEL=retrieval-nightly-publish-failure
+          gh label create "${LABEL}" --color B60205 \
+            --description "Nightly retrieval snapshot failed to publish to main" --force || true
+          stranded=""
+          [ "${BASELINE_OUTCOME}" = "failure" ] && stranded="${stranded}"$'\n'"- baseline: \`${BASELINE_BRANCH:-<not pushed - failed before creating the branch>}\`"
+          [ "${RERANK_OUTCOME}" = "failure" ] && stranded="${stranded}"$'\n'"- reranker: \`${RERANK_BRANCH:-<not pushed - failed before creating the branch>}\`"
+          if [ -n "${stranded}" ]; then
+            # A transient gh blip yields empty here, so err toward filing a
+            # possibly-duplicate (self-healing) issue rather than leaving the alarm
+            # unshouted (invariant 12: the path that should shout must not go quiet).
+            existing=$(open_issue_numbers "${LABEL}" || true)
+            if [ -z "${existing}" ]; then
+              gh issue create --label "${LABEL}" \
+                --title "Retrieval nightly: snapshot failed to publish to main" \
+                --body "$(printf '%s\n' \
+                  "A publish step in the \`Retrieval eval (nightly)\` workflow failed, so a snapshot was NOT published to \`main\`." \
+                  "" \
+                  "The most common cause is an empty or unset \`EVAL_PUBLISH_TOKEN\` secret (the fine-grained PAT \`gh pr create\` authenticates with); that is exactly what stranded 17 nights of receipts from 2026-08-12. Check the failing publish step's log for the \`::error::\` line naming the cause." \
+                  "" \
+                  "Stranded branch(es):${stranded}" \
+                  "" \
+                  "Fix: ensure the \`EVAL_PUBLISH_TOKEN\` repo secret holds a valid fine-grained PAT (Contents + Pull requests read/write), then re-run. A re-run publishes from its own fresh branch; delete any stranded branch once its snapshot has landed on main." \
+                  "" \
+                  "Run log: ${RUN_URL}" \
+                  "" \
+                  "This issue is deduped on the \`${LABEL}\` label and auto-closes as soon as a run publishes cleanly again.")"
+              echo "filed publish-failure issue"
+            else
+              echo "open publish-failure issue already exists - dedup, skipping"
+            fi
+          else
+            # No publish step failed: the mechanism is healthy, so retract any open
+            # publish-failure alarm. Non-fatal throughout - a transient gh blip here
+            # must not turn a healthy publish red.
+            for num in $(open_issue_numbers "${LABEL}" || true); do
+              gh issue close "${num}" \
+                --comment "Auto-closed: the retrieval nightly published cleanly again (${RUN_URL})." || true
+              echo "auto-closed publish-failure issue #${num}"
+            done
+          fi
