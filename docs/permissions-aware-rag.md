@@ -498,7 +498,7 @@ harness refuses rather than reporting a number it did not measure; the
 durable rules are invariants 11 and 12 in `AGENTS.md`. **The benchmark
 recovered on 2026-07-31**: the first nightly after the fix measured the
 full all-1.000 table again in its own run (`58.95s wall`), and every
-nightly since has reproduced it through 2026-08-11 - recall floor green,
+nightly since has reproduced it through 2026-08-19 - recall floor green,
 no `DEGENERATE RUN` notice anywhere in the recovered series - so the
 live output in [`permissions-scale-nightly/`](permissions-scale-nightly/)
 now corroborates the embedded table above rather than contradicting it.
