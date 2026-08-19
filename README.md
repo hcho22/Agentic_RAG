@@ -58,7 +58,7 @@ gold = top-5 at the most exhaustive sweep):
 > and that night's nightly measured the full all-1.000 table again in its
 > own run (`58.95s wall`).
 > Every nightly since has reproduced this same all-1.000 table, through
-> 2026-08-11 at the time of writing, with the recall-floor alarm green
+> 2026-08-19 at the time of writing, with the recall-floor alarm green
 > throughout and no `DEGENERATE RUN` notice anywhere in the recovered
 > series.
 > Nothing automated refreshes *this* table, though: the nightly writes its
