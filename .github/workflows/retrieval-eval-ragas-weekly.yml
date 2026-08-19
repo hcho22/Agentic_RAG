@@ -249,7 +249,7 @@ jobs:
                   "" \
                   "Run log: ${RUN_URL}" \
                   "" \
-                  "This issue is deduped on the \`${LABEL}\` label and auto-closes as soon as a run publishes cleanly again.")"
+                  "This issue is deduped on the \`${LABEL}\` label and auto-closes as soon as a run publishes cleanly again.")" || true
               echo "filed publish-failure issue"
             else
               echo "open publish-failure issue already exists - dedup, skipping"
