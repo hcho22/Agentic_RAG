@@ -181,7 +181,7 @@ A present-but-typo'd label is still rejected fail-closed.
 
 The kit's default configuration judges quality with **two independent judges from different model families**, and you should keep it that way.
 
-The generator is OpenAI (`gpt-4o-mini`) and the RAGAS judge is the same family - a judge can be systematically lenient toward outputs from its own family.
+The generator is OpenAI (`gpt-5.6-luna`) and the RAGAS judge is the same family - a judge can be systematically lenient toward outputs from its own family.
 The kit corroborates every RAGAS Faithfulness / Answer Relevancy drop against an independent **cross-family Claude judge** (a different vendor, a different model, a different prompting technique), and only escalates to a red alert when *both* judges see the same drop in the same cell.
 
 In moat terms: cross-family corroboration is **one extra judge pass on the weekly sweep, cents of spend**, and it turns "a number moved" into "**two independent judges from different families agree the number moved**."
