@@ -209,11 +209,12 @@ NON_REGRESSION_TOLERANCE = 0.005
 
 # US-036: generation + judge.
 # Generator and judge MUST be different model families to avoid same-model
-# scoring bias (a well-known evaluation pitfall). Generator is small + fast
-# + cheap; judge is the more capable model since it does the harder job
-# (reading the question, reference, context, and answer to score two
-# dimensions).
-GENERATION_MODEL = "gpt-4o-mini"
+# scoring bias (a well-known evaluation pitfall). The generator is
+# gpt-5.6-luna to mirror production's answerer (US-120), so the eval scores
+# the model we actually ship; the judge stays Claude, the more capable model
+# for the harder job (reading the question, reference, context, and answer to
+# score two dimensions).
+GENERATION_MODEL = "gpt-5.6-luna"
 JUDGE_MODEL = "claude-haiku-4-5"
 GENERATION_SEED = 42
 GENERATION_MAX_TOKENS = 400
@@ -698,9 +699,16 @@ async def generate_answer(
     question: str,
     context: str,
 ) -> str:
-    """Generate an answer to `question` grounded in `context` via gpt-4o-mini.
+    """Generate an answer to `question` grounded in `context` via gpt-5.6-luna.
 
-    Temperature 0 + fixed seed for determinism. The generator's prompt
+    Runs on gpt-5.6-luna to mirror production's answerer (US-120), so the
+    weekly faithfulness/helpfulness numbers describe the system we ship.
+    Luna rejects `temperature` (only its default of 1 is supported) and
+    requires `max_completion_tokens` rather than `max_tokens`, so the
+    generator inherits production's non-determinism — identical (question,
+    context) inputs may yield differing answers across runs. `seed` is still
+    passed (Luna accepts it) as a best-effort reproducibility nudge, but it
+    does not guarantee determinism at temperature 1. The generator's prompt
     instructs it to use only the provided context, so a high-faithfulness
     score requires retrieval to have surfaced the right chunks — the metric
     pulls double duty as a retrieval-quality signal and a generation-
@@ -708,9 +716,8 @@ async def generate_answer(
     """
     response = await openai_client.chat.completions.create(
         model=GENERATION_MODEL,
-        temperature=0,
         seed=GENERATION_SEED,
-        max_tokens=GENERATION_MAX_TOKENS,
+        max_completion_tokens=GENERATION_MAX_TOKENS,
         messages=[
             {"role": "system", "content": GENERATION_PROMPT_SYSTEM},
             {
@@ -1491,7 +1498,7 @@ def render_summary(
     if has_generation:
         lines += [
             "",
-            "### Generation quality (LLM judge — Claude on gpt-4o-mini answers)",
+            "### Generation quality (LLM judge — Claude on gpt-5.6-luna answers)",
             "",
             "| Mode | n | Faithfulness (1-5) | Helpfulness (1-5) |",
             "|---|---|---|---|",
