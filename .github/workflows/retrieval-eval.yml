@@ -212,7 +212,12 @@ jobs:
   # failure the rubric guard above exists to close, applied to the property the
   # rubric guard is scoped around.
   #
-  # All five are offline by construction - no DB, no secrets, no network, inputs
+  # The US-120 generation guard (evals/retrieval/test_us120_generation_guard.py)
+  # is the third invariant-12 half: it pins that the gpt-5.6-luna answer generator
+  # refuses a truncated/empty answer (a reasoning-budget cutoff) instead of
+  # returning "" for the judge to score as a real low result.
+  #
+  # All six are offline by construction - no DB, no secrets, no network, inputs
   # built in-process (the two gate modules drive fake judge clients, so there is
   # no network call to make) - which is what lets this job gate a PR without the
   # Supabase stack the two jobs below pay for. The rubric module's LIVE half
@@ -240,7 +245,7 @@ jobs:
 
       - name: Install Python deps
         run: |
-          # Same slim install as the eval job: all five guard modules import only
+          # Same slim install as the eval job: all six guard modules import only
           # what requirements-ci.txt already covers (asyncpg / httpx / openai /
           # pyyaml / pyjwt), never the ML stack. The rubric guard reaches
           # backend/escalation.py -> retrieval -> embeddings, which stays inside
@@ -251,11 +256,12 @@ jobs:
           pip install -r evals/retrieval/requirements-ci.txt
 
       - name: Run the offline harness guards
-        # No `|| true`, no skip-on-unset-env: these five modules must always run
+        # No `|| true`, no skip-on-unset-env: these six modules must always run
         # and a non-zero exit must block the merge. A guard that can go quiet is
         # the failure mode it exists to catch.
         run: |
           python -m evals.retrieval.test_empty_gold_guard
+          python -m evals.retrieval.test_us120_generation_guard
           python -m evals.permissions_scale.test_degenerate_guard
           python -m backend.test_answer_gate_rubric
           python -m backend.test_answer_gate

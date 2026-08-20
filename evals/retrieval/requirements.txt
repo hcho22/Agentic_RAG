@@ -6,7 +6,7 @@
 -r ../../backend/requirements.txt
 
 # US-036: the generation eval uses a cross-family LLM as judge to avoid
-# same-model bias. Generator is OpenAI's gpt-4o-mini (already in backend
+# same-model bias. Generator is OpenAI's gpt-5.6-luna (already in backend
 # deps); judge is Anthropic's Claude. Only loaded when the runner is
 # invoked with --include-generation.
 anthropic>=0.40.0
