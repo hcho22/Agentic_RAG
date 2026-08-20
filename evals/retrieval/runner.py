@@ -209,11 +209,12 @@ NON_REGRESSION_TOLERANCE = 0.005
 
 # US-036: generation + judge.
 # Generator and judge MUST be different model families to avoid same-model
-# scoring bias (a well-known evaluation pitfall). Generator is small + fast
-# + cheap; judge is the more capable model since it does the harder job
-# (reading the question, reference, context, and answer to score two
-# dimensions).
-GENERATION_MODEL = "gpt-4o-mini"
+# scoring bias (a well-known evaluation pitfall). The generator is
+# gpt-5.6-luna to mirror production's answerer (US-120), so the eval scores
+# the model we actually ship; the judge stays Claude, the more capable model
+# for the harder job (reading the question, reference, context, and answer to
+# score two dimensions).
+GENERATION_MODEL = "gpt-5.6-luna"
 JUDGE_MODEL = "claude-haiku-4-5"
 GENERATION_SEED = 42
 GENERATION_MAX_TOKENS = 400
@@ -693,24 +694,67 @@ async def run_query(
 # ---------------------------------------------------------------------------
 
 
+class TruncatedGenerationError(RuntimeError):
+    """The generator produced no usable answer — refuses to return an empty string.
+
+    gpt-5.6-luna (US-120) is a reasoning model that bills reasoning tokens against
+    `max_completion_tokens` (GENERATION_MAX_TOKENS), so a turn whose reasoning
+    exhausts the budget comes back with `finish_reason='length'` and truncated or
+    empty `message.content`. The historical `return content or ""` then handed an
+    empty answer to the judge, which scored it as a genuine low
+    faithfulness/helpfulness result — a budget cutoff wearing the exact shape of a
+    real generation regression. That is precisely what invariant 12 forbids:
+    "measured nothing" must never be reportable as a measurement. This fails the
+    run loudly instead, naming the question so the cutoff is diagnosable from the
+    CI log alone.
+    """
+
+    def __init__(self, question: str, finish_reason: str | None, content: str | None) -> None:
+        self.question = question
+        self.finish_reason = finish_reason
+        cause = (
+            "generation truncated at max_completion_tokens "
+            f"(finish_reason={finish_reason!r})"
+            if finish_reason == "length"
+            else f"generator returned blank content (finish_reason={finish_reason!r})"
+        )
+        super().__init__(
+            f"no answer produced for question {question!r}: {cause}. The generator "
+            f"yielded no usable text, so the judge would have scored an empty "
+            f"answer as a real low faithfulness/helpfulness result — refusing to "
+            f"report a budget cutoff as a genuine measurement (invariant 12). Raise "
+            f"GENERATION_MAX_TOKENS or investigate the model before re-running."
+        )
+
+
 async def generate_answer(
     openai_client: AsyncOpenAI,
     question: str,
     context: str,
 ) -> str:
-    """Generate an answer to `question` grounded in `context` via gpt-4o-mini.
+    """Generate an answer to `question` grounded in `context` via gpt-5.6-luna.
 
-    Temperature 0 + fixed seed for determinism. The generator's prompt
+    Runs on gpt-5.6-luna to mirror production's answerer (US-120), so the
+    weekly faithfulness/helpfulness numbers describe the system we ship.
+    Luna rejects `temperature` (only its default of 1 is supported) and
+    requires `max_completion_tokens` rather than `max_tokens`, so the
+    generator inherits production's non-determinism — identical (question,
+    context) inputs may yield differing answers across runs. `seed` is still
+    passed (Luna accepts it) as a best-effort reproducibility nudge, but it
+    does not guarantee determinism at temperature 1. The generator's prompt
     instructs it to use only the provided context, so a high-faithfulness
     score requires retrieval to have surfaced the right chunks — the metric
     pulls double duty as a retrieval-quality signal and a generation-
     quality signal.
+
+    Raises `TruncatedGenerationError` if Luna returns no usable answer
+    (`finish_reason='length'` or blank content) rather than returning `""` and
+    letting the judge score a budget cutoff as a real low score (invariant 12).
     """
     response = await openai_client.chat.completions.create(
         model=GENERATION_MODEL,
-        temperature=0,
         seed=GENERATION_SEED,
-        max_tokens=GENERATION_MAX_TOKENS,
+        max_completion_tokens=GENERATION_MAX_TOKENS,
         messages=[
             {"role": "system", "content": GENERATION_PROMPT_SYSTEM},
             {
@@ -721,7 +765,11 @@ async def generate_answer(
             },
         ],
     )
-    return response.choices[0].message.content or ""
+    choice = response.choices[0]
+    content = choice.message.content
+    if choice.finish_reason == "length" or not (content and content.strip()):
+        raise TruncatedGenerationError(question, choice.finish_reason, content)
+    return content
 
 
 # Anthropic SDK is imported lazily so the runner has zero hard dep on it
@@ -1491,7 +1539,7 @@ def render_summary(
     if has_generation:
         lines += [
             "",
-            "### Generation quality (LLM judge — Claude on gpt-4o-mini answers)",
+            "### Generation quality (LLM judge — Claude on gpt-5.6-luna answers)",
             "",
             "| Mode | n | Faithfulness (1-5) | Helpfulness (1-5) |",
             "|---|---|---|---|",
