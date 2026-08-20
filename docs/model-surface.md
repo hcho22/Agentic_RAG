@@ -108,6 +108,31 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 | `JUDGE_TEMPERATURE` | Runtime faithfulness + answer-completeness gates | `0` (unset **or** blank); the literal `none` omits the parameter |
 | `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (OpenAI proper, no `base_url`) / `completions` (Azure or `openai` + `base_url`) |
 
+> **A temperature-refusing answerer is flagged at boot when a helper still
+> inherits it.** Four aux helpers generate text off the answerer model - the
+> query planner (`OPENAI_PLANNER_MODEL`), text-to-SQL (`OPENAI_SQL_MODEL`), the
+> `llm` reranker (`OPENAI_RERANK_MODEL`), and the document sub-agent
+> (`OPENAI_SUBAGENT_MODEL`) - and each falls through to `OPENAI_MODEL` when its own
+> selector is unset. Three of them (planner, text-to-SQL, reranker) send a
+> hardcoded `temperature=0` on every call. So when `OPENAI_MODEL` migrates to a
+> reasoning family that refuses the `temperature` *argument* (o-series / `gpt-5-*`,
+> e.g. `gpt-5.6-luna`) and a helper's selector is unset, that helper inherits the
+> refusing answerer and **400s on its first real request**; the sub-agent sends no
+> temperature and cannot 400, but a reasoning answerer still degrades its
+> `tool_choice="auto"` tool-calling loop, so it should be pinned too. Startup logs
+> **one** advisory warning naming each unpinned helper and its pinning env var
+> (`warn_if_answerer_rejects_temperature`, `backend/escalation.py`). A helper whose
+> selector carries any explicit value is the operator's deliberate choice and is
+> skipped; only unset/empty selectors are named. Unlike the judge warning below
+> this is **not** widget-scoped - these helpers run on the core knowledge-assistant
+> path that every deploy runs, so it takes no `support_configured` gate - but it is
+> the same best-effort name match against `_TEMPERATURE_REFUSING_MODEL_PREFIXES`
+> (minus the non-reasoning `-chat` marker), wrong in both directions: a refusing
+> model under an unknown name gets no warning, and a matching name is a family
+> guess rather than an observed refusal, so **verify before pinning**. It never
+> raises, never blocks startup, and never changes model selection. Remedy: pin each
+> named helper to a suitable model via its env var.
+
 > **`JUDGE_MODEL` is a `judge`-role selector, not an answerer one.** Its
 > provider/connection comes from the `judge` role's `JUDGE_*` binding (above),
 > not the answerer, and unlike the aux-helper selectors it defaults to a cheap
