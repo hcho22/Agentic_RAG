@@ -280,7 +280,7 @@ embedder re-index procedure: [docs/model-surface.md](docs/model-surface.md).**
 | `EMBEDDER_MODEL` | no | Embedder model. Falls back to `EMBEDDING_MODEL` → `text-embedding-3-small` |
 | `JUDGE_MODEL` | no | Model for the two runtime support gates (faithfulness + answer-completeness). Default `gpt-4o-mini`; deliberately does **not** chain to `OPENAI_MODEL` |
 | `JUDGE_TEMPERATURE` | no | Sampler pin for those gates: default `0` (unset **or** blank), so the send/escalate verdict is not partly a coin flip (issue #104). The literal `none` omits the parameter - the remedy for a judge deployment that refuses `temperature` outright (OpenAI o-series / `gpt-5-*`), and the only opt-out. An unparseable/out-of-range value warns and falls back to `0` rather than failing the boot. Read the blast radius in [docs/model-surface.md](docs/model-surface.md) before un-pinning |
-| `METADATA_MODEL` / `OPENAI_PLANNER_MODEL` / `OPENAI_SQL_MODEL` / `OPENAI_SUBAGENT_MODEL` / `OPENAI_RERANK_MODEL` | no | Per-call-site model selectors within the answerer provider; each falls back to `OPENAI_MODEL` |
+| `METADATA_MODEL` / `OPENAI_PLANNER_MODEL` / `OPENAI_SQL_MODEL` / `OPENAI_SUBAGENT_MODEL` / `OPENAI_RERANK_MODEL` | no | Per-call-site model selectors within the answerer provider; each falls back to `OPENAI_MODEL`. If `OPENAI_MODEL` is a reasoning model that refuses `temperature` (o-series / `gpt-5-*`) and one of these is unset, that helper inherits it and - for the three that send a hardcoded `temperature=0` (planner / text-to-SQL / reranker) - 400s on its first request; startup logs an advisory warning naming the unpinned helpers. See [docs/model-surface.md](docs/model-surface.md) |
 
 ### Frontend (`frontend/.env`)
 
