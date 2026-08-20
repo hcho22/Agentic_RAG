@@ -424,6 +424,98 @@ _TEMPERATURE_REFUSING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 _NON_REASONING_CHAT_MARKER = "-chat"
 
 
+def _name_is_temperature_refusing(model: str) -> bool:
+    """Shared best-effort test: does this model NAME look like a temperature-
+    refusing reasoning family? Matches `_TEMPERATURE_REFUSING_MODEL_PREFIXES`
+    less any name carrying the non-reasoning `_NON_REASONING_CHAT_MARKER`
+    convention. Wrong in both directions by construction (see the two module
+    constants). Reused by both boot warnings so they share ONE name list."""
+    name = model.lower()
+    if not name.startswith(_TEMPERATURE_REFUSING_MODEL_PREFIXES):
+        return False
+    return _NON_REASONING_CHAT_MARKER not in name
+
+
+# US-121: the four text-generation helpers that fall through their own selector
+# env var to OPENAI_MODEL. Each pair is (env var that pins it, human name). When
+# a helper's env var is unset/empty it inherits the resolved answerer model, so a
+# Luna-class answerer that refuses `temperature` is inherited by any helper still
+# sending a hardcoded `temperature=0.0` (planner / text-to-SQL / reranker) and
+# that helper 400s on its first real request. Kept in lockstep with the
+# `<HELPER_ENV> -> OPENAI_MODEL -> gpt-4o-mini` fall-through in
+# planner.get_planner_model / text_to_sql.get_sql_model / subagent.get_subagent_model
+# and the inline reranking.py `RERANKER=llm` branch.
+_ANSWERER_INHERITING_HELPERS = (
+    ("OPENAI_PLANNER_MODEL", "planner"),
+    ("OPENAI_SQL_MODEL", "text-to-SQL"),
+    ("OPENAI_RERANK_MODEL", "LLM reranker"),
+    ("OPENAI_SUBAGENT_MODEL", "sub-agent"),
+)
+
+
+def warn_if_answerer_rejects_temperature() -> None:
+    """Log ONCE at boot if the resolved answerer model NAME matches a known
+    temperature-refusing family AND a helper that inherits it is still unpinned.
+
+    Unlike `warn_if_judge_rejects_temperature`, this takes NO `support_configured`
+    gate. The four helpers it covers - planner, text-to-SQL, LLM reranker,
+    sub-agent - all run on the CORE knowledge-assistant chat/retrieval path that
+    every deploy runs, not the support-widget path. So this warning's premise
+    holds for every deploy and it must not be scoped to the widget surface.
+
+    The answerer model is `OPENAI_MODEL` (default `gpt-4o-mini`, resolved in
+    main.py). Each helper falls through its own selector env var
+    (`OPENAI_PLANNER_MODEL`, `OPENAI_SQL_MODEL`, `OPENAI_RERANK_MODEL`,
+    `OPENAI_SUBAGENT_MODEL`) to `OPENAI_MODEL`. A helper whose selector carries any
+    explicit value is the operator's deliberate choice and is SKIPPED; only a
+    helper with an unset/empty selector inherits the answerer and is named here.
+    Three of the four (planner, text-to-SQL, reranker) send a hardcoded
+    `temperature=0.0` with no escape hatch, so if the inherited answerer refuses
+    the parameter they 400 on the first real request.
+
+    Best-effort operator aid, nothing more, and wrong in BOTH directions - the
+    same way `warn_if_judge_rejects_temperature` is. FALSE NEGATIVES: it reuses the
+    hand-maintained `_TEMPERATURE_REFUSING_MODEL_PREFIXES` (less the
+    `_NON_REASONING_CHAT_MARKER` convention), so a refusing deployment under any
+    name not in that tuple - a newer model, or an OpenAI-compatible endpoint under
+    another name, or a name carrying the `-chat` marker - is missed silently. FALSE
+    POSITIVES: a name in the tuple is a family guess, never an observed refusal, so
+    a matching answerer may accept `temperature` perfectly well. Because it can be
+    wrong either way, the log line tells the operator to VERIFY before acting.
+
+    Boot-time only, by construction: called from the startup hook, never on the
+    request path. It never raises, never blocks startup, and never mutates any
+    model selection - it only reads env and logs.
+    """
+    answerer = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+    if not _name_is_temperature_refusing(answerer):
+        return
+    unpinned = [
+        f"{helper} (pin with {env})"
+        for env, helper in _ANSWERER_INHERITING_HELPERS
+        if not os.environ.get(env)
+    ]
+    if not unpinned:
+        return
+    log.warning(
+        "answerer_temperature.known_refusing_model OPENAI_MODEL=%r matches a model "
+        "family that COMMONLY refuses the `temperature` parameter. This is a name "
+        "match against escalation._TEMPERATURE_REFUSING_MODEL_PREFIXES, NOT an "
+        "observed refusal - this deployment may accept it perfectly well, so VERIFY "
+        "before changing configuration. These helpers have no explicit model "
+        "selector set and so INHERIT the answerer model; three of them (planner, "
+        "text-to-SQL, LLM reranker) send a hardcoded temperature=0.0 on every call, "
+        "so if this model does refuse it they 400 on their first real request: %s. "
+        "Remedy IF it refuses: pin each named helper to a temperature-accepting "
+        "model via its env var; if it accepts, leave them unset. Best-effort and "
+        "known names only - a refusing deployment under any other name, or under a "
+        "name carrying the non-reasoning `-chat` marker that this check treats as "
+        "accepting, gets no warning at all.",
+        answerer,
+        "; ".join(unpinned),
+    )
+
+
 def warn_if_judge_rejects_temperature(*, support_configured: bool) -> None:
     """Log ONCE at boot if the judge model NAME matches a known refusing family.
 
@@ -477,10 +569,7 @@ def warn_if_judge_rejects_temperature(*, support_configured: bool) -> None:
     if get_judge_temperature() is None:
         return
     model = get_judge_model()
-    name = model.lower()
-    if not name.startswith(_TEMPERATURE_REFUSING_MODEL_PREFIXES):
-        return
-    if _NON_REASONING_CHAT_MARKER in name:
+    if not _name_is_temperature_refusing(model):
         return
     log.warning(
         "judge_temperature.known_refusing_model JUDGE_MODEL=%r matches a model "

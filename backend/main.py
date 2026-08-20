@@ -60,6 +60,7 @@ from escalation import (
     GENERIC_DEFERRAL,
     DeflectionResult,
     EscalationConfig,
+    warn_if_answerer_rejects_temperature,
     warn_if_judge_rejects_temperature,
 )
 from widget_keys import (
@@ -867,6 +868,17 @@ async def _on_startup() -> None:
     warn_if_judge_rejects_temperature(
         support_configured=bool(SUPABASE_SERVICE_ROLE_KEY)
     )
+    # US-121: the four text-generation helpers (planner / text-to-SQL / LLM
+    # reranker / sub-agent) each fall through their own selector env var to
+    # OPENAI_MODEL, and three of them send a hardcoded temperature=0.0. If the
+    # answerer is migrating to a temperature-refusing reasoning model (gpt-5.6-luna)
+    # and a helper's selector is unset, that helper inherits Luna and 400s on its
+    # first real request. Warn at boot rather than let the operator find it via a
+    # live customer 400. UNLIKE the judge warning above this is NOT widget-scoped:
+    # these helpers run on the core knowledge-assistant path every deploy runs, so
+    # the warning's premise holds for every operator. Best-effort/advisory only:
+    # known names, never blocks startup, never touches a model selection.
+    warn_if_answerer_rejects_temperature()
     # US-018: front-load docling's heavy import + model init (only when
     # PARSER=docling, the default) so the first file-upload ingest doesn't pay
     # that multi-second cost on the request path; a non-docling parser skips it.
