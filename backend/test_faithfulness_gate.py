@@ -39,7 +39,9 @@ from escalation import (  # noqa: E402
     FaithfulnessJudgment,
     faithfulness_gate,
     get_judge_model,
+    get_judge_reasoning_effort,
     get_judge_temperature,
+    warn_if_judge_rejects_reasoning_effort,
     warn_if_judge_rejects_temperature,
 )
 from retrieval import SearchDocumentsResult  # noqa: E402
@@ -335,6 +337,94 @@ def test_judge_sampling_is_pinned_deterministic() -> None:
     print("ok: judge sampling pinned to temperature=0, with a documented escape hatch")
 
 
+def test_judge_reasoning_effort_omitted_unless_set() -> None:
+    """`JUDGE_REASONING_EFFORT` is omitted when unset/blank and splatted when set.
+
+    The omit-when-unset default is load-bearing: the shipped non-reasoning judge
+    (`gpt-4o-mini`) 400s on `reasoning_effort`, so an unset (or accidentally blank)
+    env must leave the outgoing call byte-identical to the pre-knob shape. When an
+    operator explicitly sets a value it is passed through verbatim - the module
+    validates nothing and the judge API is the authority (a value one reasoning
+    model accepts and another rejects, like `minimal`, is the operator's own
+    deployment-matched choice).
+    """
+    saved = {k: os.environ.get(k) for k in ("JUDGE_TEMPERATURE", "JUDGE_REASONING_EFFORT")}
+    try:
+        # Default judge (temp pinned to 0, no reasoning effort) => the EXACT
+        # pre-knob call shape. This is the byte-unchanged guarantee for every
+        # existing gpt-4o-mini deployment.
+        os.environ.pop("JUDGE_TEMPERATURE", None)
+        for unset in (None, "", "   "):
+            if unset is None:
+                os.environ.pop("JUDGE_REASONING_EFFORT", None)
+            else:
+                os.environ["JUDGE_REASONING_EFFORT"] = unset
+            _check(
+                get_judge_reasoning_effort() is None,
+                f"JUDGE_REASONING_EFFORT={unset!r} must resolve to None (omit), got "
+                f"{get_judge_reasoning_effort()!r}",
+            )
+            _, fake = _run(_judgment(True, 0.9), "x")
+            _check(
+                cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+                == {"temperature": 0.0},
+                f"unset/blank reasoning effort ({unset!r}) must not add a "
+                "reasoning_effort kwarg, got "
+                f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+            )
+
+        # Explicitly set => passed through verbatim, alongside the pinned temperature.
+        os.environ["JUDGE_REASONING_EFFORT"] = "minimal"
+        _check(
+            get_judge_reasoning_effort() == "minimal",
+            f"an explicit value must resolve verbatim, got {get_judge_reasoning_effort()!r}",
+        )
+        _, fake = _run(_judgment(True, 0.9), "x")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"temperature": 0.0, "reasoning_effort": "minimal"},
+            "an explicit JUDGE_REASONING_EFFORT must be splatted into the judge "
+            f"call, got {cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+
+        # A surrounding-whitespace value is stripped (a trailing newline from a
+        # sourced .env is accidental, not a distinct effort level), and any value is
+        # passed to the API un-validated - the module keeps no allow-list.
+        for raw, want in ((" low ", "low"), ("high\n", "high"), ("made-up", "made-up")):
+            os.environ["JUDGE_REASONING_EFFORT"] = raw
+            _check(
+                get_judge_reasoning_effort() == want,
+                f"JUDGE_REASONING_EFFORT={raw!r} must resolve to {want!r}, got "
+                f"{get_judge_reasoning_effort()!r}",
+            )
+            _, fake = _run(_judgment(True, 0.9), "x")
+            _check(
+                cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+                == {"temperature": 0.0, "reasoning_effort": want},
+                f"JUDGE_REASONING_EFFORT={raw!r} must reach the call as {want!r}, got "
+                f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+            )
+
+        # The adopted gpt-5-mini judge config (JUDGE_TEMPERATURE=none +
+        # JUDGE_REASONING_EFFORT=minimal): temperature omitted, reasoning effort sent.
+        os.environ["JUDGE_TEMPERATURE"] = "none"
+        os.environ["JUDGE_REASONING_EFFORT"] = "minimal"
+        _, fake = _run(_judgment(True, 0.9), "x")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"reasoning_effort": "minimal"},
+            "JUDGE_TEMPERATURE=none + JUDGE_REASONING_EFFORT=minimal must send only "
+            f"reasoning_effort, got {cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("ok: JUDGE_REASONING_EFFORT omitted when unset/blank, splatted verbatim when set")
+
+
 def test_boot_warning_for_known_temperature_refusing_models() -> None:
     """The boot check warns about KNOWN refusing judge models, and only those.
 
@@ -484,6 +574,144 @@ def test_boot_warning_for_known_temperature_refusing_models() -> None:
     )
 
 
+def test_boot_warning_for_reasoning_effort_on_non_reasoning_judge() -> None:
+    """The mirror boot check warns when `JUDGE_REASONING_EFFORT` is set on a judge
+    that looks NON-reasoning, and only then.
+
+    Non-reasoning judges (the shipped default `gpt-4o-mini`) 400 on
+    `reasoning_effort` the same way reasoning judges 400 on `temperature`, so this is
+    the symmetric issue #105 latch. It fires only when the value is explicitly set
+    AND the model does NOT look like a known reasoning family; stays quiet when the
+    value is unset/blank whatever the model, stays quiet when the model IS a known
+    reasoning family, and - per AGENTS.md invariant 10 - stays quiet for EVERY
+    combination when the widget surface is unconfigured. It must never raise and
+    never move a gate verdict.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture()
+    escalation_log = logging.getLogger("agentic_rag.escalation")
+    escalation_log.addHandler(handler)
+    saved = {
+        k: os.environ.get(k)
+        for k in ("JUDGE_MODEL", "JUDGE_REASONING_EFFORT", "JUDGE_TEMPERATURE")
+    }
+    try:
+        # Set on a NON-reasoning model (incl. the unset default gpt-4o-mini) => warn
+        # exactly once, with a conditional message naming the remedy + consequence.
+        for model in (None, "gpt-4o-mini", "claude-haiku-judge", "gpt-5-chat-latest"):
+            records.clear()
+            if model is None:
+                os.environ.pop("JUDGE_MODEL", None)
+            else:
+                os.environ["JUDGE_MODEL"] = model
+            os.environ["JUDGE_REASONING_EFFORT"] = "minimal"
+            warn_if_judge_rejects_reasoning_effort(support_configured=True)
+            _check(
+                len(records) == 1,
+                f"JUDGE_MODEL={model!r} with reasoning_effort set must warn exactly "
+                f"once, got {len(records)} records",
+            )
+            message = records[0].getMessage()
+            _check(
+                "unset JUDGE_REASONING_EFFORT" in message,
+                f"the warning must name the remedy, got {message!r}",
+            )
+            _check(
+                "fail closed" in message.lower() and "#105" in message,
+                "the warning must name the consequence (both gates fail closed; "
+                f"issue #105 permanent latching), got {message!r}",
+            )
+            _check(
+                "NOT an observed refusal" in message and "VERIFY" in message,
+                "the warning must be conditional and tell the operator to verify, "
+                f"got {message!r}",
+            )
+
+        # Unset or blank => omit, so no warning whatever the model.
+        for model in (None, "gpt-4o-mini", "gpt-5-mini"):
+            for value in (None, "", "   "):
+                records.clear()
+                if model is None:
+                    os.environ.pop("JUDGE_MODEL", None)
+                else:
+                    os.environ["JUDGE_MODEL"] = model
+                if value is None:
+                    os.environ.pop("JUDGE_REASONING_EFFORT", None)
+                else:
+                    os.environ["JUDGE_REASONING_EFFORT"] = value
+                warn_if_judge_rejects_reasoning_effort(support_configured=True)
+                _check(
+                    not records,
+                    f"JUDGE_MODEL={model!r} with JUDGE_REASONING_EFFORT={value!r} "
+                    "(unset/blank) must NOT warn, got "
+                    f"{[r.getMessage() for r in records]!r}",
+                )
+
+        # A KNOWN reasoning family accepts reasoning_effort, so even with the value
+        # set it must stay silent - it is the intended ADR-0013 pairing.
+        for model in ("gpt-5-mini", "o4-mini", "O3", "gpt-5.1-mini"):
+            records.clear()
+            os.environ["JUDGE_MODEL"] = model
+            os.environ["JUDGE_REASONING_EFFORT"] = "minimal"
+            warn_if_judge_rejects_reasoning_effort(support_configured=True)
+            _check(
+                not records,
+                f"JUDGE_MODEL={model!r} is a known reasoning family and must NOT "
+                f"warn, got {[r.getMessage() for r in records]!r}",
+            )
+
+        # Invariant 10: unconfigured widget surface => NO warning for any combination
+        # that would otherwise fire.
+        for model in (None, "gpt-4o-mini", "claude-haiku-judge"):
+            records.clear()
+            if model is None:
+                os.environ.pop("JUDGE_MODEL", None)
+            else:
+                os.environ["JUDGE_MODEL"] = model
+            os.environ["JUDGE_REASONING_EFFORT"] = "minimal"
+            warn_if_judge_rejects_reasoning_effort(support_configured=False)
+            _check(
+                not records,
+                f"JUDGE_MODEL={model!r} must NOT warn when the widget surface is "
+                f"unconfigured, got {[r.getMessage() for r in records]!r}",
+            )
+
+        # Advisory: never raises, never alters a gate decision or what it sends.
+        os.environ.pop("JUDGE_TEMPERATURE", None)
+        os.environ["JUDGE_MODEL"] = "gpt-4o-mini"
+        os.environ["JUDGE_REASONING_EFFORT"] = "minimal"
+        before, _ = _run(_judgment(True, 0.9), "Returns within 30 days.")
+        warn_if_judge_rejects_reasoning_effort(support_configured=True)
+        after, fake = _run(_judgment(True, 0.9), "Returns within 30 days.")
+        _check(
+            before == after and after.faithful is True,
+            f"the boot warning must not alter a gate decision, got {before!r} then "
+            f"{after!r}",
+        )
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"temperature": 0.0, "reasoning_effort": "minimal"},
+            "the boot warning must not change what the gate sends, got "
+            f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+    finally:
+        escalation_log.removeHandler(handler)
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    print(
+        "ok: boot warning fires for reasoning_effort on a non-reasoning judge only, "
+        "and only where the widget surface is configured"
+    )
+
+
 def test_context_and_draft_reach_the_judge() -> None:
     """The judge actually receives the draft and the chunk contents (so a 'zero'
     isn't a structurally-blind pass)."""
@@ -563,7 +791,9 @@ def main() -> int:
         test_score_clamped_to_unit_interval,
         test_judge_model_selector,
         test_judge_sampling_is_pinned_deterministic,
+        test_judge_reasoning_effort_omitted_unless_set,
         test_boot_warning_for_known_temperature_refusing_models,
+        test_boot_warning_for_reasoning_effort_on_non_reasoning_judge,
         test_context_and_draft_reach_the_judge,
         test_every_judge_failure_fails_closed_in_one_call,
         test_decision_is_frozen,
