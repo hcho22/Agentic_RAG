@@ -54,6 +54,13 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Mint eval-publish app token
+        id: eval_publish_app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.EVAL_PUBLISH_APP_ID }}
+          private-key: ${{ secrets.EVAL_PUBLISH_APP_PRIVATE_KEY }}
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -151,17 +158,21 @@ jobs:
         # exit code reflect the eval's verdict.
         if: always()
         env:
-          # PR creation + auto-merge run under the fine-grained PAT, NOT the default
-          # GITHUB_TOKEN. A PR opened by GITHUB_TOKEN does not trigger the required
-          # check workflows (GitHub blocks recursive runs), so an auto-merging PR
-          # opened with it would sit forever waiting on checks that never start.
-          # The PAT (Contents + Pull requests read/write) is provisioned by the
-          # captain as the EVAL_PUBLISH_TOKEN repo secret; a missing secret fails
-          # this step loudly rather than silently falling back to a direct push that
-          # the required-checks ruleset on main would reject anyway. This step is
-          # if: always(), so it still publishes the evidence snapshot of a
-          # floor-breach run - the job stays red from the eval step regardless.
-          GH_TOKEN: ${{ secrets.EVAL_PUBLISH_TOKEN }}
+          # PR creation + auto-merge run under the eval-publish GitHub App's
+          # installation token, NOT the default GITHUB_TOKEN. A PR opened by
+          # GITHUB_TOKEN does not trigger the required check workflows (GitHub
+          # blocks recursive runs), so an auto-merging PR opened with it would sit
+          # forever waiting on checks that never start. The App token is minted
+          # fresh each run by the 'Mint eval-publish app token' step (from the
+          # EVAL_PUBLISH_APP_ID / EVAL_PUBLISH_APP_PRIVATE_KEY repo secrets the
+          # captain provisions), so it never expires the way the old PAT did. That
+          # mint step fails loudly if the App secrets are missing/invalid, and the
+          # preflight below fails loudly if the token is empty, rather than
+          # silently falling back to a direct push the required-checks ruleset on
+          # main would reject anyway. This step is if: always(), so it still
+          # publishes the evidence snapshot of a floor-breach run - the job stays
+          # red from the eval step regardless.
+          GH_TOKEN: ${{ steps.eval_publish_app_token.outputs.token }}
         run: |
           DATE=$(date -u +"%Y-%m-%d")
           mkdir -p docs/permissions-scale-nightly
@@ -220,13 +231,13 @@ jobs:
           # leaving the checkout clean.
           git push origin "HEAD:refs/heads/${BRANCH}"
           # Named-cause preflight: `gh pr create` authenticates with GH_TOKEN =
-          # EVAL_PUBLISH_TOKEN. When that secret resolves empty - as it did
-          # repo-wide from 2026-08-12, silently stranding 17 nights of receipts on
-          # their push branches - gh dies with the opaque "gh: ... set the GH_TOKEN
-          # environment variable" (exit 4). Fail here with a legible cause instead;
-          # the 'Alarm on stranded eval publish' step turns it into a visible issue.
+          # the minted eval-publish App token. If the mint step yielded an empty
+          # token (missing/invalid App secrets) gh would die with the opaque "gh:
+          # ... set the GH_TOKEN environment variable" (exit 4). Fail here with a
+          # legible cause instead; the 'Alarm on stranded eval publish' step turns
+          # it into a visible issue.
           if [ -z "${GH_TOKEN}" ]; then
-            echo "::error title=Permissions-scale snapshot NOT published - EVAL_PUBLISH_TOKEN is empty::The ${DATE} permissions-scale snapshot was committed and pushed to \`${BRANCH}\` but no auto-merging PR was opened, so it is stranded there, unpublished to main. Set the EVAL_PUBLISH_TOKEN repo secret (fine-grained PAT: Contents + Pull requests read/write) and re-run."
+            echo "::error title=Permissions-scale snapshot NOT published - eval-publish App token is empty::The ${DATE} permissions-scale snapshot was committed and pushed to \`${BRANCH}\` but no auto-merging PR was opened, so it is stranded there, unpublished to main. Ensure the EVAL_PUBLISH_APP_ID / EVAL_PUBLISH_APP_PRIVATE_KEY repo secrets (the eval-publish GitHub App) are set and valid, then re-run."
             exit 1
           fi
           BODY=$(printf '%s\n' \
@@ -234,7 +245,7 @@ jobs:
             '' \
             'Publishes the permissions-scale receipts under `docs/permissions-scale-nightly/` via an auto-merging PR instead of a direct `git push` to `main`, so the required security-gate checks on `main` are satisfied - a docs-only PR trips them as skipped=pass.' \
             '' \
-            'Opened with the `EVAL_PUBLISH_TOKEN` fine-grained PAT so the required check workflows run; a PR opened with the default `GITHUB_TOKEN` would not trigger them. Auto-merge (squash) is enabled and it merges once checks pass.')
+            'Opened with the eval-publish GitHub App installation token so the required check workflows run; a PR opened with the default `GITHUB_TOKEN` would not trigger them. Auto-merge (squash) is enabled and it merges once checks pass.')
           PR_URL=$(gh pr create --base main --head "$BRANCH" \
             --title "chore(evals): permissions scale nightly ${DATE}" \
             --body "${BODY}")
@@ -242,15 +253,16 @@ jobs:
           echo "opened auto-merging PR: ${PR_URL}"
           git reset --hard HEAD~1
 
-      # A red scheduled run alone is exactly what failed to alert anyone when
-      # EVAL_PUBLISH_TOKEN lapsed on 2026-08-12: the failure went unnoticed for a
-      # week while nights of receipts piled up on stranded push branches and
-      # `main` froze. File a deduped, visible issue whenever the publish step above
-      # fails so a future token lapse (or any publish failure) is impossible to
-      # miss, and auto-close it once a run publishes cleanly again. Runs under the
-      # default GITHUB_TOKEN - never the possibly-empty EVAL_PUBLISH_TOKEN - so it
-      # can file the alarm even when the publish token is precisely what is
-      # missing; it never pushes. It never fails the job on its own: a floor-breach
+      # A red scheduled run alone is exactly what failed to alert anyone when the
+      # expiring publish PAT lapsed on 2026-08-12: the failure went
+      # unnoticed for a week while nights of receipts piled up on stranded push
+      # branches and `main` froze. Moving to a fresh-minted GitHub App token ends
+      # that expiry class, but any publish failure must still be impossible to
+      # miss. File a deduped, visible issue whenever the publish step above fails,
+      # and auto-close it once a run publishes cleanly again. Runs under the
+      # default GITHUB_TOKEN - never the minted eval-publish App token - so it can
+      # file the alarm even when the App credentials are precisely what is missing;
+      # it never pushes. It never fails the job on its own: a floor-breach
       # run is already red from the eval step, and a clean publish must stay green.
       - name: Alarm on stranded eval publish
         if: always() && steps.publish.outcome != 'skipped'
@@ -285,11 +297,11 @@ jobs:
                 --body "$(printf '%s\n' \
                   "The \`Permissions scale eval (nightly)\` publish step failed, so today's snapshot was NOT published to \`main\`." \
                   "" \
-                  "The most common cause is an empty or unset \`EVAL_PUBLISH_TOKEN\` secret (the fine-grained PAT \`gh pr create\` authenticates with); that is exactly what stranded 17 nights of receipts from 2026-08-12. Check the publish step's log for the \`::error::\` line naming the cause." \
+                  "The most common cause is a failed mint of the eval-publish GitHub App token that \`gh pr create\` authenticates with - missing or invalid \`EVAL_PUBLISH_APP_ID\` / \`EVAL_PUBLISH_APP_PRIVATE_KEY\` repo secrets. Check the publish step's log for the \`::error::\` line naming the cause." \
                   "" \
                   "Stranded branch: \`${STRANDED_BRANCH:-<not pushed - the publish step failed before creating the branch>}\`" \
                   "" \
-                  "Fix: ensure the \`EVAL_PUBLISH_TOKEN\` repo secret holds a valid fine-grained PAT (Contents + Pull requests read/write), then re-run. A re-run publishes from its own fresh branch; delete any stranded branch once its snapshot has landed on main." \
+                  "Fix: ensure the \`EVAL_PUBLISH_APP_ID\` / \`EVAL_PUBLISH_APP_PRIVATE_KEY\` repo secrets (the eval-publish GitHub App, installed on this repo with Contents + Pull requests read/write) are set and valid, then re-run. A re-run publishes from its own fresh branch; delete any stranded branch once its snapshot has landed on main." \
                   "" \
                   "Run log: ${RUN_URL}" \
                   "" \
@@ -306,5 +318,80 @@ jobs:
               gh issue close "${num}" \
                 --comment "Auto-closed: the permissions-scale nightly published cleanly again (${RUN_URL})." || true
               echo "auto-closed publish-failure issue #${num}"
+            done
+          fi
+
+      # Complements the 'Alarm on stranded eval publish' step above, which only
+      # fires on steps.publish.outcome == 'failure'. But the publish step is
+      # if: always(), so on a mint-step failure (missing/invalid
+      # EVAL_PUBLISH_APP_ID / EVAL_PUBLISH_APP_PRIVATE_KEY) or any setup abort
+      # before the eval - supabase start, pip install, the seed, a timeout kill -
+      # it runs as a clean no-op (nothing to commit) and exits 0: the stranded
+      # alarm then sees a success and files nothing, even though the job is red.
+      # Without this step that red run would file no issue - the exact silent-
+      # failure class the PR #112 guarantee exists to prevent. File a deduped,
+      # visible harness-failure issue when the job failed WITHOUT producing a
+      # publishable snapshot, and auto-close it once a run publishes again. Runs
+      # under the default GITHUB_TOKEN - never the minted App token - so it can file
+      # even when the App credentials are precisely what is missing; it never
+      # pushes and never fails the job on its own.
+      - name: Alarm on eval harness failure
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOB_STATUS: ${{ job.status }}
+          PUBLISH_BRANCH: ${{ steps.publish.outputs.branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # REST issues endpoint, not `gh issue list --label` (the GraphQL search
+          # index is only eventually consistent and has silently dropped freshly-
+          # labelled issues; see the weekly workflows' harness-failure steps). Drop
+          # PRs.
+          open_issue_numbers() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=$1&state=open&per_page=100" \
+              --jq '.[] | select(.pull_request == null) | .number'
+          }
+          LABEL=permissions-scale-harness-failure
+          gh label create "${LABEL}" --color B60205 \
+            --description "Permissions-scale nightly aborted before it could publish a snapshot" --force || true
+          # The job aborted AND the publish step committed nothing (no branch
+          # recorded): it died before producing a publishable snapshot. A
+          # job-level timeout-minutes kill surfaces as job.status 'cancelled'
+          # (not 'failure'), so both are treated as a harness abort - otherwise a
+          # timeout-kill would fall into the close branch and silently retract an
+          # open alarm (invariant 12: the path that should shout must not go
+          # quiet). A floor-breach run still commits its evidence snapshot and
+          # records a branch, so it is measured, NOT a harness failure, and lands
+          # in the close branch below.
+          if { [ "${JOB_STATUS}" = "failure" ] || [ "${JOB_STATUS}" = "cancelled" ]; } && [ -z "${PUBLISH_BRANCH}" ]; then
+            # A transient gh blip yields empty here, so err toward filing a
+            # possibly-duplicate (self-healing) issue rather than leaving the alarm
+            # unshouted (invariant 12: the path that should shout must not go quiet).
+            existing=$(open_issue_numbers "${LABEL}" || true)
+            if [ -z "${existing}" ]; then
+              gh issue create --label "${LABEL}" \
+                --title "Permissions-scale nightly: harness aborted before publishing a snapshot" \
+                --body "$(printf '%s\n' \
+                  "The \`Permissions scale eval (nightly)\` job failed BEFORE the eval produced a publishable snapshot, so the publish step was a no-op and the 'Alarm on stranded eval publish' step saw a success and filed nothing." \
+                  "" \
+                  "The most common cause is a failed mint of the eval-publish GitHub App token - missing or invalid \`EVAL_PUBLISH_APP_ID\` / \`EVAL_PUBLISH_APP_PRIVATE_KEY\` repo secrets - but any setup abort (supabase start, pip install, the seed step, or the timeout kill) lands here too. Check the earliest failing step's log." \
+                  "" \
+                  "Fix: ensure the \`EVAL_PUBLISH_APP_ID\` / \`EVAL_PUBLISH_APP_PRIVATE_KEY\` repo secrets (the eval-publish GitHub App, installed on this repo with Contents + Pull requests read/write) are set and valid, or address the failing setup step, then re-run." \
+                  "" \
+                  "Run log: ${RUN_URL}" \
+                  "" \
+                  "This issue is deduped on the \`${LABEL}\` label and auto-closes as soon as a run publishes a snapshot again.")" || true
+              echo "filed harness-failure issue"
+            else
+              echo "open harness-failure issue already exists - dedup, skipping"
+            fi
+          else
+            # The run reached a publishable verdict (or is healthy): retract any open
+            # harness-failure alarm. Non-fatal throughout - a transient gh blip here
+            # must not turn a healthy run red.
+            for num in $(open_issue_numbers "${LABEL}" || true); do
+              gh issue close "${num}" \
+                --comment "Auto-closed: the permissions-scale nightly produced a publishable snapshot again (${RUN_URL})." || true
+              echo "auto-closed harness-failure issue #${num}"
             done
           fi
