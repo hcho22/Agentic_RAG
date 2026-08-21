@@ -354,12 +354,16 @@ jobs:
           LABEL=permissions-scale-harness-failure
           gh label create "${LABEL}" --color B60205 \
             --description "Permissions-scale nightly aborted before it could publish a snapshot" --force || true
-          # The job failed AND the publish step committed nothing (no branch
+          # The job aborted AND the publish step committed nothing (no branch
           # recorded): it died before producing a publishable snapshot. A
-          # floor-breach run still commits its evidence snapshot and records a
-          # branch, so it is measured, NOT a harness failure, and lands in the
-          # close branch below.
-          if [ "${JOB_STATUS}" = "failure" ] && [ -z "${PUBLISH_BRANCH}" ]; then
+          # job-level timeout-minutes kill surfaces as job.status 'cancelled'
+          # (not 'failure'), so both are treated as a harness abort - otherwise a
+          # timeout-kill would fall into the close branch and silently retract an
+          # open alarm (invariant 12: the path that should shout must not go
+          # quiet). A floor-breach run still commits its evidence snapshot and
+          # records a branch, so it is measured, NOT a harness failure, and lands
+          # in the close branch below.
+          if { [ "${JOB_STATUS}" = "failure" ] || [ "${JOB_STATUS}" = "cancelled" ]; } && [ -z "${PUBLISH_BRANCH}" ]; then
             # A transient gh blip yields empty here, so err toward filing a
             # possibly-duplicate (self-healing) issue rather than leaving the alarm
             # unshouted (invariant 12: the path that should shout must not go quiet).
