@@ -132,17 +132,21 @@ This mirrors the existing `warn_if_judge_rejects_temperature` convention in `bac
 
 ### US-122: Document the model-role split and the pinning requirement
 
+**Status:** ✅ Done - delivered model-neutrally on branch fm/purvia-us122-doc-model-split (commit 27bae5d).
+
+Delivered documentation-only and model-neutrally by captain decision on 2026-08-20; the Luna answerer migration is HELD pending purvia-answerer-model-reconsider, so the copy-pasteable Luna deployment env block was deliberately not delivered and that acceptance criterion is superseded/dropped.
+
 **Description:** As a deployer, I want the documentation to state which roles can take a reasoning model and which cannot, so that I can configure a Luna deployment correctly on the first try.
 
 **Acceptance Criteria:**
 
-- [ ] `README.md:223` `OPENAI_MODEL` row notes that reasoning models require the four helpers to be pinned
-- [ ] `README.md:283` per-call-site selector row lists which helpers are incompatible with a temperature-refusing model and why
-- [ ] `docs/model-surface.md` answerer-role section documents the same split, including the three hardcoded `temperature=0.0` sites by file and line
-- [ ] `docs/model-surface.md` restates that `JUDGE_MODEL` does not chain through `OPENAI_MODEL`, and that this is what keeps the gates pinned
-- [ ] The stale model reference in `evals/retrieval/ragas.py:12-17` is updated so it names the generator generically rather than `gpt-4o-mini`
+- [x] `README.md:223` `OPENAI_MODEL` row notes that reasoning models require the four helpers to be pinned
+- [x] `README.md:283` per-call-site selector row lists which helpers are incompatible with a temperature-refusing model and why
+- [x] `docs/model-surface.md` answerer-role section documents the same split, including the three hardcoded `temperature=0.0` sites by file and line
+- [x] `docs/model-surface.md` restates that `JUDGE_MODEL` does not chain through `OPENAI_MODEL`, and that this is what keeps the gates pinned
+- [x] The stale model reference in `evals/retrieval/ragas.py:12-17` is updated so it names the generator generically rather than `gpt-4o-mini`
 - [ ] A copy-pasteable env block for a Luna deployment appears in the README
-- [ ] No behavior changes in this story
+- [x] No behavior changes in this story
 
 **Validation Test:**
 
