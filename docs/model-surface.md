@@ -275,7 +275,16 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > judge *400s* on the parameter and `gpt-5.4-mini` *400s on the value* `minimal`.
 > A value is validated by nowhere in this repo: whatever you set is passed to the
 > judge API verbatim (surrounding whitespace stripped) and the API accepts or
-> rejects it, so pick the value your judge model accepts. **The adopted
+> rejects it, so pick the value your judge model accepts. Startup logs a second
+> advisory warning (`warn_if_judge_rejects_reasoning_effort`,
+> `backend/escalation.py`), the mirror of the temperature one: it fires when
+> `JUDGE_REASONING_EFFORT` is set **but** `JUDGE_MODEL` does **not** look like a
+> known reasoning family - the migration slip of setting the value while leaving the
+> non-reasoning default `gpt-4o-mini` in place, which 400s the parameter and latches
+> conversations via the same issue #105 path. It is the same widget-scoped
+> best-effort name heuristic, wrong in both directions (a reasoning model under an
+> unrecognised name gets a spurious warning), so **verify before changing config**.
+> **The adopted
 > `gpt-5-mini` judge config is `JUDGE_MODEL=gpt-5-mini` + `JUDGE_TEMPERATURE=none`
 > + `JUDGE_REASONING_EFFORT=minimal`.** `JUDGE_TEMPERATURE=none` is mandatory there
 > (`gpt-5-mini` 400s on any temperature); the boot warning above **correctly**

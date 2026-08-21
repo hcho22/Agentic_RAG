@@ -61,6 +61,7 @@ from escalation import (
     DeflectionResult,
     EscalationConfig,
     warn_if_answerer_rejects_temperature,
+    warn_if_judge_rejects_reasoning_effort,
     warn_if_judge_rejects_temperature,
 )
 from widget_keys import (
@@ -866,6 +867,13 @@ async def _on_startup() -> None:
     # the message is accurate, it was simply shown to the wrong audience, and who
     # sees an operator-facing message is part of whether it is correct.
     warn_if_judge_rejects_temperature(
+        support_configured=bool(SUPABASE_SERVICE_ROLE_KEY)
+    )
+    # The symmetric case for the ADR-0013 reasoning-effort knob: a non-reasoning
+    # judge (the shipped gpt-4o-mini) 400s on JUDGE_REASONING_EFFORT the same way a
+    # reasoning judge 400s on the temperature pin, with the same issue #105 latch.
+    # Same widget-surface predicate: these gates run only on the support path.
+    warn_if_judge_rejects_reasoning_effort(
         support_configured=bool(SUPABASE_SERVICE_ROLE_KEY)
     )
     # US-121: the four text-generation helpers (planner / text-to-SQL / LLM

@@ -109,6 +109,20 @@ end state. (Contrast ADR-0012 / the report's note on `gpt-5.4-mini`, where the
 same warning would be a *false* positive because that model actually accepts
 `temperature=0`.)
 
+A second, symmetric warning covers the inverse migration slip.
+`warn_if_judge_rejects_reasoning_effort()` (`escalation.py`) fires at boot when
+`JUDGE_REASONING_EFFORT` is set but `JUDGE_MODEL` does **not** look like a known
+reasoning family - the case of an operator who sets the value while leaving the
+non-reasoning default `gpt-4o-mini` in place, which 400s on `reasoning_effort` and
+latches conversations via the same issue #105 path.
+It shares the one hand-maintained name list (`_name_is_temperature_refusing`),
+takes the same widget-scoped `support_configured` gate, and is best-effort and
+wrong in both directions (a reasoning model under an unrecognised name gets a
+spurious warning), so its message stays conditional and tells the operator to
+verify before changing config.
+For the adopted `gpt-5-mini` config this warning stays silent (the model matches
+the reasoning family), exactly as intended.
+
 ### The determinism trade (invariant 8), made deliberately
 
 AGENTS.md invariant 8 pins `JUDGE_TEMPERATURE=0` specifically to REMOVE the

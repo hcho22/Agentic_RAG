@@ -661,6 +661,78 @@ def warn_if_judge_rejects_temperature(*, support_configured: bool) -> None:
     )
 
 
+def warn_if_judge_rejects_reasoning_effort(*, support_configured: bool) -> None:
+    """Log ONCE at boot if `JUDGE_REASONING_EFFORT` is set on a judge that looks
+    NON-reasoning - the mirror image of `warn_if_judge_rejects_temperature`.
+
+    Where the temperature warning fires when a REASONING judge carries the
+    temperature pin (reasoning models refuse `temperature`), this one fires when a
+    NON-reasoning judge carries an explicit `reasoning_effort` (non-reasoning models
+    refuse `reasoning_effort`). The shipped default judge (`gpt-4o-mini`) is exactly
+    that non-reasoning model, so the highly plausible migration slip is an operator
+    who sets `JUDGE_REASONING_EFFORT=minimal` (the ADR-0013 config) but forgets to
+    also point `JUDGE_MODEL` at a reasoning model: the parameter then 400s every
+    judge call, both gates fail closed on every turn, and per issue #105 the latch
+    site cannot tell that from a deliberate escalate, so affected conversations latch
+    to `escalated` permanently and repairing the config does not un-latch them.
+
+    `support_configured` is the same widget-surface gate as
+    `warn_if_judge_rejects_temperature` (AGENTS.md invariant 10): the two gates run
+    only on the support-widget path, so a knowledge-assistant-only deploy leaves the
+    surface unconfigured and must get NO warning - the message would describe
+    conversations latching in a deploy that has none. Passing `False` returns without
+    logging.
+
+    Fire condition: `JUDGE_REASONING_EFFORT` is explicitly set
+    (`get_judge_reasoning_effort()` is not `None`) AND the judge model does NOT look
+    like a reasoning family - i.e. `_name_is_temperature_refusing(get_judge_model())`
+    is `False`. It reuses that one shared name test on purpose so both warnings share
+    the single hand-maintained `_TEMPERATURE_REFUSING_MODEL_PREFIXES` list.
+
+    Best-effort operator aid, and wrong in BOTH directions by construction - the same
+    way its sibling is, but with the directions swapped. FALSE POSITIVES: a reasoning
+    model under a name the list does not recognise looks non-reasoning here, so it
+    gets a spurious warning even though it accepts `reasoning_effort` perfectly well;
+    and a name carrying the `-chat` marker is treated as accepting `temperature`,
+    hence as non-reasoning, hence warned on. FALSE NEGATIVES: coverage of "looks
+    reasoning" is limited to that same known list, so this cannot promise the value
+    is accepted just because it stayed silent. Because it can be wrong either way, the
+    log line stays conditional and tells the operator to VERIFY before changing
+    configuration.
+
+    Boot-time only, by construction: called from the startup hook, never from
+    `_judge_parse` or either gate, so it adds nothing to the request path and can
+    never alter a gate decision. It never raises and never blocks startup.
+    """
+    if not support_configured:
+        return
+    if get_judge_reasoning_effort() is None:
+        return
+    model = get_judge_model()
+    if _name_is_temperature_refusing(model):
+        return
+    log.warning(
+        "judge_reasoning_effort.non_reasoning_model JUDGE_REASONING_EFFORT=%r is set "
+        "but JUDGE_MODEL=%r does NOT match a known reasoning family "
+        "(escalation._TEMPERATURE_REFUSING_MODEL_PREFIXES, less the non-reasoning "
+        "`-chat` marker). This is a name heuristic, NOT an observed refusal - a "
+        "reasoning model under an unrecognised name accepts the parameter fine, so "
+        "VERIFY before changing configuration. Non-reasoning judges (the shipped "
+        "default gpt-4o-mini among them) refuse `reasoning_effort`; IF this judge "
+        "refuses it, every judge call 400s, both gates fail closed on every turn, and "
+        "per issue #105 the latch site cannot tell that from a deliberate escalate, "
+        "so affected conversations latch to status='escalated' permanently and "
+        "repairing the configuration does not un-latch them. Remedy IF it refuses: "
+        "unset JUDGE_REASONING_EFFORT, or point JUDGE_MODEL at a reasoning model that "
+        "accepts it (the ADR-0013 config pairs JUDGE_REASONING_EFFORT=minimal with "
+        "JUDGE_MODEL=gpt-5-mini). Best-effort and known names only - a reasoning "
+        "deployment under any other name gets a spurious warning here, so confirm the "
+        "model before acting.",
+        get_judge_reasoning_effort(),
+        model,
+    )
+
+
 async def _judge_parse(
     judge_client: AsyncOpenAI,
     *,
