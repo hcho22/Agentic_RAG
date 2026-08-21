@@ -267,6 +267,48 @@ def test_judge_sampling_is_pinned_deterministic() -> None:
     print("ok: the answer gate's judge call pins temperature=0")
 
 
+def test_reasoning_effort_reaches_this_gate() -> None:
+    """The reasoning-effort knob threads through BOTH gates, not just faithfulness.
+
+    `JUDGE_REASONING_EFFORT` is a judge-deployment property resolved in one place
+    (`_judge_sampling_kwargs`), so both runtime gates must carry it identically.
+    Its full semantics (omit-when-unset, verbatim-when-set) are pinned once in
+    `test_faithfulness_gate.py`; here we pin that THIS gate's call also omits it by
+    default and splats it when set - the adopted gpt-5-mini config
+    (`JUDGE_TEMPERATURE=none` + `JUDGE_REASONING_EFFORT=minimal`) drives the answer
+    gate too.
+    """
+    saved = {k: os.environ.get(k) for k in ("JUDGE_TEMPERATURE", "JUDGE_REASONING_EFFORT")}
+    try:
+        os.environ.pop("JUDGE_TEMPERATURE", None)
+        os.environ.pop("JUDGE_REASONING_EFFORT", None)
+        _, fake = _run(_judgment(True, 0.9), "The fee is $14.95.")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"temperature": 0.0},
+            "unset JUDGE_REASONING_EFFORT must not add a kwarg to the answer-gate "
+            f"call, got {cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+
+        os.environ["JUDGE_TEMPERATURE"] = "none"
+        os.environ["JUDGE_REASONING_EFFORT"] = "minimal"
+        _, fake = _run(_judgment(True, 0.9), "The fee is $14.95.")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"reasoning_effort": "minimal"},
+            "the adopted gpt-5-mini config must drive the answer gate too "
+            "(temperature omitted, reasoning_effort=minimal sent), got "
+            f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("ok: JUDGE_REASONING_EFFORT threads through the answer gate too")
+
+
 def test_every_judge_failure_fails_closed_in_one_call() -> None:
     """No error shape is ever retried: every failure is one call, then escalate.
 
@@ -329,6 +371,7 @@ def main() -> int:
         test_score_clamped_to_unit_interval,
         test_question_and_draft_reach_the_judge,
         test_judge_sampling_is_pinned_deterministic,
+        test_reasoning_effort_reaches_this_gate,
         test_every_judge_failure_fails_closed_in_one_call,
         test_decision_is_frozen,
     ]

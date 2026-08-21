@@ -106,6 +106,7 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 | `EMBEDDER_MODEL` | Embedder | `EMBEDDING_MODEL` → `text-embedding-3-small` |
 | `JUDGE_MODEL` | Runtime faithfulness gate (US-048) + answer-completeness gate (issue #97) | `gpt-4o-mini` (does **not** chain to `OPENAI_MODEL`) |
 | `JUDGE_TEMPERATURE` | Runtime faithfulness + answer-completeness gates | `0` (unset **or** blank); the literal `none` omits the parameter |
+| `JUDGE_REASONING_EFFORT` | Runtime faithfulness + answer-completeness gates | unset (**omitted** unset **or** blank); any set value is passed through verbatim |
 | `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (OpenAI proper, no `base_url`) / `completions` (Azure or `openai` + `base_url`) |
 
 > **Two independent ways a reasoning-model answerer breaks the aux helpers.**
@@ -263,6 +264,24 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 > rather than failing the boot: a fat-fingered knob must not take a safety gate
 > offline. Setting a real number is an explicit operator decision to give up that
 > determinism.
+
+> **`JUDGE_REASONING_EFFORT` - the reasoning-model judge knob (ADR-0013).** A
+> reasoning-model judge (`gpt-5-mini`, adopted per ADR-0013) is latency-viable on
+> the inline reply path only at `reasoning_effort=minimal`; the two gates now read
+> `JUDGE_REASONING_EFFORT` from env and splat it into their one judge call. The
+> default is **omit**, not a value: unset **or** blank sends no `reasoning_effort`
+> at all, so the call stays byte-identical to what a non-reasoning judge
+> (`gpt-4o-mini`) has always sent - which is required, because a non-reasoning
+> judge *400s* on the parameter and `gpt-5.4-mini` *400s on the value* `minimal`.
+> A value is validated by nowhere in this repo: whatever you set is passed to the
+> judge API verbatim (surrounding whitespace stripped) and the API accepts or
+> rejects it, so pick the value your judge model accepts. **The adopted
+> `gpt-5-mini` judge config is `JUDGE_MODEL=gpt-5-mini` + `JUDGE_TEMPERATURE=none`
+> + `JUDGE_REASONING_EFFORT=minimal`.** `JUDGE_TEMPERATURE=none` is mandatory there
+> (`gpt-5-mini` 400s on any temperature); the boot warning above **correctly**
+> fires for `gpt-5-mini` until you set it, and that config **deliberately** relaxes
+> invariant 8's temperature-0 determinism pin as a quality trade (halving the
+> dangerous false-resolve rate). See ADR-0013 for the full rationale and evidence.
 
 Rerankers (`COHERE_RERANK_MODEL` / `VOYAGE_RERANK_MODEL`) are a **separate
 provider axis** (dedicated rerank endpoints) and are not part of this surface.

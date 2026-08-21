@@ -59,17 +59,18 @@ pipeline above read no environment — they take explicit params, staying pure a
 testable — so this config layer supplies the validated `tau_sim` / `n_min` /
 `faithfulness_cutoff` the support endpoint (US-066+) spreads into
 `run_deflection_pipeline` (alongside `retrieval.get_similarity_threshold()` for
-`match_threshold`). ONE gate knob sits outside that rule and is named here so the
-exception is visible rather than discovered: `JUDGE_TEMPERATURE` (issue #104) is
-read from env by `_judge_sampling_kwargs()` on EVERY gate invocation, with no
-parameter override - unlike `JUDGE_MODEL`, which at least has the gates' `model=`
-argument. It is deliberately not an `EscalationConfig` field because it is not a
-per-request decision input: it is a property of the JUDGE DEPLOYMENT's request
-contract, resolved alongside `get_judge_model()` and never varied per call site,
-so threading it through the pipeline would suggest a caller may legitimately
-choose a different sampler per turn. The statement above still holds for every
-knob `EscalationConfig` does own. The **false-resolve ceiling** is a separate
-eval-time knob — the one number a buyer sets as their risk tolerance, consumed by
+`match_threshold`). TWO gate knobs sit outside that rule and are named here so the
+exception is visible rather than discovered: `JUDGE_TEMPERATURE` (issue #104) and
+`JUDGE_REASONING_EFFORT` are both read from env by `_judge_sampling_kwargs()` on
+EVERY gate invocation, with no parameter override - unlike `JUDGE_MODEL`, which at
+least has the gates' `model=` argument. Neither is an `EscalationConfig` field
+because neither is a per-request decision input: each is a property of the JUDGE
+DEPLOYMENT's request contract, resolved alongside `get_judge_model()` and never
+varied per call site, so threading either through the pipeline would suggest a
+caller may legitimately choose a different sampler per turn. The statement above
+still holds for every knob `EscalationConfig` does own. The **false-resolve
+ceiling** is a separate eval-time knob — the one number a buyer sets as their
+risk tolerance, consumed by
 the E7 sweep (US-058) and the E8 gate (US-059) — and is deliberately kept OFF the
 per-request path (off `EscalationConfig` entirely) so it cannot leak into the
 latency path.
@@ -388,10 +389,74 @@ def get_judge_temperature() -> float | None:
     return _resolve_judge_temperature(os.environ.get("JUDGE_TEMPERATURE"))
 
 
-def _judge_sampling_kwargs() -> dict[str, float]:
-    """Sampling kwargs both runtime gates splat into their one judge call."""
+# The reasoning-effort knob for a reasoning-model judge (`JUDGE_REASONING_EFFORT`
+# env). It is the SECOND judge-deployment request-contract knob (see the module
+# banner), and unlike `JUDGE_TEMPERATURE` it has NO shipped default value: unset
+# means OMIT the parameter entirely, leaving the outgoing judge call byte-identical
+# to what every deployment sent before this knob existed.
+#
+# That omit-when-unset default is load-bearing in BOTH directions of the model
+# space this module has to serve at once:
+#   * A non-reasoning judge (`gpt-4o-mini`, the shipped default) REJECTS
+#     `reasoning_effort` outright - sending it at all would 400 every judge call and,
+#     per issue #105, permanently latch the conversations it hits. It must never be
+#     sent unless an operator explicitly asks for it.
+#   * A reasoning judge that accepts the parameter but not a given VALUE
+#     (`gpt-5.4-mini` rejects `minimal`) is the operator's own value choice, so it is
+#     the operator's to correct - the same shape as an out-of-range temperature.
+# So we deliberately hardcode NO allow-list of values here: an unset env omits the
+# kwarg, an explicitly set env is splatted through verbatim, and the judge API is
+# the authority that validates the value. A model-specific value list in this module
+# would go stale the moment a new reasoning model ships, exactly as
+# `_TEMPERATURE_REFUSING_MODEL_PREFIXES` warns of itself.
+#
+# Blank reads as unset (omit), not as some default: an empty `JUDGE_REASONING_EFFORT`
+# is the same accidental state a blank `JUDGE_TEMPERATURE` is (a bare
+# `-e JUDGE_REASONING_EFFORT`, an empty configMap value, a trailing
+# `JUDGE_REASONING_EFFORT=` in a .env), and here the SAFE reading of that accident is
+# to send nothing - which is exactly what unset already does.
+
+
+def get_judge_reasoning_effort() -> str | None:
+    """Reasoning-effort for the two runtime gates (`JUDGE_REASONING_EFFORT` env).
+
+    Resolves as: unset ⇒ `None`; blank ⇒ `None`; anything else ⇒ that value,
+    stripped. `None` means "send no `reasoning_effort` at all" - the kwarg is
+    OMITTED from the judge call, so the call shape stays byte-identical to every
+    pre-knob deployment. This mirrors `get_judge_temperature`'s `none` ⇒ omit
+    branch, except omit is the DEFAULT here rather than a typed-out opt-out,
+    because the safe reasoning-effort behaviour for the shipped non-reasoning judge
+    (`gpt-4o-mini`, which 400s on the parameter) is to not send it at all.
+
+    No value is validated or rejected here on purpose (see the block above): an
+    explicitly set value is passed through verbatim and the judge API validates it,
+    so a value one reasoning model accepts and another rejects (`minimal` on
+    `gpt-5-mini` vs `gpt-5.4-mini`) is the operator's own deployment-matched choice,
+    not something this module second-guesses.
+    """
+    raw = os.environ.get("JUDGE_REASONING_EFFORT")
+    if raw is None or raw.strip() == "":
+        return None
+    return raw.strip()
+
+
+def _judge_sampling_kwargs() -> dict[str, object]:
+    """Sampling kwargs both runtime gates splat into their one judge call.
+
+    Carries at most two judge-deployment request-contract knobs: `temperature`
+    (unless `JUDGE_TEMPERATURE=none` omits it) and `reasoning_effort` (only when
+    `JUDGE_REASONING_EFFORT` is explicitly set). With both at their defaults - the
+    pinned `temperature=0` and no reasoning effort - the result is `{"temperature":
+    0.0}`, the exact call shape shipped before the reasoning-effort knob existed.
+    """
+    kwargs: dict[str, object] = {}
     temperature = get_judge_temperature()
-    return {} if temperature is None else {"temperature": temperature}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    reasoning_effort = get_judge_reasoning_effort()
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
+    return kwargs
 
 
 # Model-name prefixes of judge deployments COMMONLY seen to refuse the
@@ -606,13 +671,16 @@ async def _judge_parse(
     """The ONE structured-output judge call both runtime gates make.
 
     Exactly one call, with no exception: the sampling kwargs resolved from
-    `JUDGE_TEMPERATURE` are splatted straight in. There is deliberately no retry
-    and no per-model learning here. A judge deployment that will not accept the
-    `temperature` PARAMETER is a CONFIGURATION fact an operator states once with
-    `JUDGE_TEMPERATURE=none`, not something this module infers from a provider's
-    free-text 400 - see the `DEFAULT_JUDGE_TEMPERATURE` block for why that
-    inference is unsafe in both directions on a safety path, and for the separate
-    case of an endpoint refusing an operator-chosen VALUE as out of its range.
+    `JUDGE_TEMPERATURE` and `JUDGE_REASONING_EFFORT` are splatted straight in.
+    There is deliberately no retry and no per-model learning here. A judge
+    deployment that will not accept the `temperature` PARAMETER is a CONFIGURATION
+    fact an operator states once with `JUDGE_TEMPERATURE=none`, not something this
+    module infers from a provider's free-text 400 - see the
+    `DEFAULT_JUDGE_TEMPERATURE` block for why that inference is unsafe in both
+    directions on a safety path, and for the separate case of an endpoint refusing
+    an operator-chosen VALUE as out of its range. `reasoning_effort` is symmetric:
+    omitted unless the operator explicitly sets it, so a non-reasoning judge that
+    refuses the parameter never sees it (see `get_judge_reasoning_effort`).
 
     Every failure - auth, rate limit, timeout, network, any 400 - propagates
     unchanged to the caller's fail-closed handler. This function exists so both

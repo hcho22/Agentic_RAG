@@ -39,6 +39,7 @@ from escalation import (  # noqa: E402
     FaithfulnessJudgment,
     faithfulness_gate,
     get_judge_model,
+    get_judge_reasoning_effort,
     get_judge_temperature,
     warn_if_judge_rejects_temperature,
 )
@@ -335,6 +336,94 @@ def test_judge_sampling_is_pinned_deterministic() -> None:
     print("ok: judge sampling pinned to temperature=0, with a documented escape hatch")
 
 
+def test_judge_reasoning_effort_omitted_unless_set() -> None:
+    """`JUDGE_REASONING_EFFORT` is omitted when unset/blank and splatted when set.
+
+    The omit-when-unset default is load-bearing: the shipped non-reasoning judge
+    (`gpt-4o-mini`) 400s on `reasoning_effort`, so an unset (or accidentally blank)
+    env must leave the outgoing call byte-identical to the pre-knob shape. When an
+    operator explicitly sets a value it is passed through verbatim - the module
+    validates nothing and the judge API is the authority (a value one reasoning
+    model accepts and another rejects, like `minimal`, is the operator's own
+    deployment-matched choice).
+    """
+    saved = {k: os.environ.get(k) for k in ("JUDGE_TEMPERATURE", "JUDGE_REASONING_EFFORT")}
+    try:
+        # Default judge (temp pinned to 0, no reasoning effort) => the EXACT
+        # pre-knob call shape. This is the byte-unchanged guarantee for every
+        # existing gpt-4o-mini deployment.
+        os.environ.pop("JUDGE_TEMPERATURE", None)
+        for unset in (None, "", "   "):
+            if unset is None:
+                os.environ.pop("JUDGE_REASONING_EFFORT", None)
+            else:
+                os.environ["JUDGE_REASONING_EFFORT"] = unset
+            _check(
+                get_judge_reasoning_effort() is None,
+                f"JUDGE_REASONING_EFFORT={unset!r} must resolve to None (omit), got "
+                f"{get_judge_reasoning_effort()!r}",
+            )
+            _, fake = _run(_judgment(True, 0.9), "x")
+            _check(
+                cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+                == {"temperature": 0.0},
+                f"unset/blank reasoning effort ({unset!r}) must not add a "
+                "reasoning_effort kwarg, got "
+                f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+            )
+
+        # Explicitly set => passed through verbatim, alongside the pinned temperature.
+        os.environ["JUDGE_REASONING_EFFORT"] = "minimal"
+        _check(
+            get_judge_reasoning_effort() == "minimal",
+            f"an explicit value must resolve verbatim, got {get_judge_reasoning_effort()!r}",
+        )
+        _, fake = _run(_judgment(True, 0.9), "x")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"temperature": 0.0, "reasoning_effort": "minimal"},
+            "an explicit JUDGE_REASONING_EFFORT must be splatted into the judge "
+            f"call, got {cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+
+        # A surrounding-whitespace value is stripped (a trailing newline from a
+        # sourced .env is accidental, not a distinct effort level), and any value is
+        # passed to the API un-validated - the module keeps no allow-list.
+        for raw, want in ((" low ", "low"), ("high\n", "high"), ("made-up", "made-up")):
+            os.environ["JUDGE_REASONING_EFFORT"] = raw
+            _check(
+                get_judge_reasoning_effort() == want,
+                f"JUDGE_REASONING_EFFORT={raw!r} must resolve to {want!r}, got "
+                f"{get_judge_reasoning_effort()!r}",
+            )
+            _, fake = _run(_judgment(True, 0.9), "x")
+            _check(
+                cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+                == {"temperature": 0.0, "reasoning_effort": want},
+                f"JUDGE_REASONING_EFFORT={raw!r} must reach the call as {want!r}, got "
+                f"{cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+            )
+
+        # The adopted gpt-5-mini judge config (JUDGE_TEMPERATURE=none +
+        # JUDGE_REASONING_EFFORT=minimal): temperature omitted, reasoning effort sent.
+        os.environ["JUDGE_TEMPERATURE"] = "none"
+        os.environ["JUDGE_REASONING_EFFORT"] = "minimal"
+        _, fake = _run(_judgment(True, 0.9), "x")
+        _check(
+            cast(_FakeCompletions, fake.chat.completions).extra_kwargs
+            == {"reasoning_effort": "minimal"},
+            "JUDGE_TEMPERATURE=none + JUDGE_REASONING_EFFORT=minimal must send only "
+            f"reasoning_effort, got {cast(_FakeCompletions, fake.chat.completions).extra_kwargs!r}",
+        )
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    print("ok: JUDGE_REASONING_EFFORT omitted when unset/blank, splatted verbatim when set")
+
+
 def test_boot_warning_for_known_temperature_refusing_models() -> None:
     """The boot check warns about KNOWN refusing judge models, and only those.
 
@@ -563,6 +652,7 @@ def main() -> int:
         test_score_clamped_to_unit_interval,
         test_judge_model_selector,
         test_judge_sampling_is_pinned_deterministic,
+        test_judge_reasoning_effort_omitted_unless_set,
         test_boot_warning_for_known_temperature_refusing_models,
         test_context_and_draft_reach_the_judge,
         test_every_judge_failure_fails_closed_in_one_call,
