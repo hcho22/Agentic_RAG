@@ -9,10 +9,11 @@ source.
 
 Same-family bias trade-off
 --------------------------
-The RAGAS judge LLM is ``gpt-4o-mini`` — the *same model family* as the answer
-generator in ``runner.py`` (US-036's ``generate_answer``). A judge that shares
-a family with the generator can be systematically lenient: it tends to favour
-outputs that "reason like it does". We accept this deliberately:
+The RAGAS judge LLM is ``gpt-4o-mini`` — the *same vendor family* (OpenAI) as
+the eval's answer generator (``runner.py``'s ``generate_answer``, US-036, whose
+model is selected by ``GENERATION_MODEL`` and is not necessarily ``gpt-4o-mini``).
+A judge that shares a family with the generator can be systematically lenient: it
+tends to favour outputs that "reason like it does". We accept this deliberately:
 
   * Cost. ``gpt-4o-mini`` is cheap enough to run all four metrics weekly.
   * Independence is preserved elsewhere. The existing custom Claude judge
