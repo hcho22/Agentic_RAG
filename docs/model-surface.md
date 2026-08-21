@@ -108,36 +108,63 @@ selector falls back so a single-model setup sets only `OPENAI_MODEL`.
 | `JUDGE_TEMPERATURE` | Runtime faithfulness + answer-completeness gates | `0` (unset **or** blank); the literal `none` omits the parameter |
 | `CHAT_MODE_DEFAULT` | Answerer chat surface | `responses` (OpenAI proper, no `base_url`) / `completions` (Azure or `openai` + `base_url`) |
 
-> **A temperature-refusing answerer is flagged at boot when a helper still
-> inherits it.** Four aux helpers generate text off the answerer model - the
-> query planner (`OPENAI_PLANNER_MODEL`), text-to-SQL (`OPENAI_SQL_MODEL`), the
-> `llm` reranker (`OPENAI_RERANK_MODEL`), and the document sub-agent
-> (`OPENAI_SUBAGENT_MODEL`) - and each falls through to `OPENAI_MODEL` when its own
-> selector is unset. Three of them (planner, text-to-SQL, reranker) send a
-> hardcoded `temperature=0` on every call. So when `OPENAI_MODEL` migrates to a
-> reasoning family that refuses the `temperature` *argument* (o-series / `gpt-5-*`,
-> e.g. `gpt-5.6-luna`) and a helper's selector is unset, that helper inherits the
-> refusing answerer and **400s on its first real request**; the sub-agent sends no
-> temperature and cannot 400, but a reasoning answerer still degrades its
-> `tool_choice="auto"` tool-calling loop, so it should be pinned too. Startup logs
-> **one** advisory warning naming each unpinned helper and its pinning env var
-> (`warn_if_answerer_rejects_temperature`, `backend/escalation.py`). A helper whose
-> selector carries any explicit value is the operator's deliberate choice and is
-> skipped; only unset/empty selectors are named. Unlike the judge warning below
-> this is **not** widget-scoped - these helpers run on the core knowledge-assistant
-> path that every deploy runs, so it takes no `support_configured` gate - but it is
-> the same best-effort name match against `_TEMPERATURE_REFUSING_MODEL_PREFIXES`
-> (minus the non-reasoning `-chat` marker), wrong in both directions: a refusing
-> model under an unknown name gets no warning, and a matching name is a family
-> guess rather than an observed refusal, so **verify before pinning**. It never
-> raises, never blocks startup, and never changes model selection. Remedy: pin each
-> named helper to a suitable model via its env var.
+> **Two independent ways a reasoning-model answerer breaks the aux helpers.**
+> Four aux helpers generate text off the answerer model - the query planner
+> (`OPENAI_PLANNER_MODEL`, `backend/planner.py:300`), text-to-SQL
+> (`OPENAI_SQL_MODEL`, `backend/text_to_sql.py:315`), the `llm` reranker
+> (`OPENAI_RERANK_MODEL`, `backend/reranking.py:231`), and the document sub-agent
+> (`OPENAI_SUBAGENT_MODEL`, `backend/subagent.py:500`) - and each falls through to
+> `OPENAI_MODEL` when its own selector is unset. Migrating `OPENAI_MODEL` to a
+> reasoning family (o-series / `gpt-5-*`) can 400 an inheriting helper in **two
+> independent ways**, and a pin is the remedy for either:
+>
+> 1. **The `temperature` argument.** Three of the helpers send a hardcoded
+>    `temperature=0.0` on every call - the query planner (`backend/planner.py:308`),
+>    text-to-SQL (`backend/text_to_sql.py:322`), and the `llm` reranker
+>    (`backend/reranking.py:238`). A model that refuses the `temperature` *argument*
+>    400s on the first such call. This is the same class the `JUDGE_TEMPERATURE`
+>    note below describes, and it is the class the boot warning detects.
+> 2. **Function tools on the Chat Completions surface.** On `/v1/chat/completions`
+>    the answerer's completions fallback registers tools
+>    (`tools.append(spawn_document_agent_tool_schema())`, `backend/main.py:1674`;
+>    the call is at `backend/main.py:1679`), the document sub-agent runs with
+>    `tool_choice="auto"` (`backend/subagent.py:507`), and the query planner with
+>    `tool_choice="required"` (`backend/planner.py:307`) - all three **always send
+>    function tools**. US-119 reproduced a first-party OpenAI 400 in which a
+>    reasoning model refuses function tools on the completions surface at any
+>    `reasoning_effort` above `none`. So such a model 400s on the **tools
+>    themselves**, *independent of `temperature`*. This is a broader class than
+>    class 1 and is why the sub-agent must be pinned too: it sends no `temperature`
+>    and cannot hit class 1, but on the completions surface it does **not** merely
+>    degrade its `tool_choice="auto"` loop - it 400s on the tools. (The main
+>    answerer's default Responses mode does not send tools this way; its completions
+>    fallback - Azure, or `openai` + `base_url` - does, and the sub-agent and
+>    planner always run on completions.)
+>
+> Startup logs **one** advisory warning naming each unpinned helper and its pinning
+> env var (`warn_if_answerer_rejects_temperature`, `backend/escalation.py`); it
+> detects the **class-1** `temperature` refusal only, by a best-effort name match
+> against `_TEMPERATURE_REFUSING_MODEL_PREFIXES` (minus the non-reasoning `-chat`
+> marker), wrong in both directions: a refusing model under an unknown name gets no
+> warning, and a matching name is a family guess rather than an observed refusal, so
+> **verify before pinning**. A helper whose selector carries any explicit value is
+> the operator's deliberate choice and is skipped; only unset/empty selectors are
+> named. Unlike the judge warning below this is **not** widget-scoped - these
+> helpers run on the core knowledge-assistant path that every deploy runs, so it
+> takes no `support_configured` gate. It never raises, never blocks startup, and
+> never changes model selection. Remedy for **either** class: pin each named helper
+> to a compatible model via its env var.
 
 > **`JUDGE_MODEL` is a `judge`-role selector, not an answerer one.** Its
 > provider/connection comes from the `judge` role's `JUDGE_*` binding (above),
 > not the answerer, and unlike the aux-helper selectors it defaults to a cheap
 > model **without** chaining through `OPENAI_MODEL` — the per-reply runtime gate
-> stays cheap even behind a large answerer. On a non-OpenAI judge, set
+> stays cheap even behind a large answerer. This non-chaining is also what keeps
+> the gates **pinned** across an answerer migration: migrating `OPENAI_MODEL` to a
+> temperature-refusing reasoning model does **not** drag the judge with it, so the
+> gates' `temperature=0` pin (below) is unaffected - the judge stays on its own
+> non-reasoning model unless you deliberately point `JUDGE_MODEL` at a reasoning
+> one. On a non-OpenAI judge, set
 > `JUDGE_MODEL` to your deployment/model id; an unset/wrong value just makes the
 > judge call fail, which fails **closed** (escalate), never auto-sends a reply -
 > but read the residual-risk paragraph under `JUDGE_TEMPERATURE` below before
