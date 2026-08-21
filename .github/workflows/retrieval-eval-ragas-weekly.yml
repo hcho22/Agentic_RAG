@@ -47,13 +47,6 @@ jobs:
           # Need the full token to push the weekly snapshot back.
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Mint eval-publish app token
-        id: eval_publish_app_token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.EVAL_PUBLISH_APP_ID }}
-          private-key: ${{ secrets.EVAL_PUBLISH_APP_PRIVATE_KEY }}
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -147,6 +140,21 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "::error title=RAGAS weekly UNMEASURED::The runner ${EXIT_DESC} without writing a snapshot, so no gate was evaluated this week. This is not a red gate finding; nothing was measured."
           fi
+
+      # Mint the eval-publish App token immediately before publishing, NOT at job
+      # start: a GitHub App installation token is valid for only 1 hour, and this
+      # job's timeout-minutes is 60, so a token minted at checkout could expire
+      # mid-sweep and hand `gh pr create`/`gh pr merge` an expired-but-nonempty
+      # token that sails past the empty-token preflight and then 401s. Minting
+      # here, gated on the same snapshot-present condition the publish step uses,
+      # keeps it fresh for the full publish and skips it on an UNMEASURED run.
+      - name: Mint eval-publish app token
+        id: eval_publish_app_token
+        if: always() && steps.snapshot.outputs.present == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.EVAL_PUBLISH_APP_ID }}
+          private-key: ${{ secrets.EVAL_PUBLISH_APP_PRIVATE_KEY }}
 
       - name: Publish to docs/ragas-weekly/
         id: publish

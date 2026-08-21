@@ -320,3 +320,74 @@ jobs:
               echo "auto-closed publish-failure issue #${num}"
             done
           fi
+
+      # Complements the 'Alarm on stranded eval publish' step above, which only
+      # fires on steps.publish.outcome == 'failure'. But the publish step is
+      # if: always(), so on a mint-step failure (missing/invalid
+      # EVAL_PUBLISH_APP_ID / EVAL_PUBLISH_APP_PRIVATE_KEY) or any setup abort
+      # before the eval - supabase start, pip install, the seed, a timeout kill -
+      # it runs as a clean no-op (nothing to commit) and exits 0: the stranded
+      # alarm then sees a success and files nothing, even though the job is red.
+      # Without this step that red run would file no issue - the exact silent-
+      # failure class the PR #112 guarantee exists to prevent. File a deduped,
+      # visible harness-failure issue when the job failed WITHOUT producing a
+      # publishable snapshot, and auto-close it once a run publishes again. Runs
+      # under the default GITHUB_TOKEN - never the minted App token - so it can file
+      # even when the App credentials are precisely what is missing; it never
+      # pushes and never fails the job on its own.
+      - name: Alarm on eval harness failure
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOB_STATUS: ${{ job.status }}
+          PUBLISH_BRANCH: ${{ steps.publish.outputs.branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # REST issues endpoint, not `gh issue list --label` (the GraphQL search
+          # index is only eventually consistent and has silently dropped freshly-
+          # labelled issues; see the weekly workflows' harness-failure steps). Drop
+          # PRs.
+          open_issue_numbers() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?labels=$1&state=open&per_page=100" \
+              --jq '.[] | select(.pull_request == null) | .number'
+          }
+          LABEL=permissions-scale-harness-failure
+          gh label create "${LABEL}" --color B60205 \
+            --description "Permissions-scale nightly aborted before it could publish a snapshot" --force || true
+          # The job failed AND the publish step committed nothing (no branch
+          # recorded): it died before producing a publishable snapshot. A
+          # floor-breach run still commits its evidence snapshot and records a
+          # branch, so it is measured, NOT a harness failure, and lands in the
+          # close branch below.
+          if [ "${JOB_STATUS}" = "failure" ] && [ -z "${PUBLISH_BRANCH}" ]; then
+            # A transient gh blip yields empty here, so err toward filing a
+            # possibly-duplicate (self-healing) issue rather than leaving the alarm
+            # unshouted (invariant 12: the path that should shout must not go quiet).
+            existing=$(open_issue_numbers "${LABEL}" || true)
+            if [ -z "${existing}" ]; then
+              gh issue create --label "${LABEL}" \
+                --title "Permissions-scale nightly: harness aborted before publishing a snapshot" \
+                --body "$(printf '%s\n' \
+                  "The \`Permissions scale eval (nightly)\` job failed BEFORE the eval produced a publishable snapshot, so the publish step was a no-op and the 'Alarm on stranded eval publish' step saw a success and filed nothing." \
+                  "" \
+                  "The most common cause is a failed mint of the eval-publish GitHub App token - missing or invalid \`EVAL_PUBLISH_APP_ID\` / \`EVAL_PUBLISH_APP_PRIVATE_KEY\` repo secrets - but any setup abort (supabase start, pip install, the seed step, or the timeout kill) lands here too. Check the earliest failing step's log." \
+                  "" \
+                  "Fix: ensure the \`EVAL_PUBLISH_APP_ID\` / \`EVAL_PUBLISH_APP_PRIVATE_KEY\` repo secrets (the eval-publish GitHub App, installed on this repo with Contents + Pull requests read/write) are set and valid, or address the failing setup step, then re-run." \
+                  "" \
+                  "Run log: ${RUN_URL}" \
+                  "" \
+                  "This issue is deduped on the \`${LABEL}\` label and auto-closes as soon as a run publishes a snapshot again.")" || true
+              echo "filed harness-failure issue"
+            else
+              echo "open harness-failure issue already exists - dedup, skipping"
+            fi
+          else
+            # The run reached a publishable verdict (or is healthy): retract any open
+            # harness-failure alarm. Non-fatal throughout - a transient gh blip here
+            # must not turn a healthy run red.
+            for num in $(open_issue_numbers "${LABEL}" || true); do
+              gh issue close "${num}" \
+                --comment "Auto-closed: the permissions-scale nightly produced a publishable snapshot again (${RUN_URL})." || true
+              echo "auto-closed harness-failure issue #${num}"
+            done
+          fi
