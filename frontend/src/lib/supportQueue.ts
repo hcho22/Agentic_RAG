@@ -230,18 +230,21 @@ export async function releaseConversation(conversationId: string): Promise<Claim
   return data as ClaimFields
 }
 
-// Batch-resolve claimer uids to emails for the "Claimed by <email>" label. Reads
-// `public.profiles` (the auth.users(id,email) mirror, US-037; RLS select-true) so
-// a claimer's identity can be shown without touching the auth schema. Best-effort
-// at the call site — an unresolved id falls back to a generic "another agent".
+// Batch-resolve claimer uids to emails for the "Claimed by <email>" label.
+// SEC-F1: `public.profiles` is no longer directly selectable by the API role (the
+// old `using(true)` enumeration policy was dropped), so this goes through the
+// SECURITY DEFINER `resolve_claimer_emails` RPC. It resolves an id to an email
+// ONLY when that id is the `claimed_by` agent on a conversation in a workspace the
+// caller is a member of — enough to label a fellow agent in the caller's own
+// queue, and nothing else. Best-effort at the call site — an unresolved id falls
+// back to a generic "another agent".
 export async function resolveClaimerEmails(
   ids: string[],
 ): Promise<Record<string, string>> {
   if (ids.length === 0) return {}
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id, email')
-    .in('id', ids)
+  const { data, error } = await supabase.rpc('resolve_claimer_emails', {
+    p_ids: ids,
+  })
   if (error) throw error
   const out: Record<string, string> = {}
   for (const row of (data ?? []) as { id: string; email: string }[]) {
