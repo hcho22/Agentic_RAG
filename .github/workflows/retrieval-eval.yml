@@ -160,6 +160,12 @@ jobs:
               - 'backend/permissions.py'
               - 'supabase/migrations/**'
               - 'backend/test_au4_auth_attacks.py'
+              # The RLS-hardening regression test (PR #126) rides the same job and
+              # the same booted Supabase stack as AU4, so a change to the test
+              # itself must re-run the job. supabase/migrations/** (already above)
+              # is the load-bearing trigger: a future migration that re-opens the
+              # F1/F2/F3 holes this test guards fails BEFORE merge.
+              - 'backend/test_sec_rls_hardening.py'
               - '.github/workflows/retrieval-eval.yml'
             guards:
               - 'evals/retrieval/**'
@@ -568,3 +574,31 @@ jobs:
           # BLOCKING the merge - the deterministic, pinned-`fail` posture (US-102/
           # US-105). Missing env → clean skip (exit 0), never an infra-flake block.
           python -m backend.test_au4_auth_attacks
+
+      - name: Run RLS-hardening regression (deterministic - may block)
+        env:
+          SUPABASE_URL: ${{ env.API_URL }}
+          SUPABASE_ANON_KEY: ${{ env.ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SERVICE_ROLE_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.JWT_SECRET }}
+          DATABASE_URL: ${{ env.DB_URL }}
+        run: |
+          # PR #126 RLS audit regression: asserts the F1/F2/F3 tightenings END TO
+          # END against live PostgREST + RLS (cross-tenant profiles email
+          # enumeration; unconstrained documents.workspace_id writes; the
+          # cross-user chunk_acl boolean oracle). Reuses THIS job's already-booted
+          # Supabase stack (same env block as AU4; no OpenAI needed, so omitted).
+          # Any breach exits non-zero, FAILS this required check, and BLOCKS the
+          # merge - the same deterministic pinned-`fail` posture as AU4.
+          #
+          # Anti-silent-skip preflight: the test clean-skips (exit 0) when
+          # DATABASE_URL is unset. In THIS job the env IS set, so it runs against
+          # live RLS - but the gate must never pass green while testing nothing. If
+          # a future edit drops DATABASE_URL from this job, fail LOUDLY here rather
+          # than let the security gate go silently green (the repo's loud-failure
+          # precedent, e.g. the eval-publish empty-token preflight).
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL is empty - the RLS-hardening security gate would clean-skip and pass while testing nothing. Failing loudly instead. Restore the booted Supabase stack's DB_URL to this step's env."
+            exit 1
+          fi
+          python -m backend.test_sec_rls_hardening
