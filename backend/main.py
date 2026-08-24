@@ -2454,17 +2454,22 @@ async def _resolve_principal(
     """Try profiles.email, then principals.name. None → 404 at the endpoint.
 
     Returns (principal_type, principal_id, display_name). Reads under the
-    caller's JWT: profiles has permissive select RLS (US-037), while principals
-    is membership-gated (US-006) — so a caller resolves only groups in their own
-    workspaces and an out-of-workspace group name resolves to nothing (404).
-    Group resolution is additionally scoped to the target document's workspace:
-    per-workspace unique (workspace_id, name) means the same name can exist in
-    several workspaces the caller belongs to, so without this filter `limit 1`
-    would bind nondeterministically.
+    caller's JWT. Email resolution goes through the SECURITY DEFINER
+    `resolve_profile_by_email` RPC (SEC-F1): the old `using(true)` enumeration
+    policy on `public.profiles` was dropped for a scoped one (self + your own
+    docs' grantees), so a not-yet-grantee share target is no longer directly
+    readable; the RPC returns only the EXACT-match row (or nothing), so a caller
+    can resolve an address to share with it but cannot enumerate the directory.
+    `principals` is membership-gated (US-006) — so a caller resolves
+    only groups in their own workspaces and an out-of-workspace group name
+    resolves to nothing (404). Group resolution is additionally scoped to the
+    target document's workspace: per-workspace unique (workspace_id, name) means
+    the same name can exist in several workspaces the caller belongs to, so
+    without this filter `limit 1` would bind nondeterministically.
     """
-    r = await http.get(
-        f"{SUPABASE_URL}/rest/v1/profiles",
-        params={"email": f"eq.{identifier}", "select": "id,email", "limit": "1"},
+    r = await http.post(
+        f"{SUPABASE_URL}/rest/v1/rpc/resolve_profile_by_email",
+        json={"p_email": identifier},
         headers=supabase_headers,
     )
     r.raise_for_status()
