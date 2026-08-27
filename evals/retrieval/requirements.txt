@@ -9,7 +9,21 @@
 # same-model bias. Generator is OpenAI's gpt-5.6-luna (already in backend
 # deps); judge is Anthropic's Claude. Only loaded when the runner is
 # invoked with --include-generation.
-anthropic>=0.40.0
+#
+# PIN, do not loosen (see evals/retrieval/test_judge_sdk_compat.py). The
+# anthropic 1.0 major removed the top-level `temperature` (and `top_p`/`top_k`)
+# kwarg from `messages.create()` - sampling controls are simply gone from the
+# 1.x typed Messages surface. The old loose `>=0.40.0` let CI resolve 1.2.0
+# (Python 3.11 satisfies its `>=3.10` floor), and the offline Claude judge's
+# `messages.create(..., temperature=0, ...)` then died with
+# `TypeError: AsyncMessages.create() got an unexpected keyword argument
+# 'temperature'`, crashing BOTH weekly evals (RAGAS + escalation E7) at the
+# judge call and leaving no snapshot for weeks (issues #124/#125). The offline
+# judge MUST stay deterministic (temperature=0) - that is the whole point of a
+# pinned eval judge - so we hold on the last 0.x that expresses temperature=0
+# natively (0.125.0, verified to accept it) rather than routing the sampler
+# out-of-band through `extra_body` on a 1.x SDK that deliberately dropped it.
+anthropic==0.125.0
 
 # US-001 (RAGAS integration): RAGAS provides the four canonical RAG metrics
 # (Faithfulness, Answer Relevancy, Context Precision, Context Recall) under
