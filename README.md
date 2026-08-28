@@ -90,12 +90,12 @@ infrastructure (10k seed, viewer ACL setup, sweep, regression alarm) is
 shipped; the recall curve surfaces at the corpus size where exact NN
 over the filtered set becomes more expensive than HNSW + post-filter
 (tens to hundreds of thousands of visible chunks per query). The
-nightly workflow fails loudly if the configured recall floor is
+weekly workflow fails loudly if the configured recall floor is
 breached, and separately refuses to publish a table at all when the run
 produced no signal - a `DEGENERATE RUN` notice goes out in place of the
 numbers, so an unmeasured run can never read as a measured 0.000. See
 [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md)
-§5b for the full plan output and both red-nightly paths.
+§5b for the full plan output and both red-run paths.
 
 ## Why this is hard
 
@@ -127,9 +127,9 @@ selective filters. The full write-up is in
 - **Structured RAG (text-to-SQL)** — `query_database` tool over an allowlisted read-only schema, with a semantic-layer-aware compiler so the LLM doesn't have to know table internals.
 - **Web search fallback** — `web_search` tool when local retrieval is insufficient.
 - **Sub-agents** — `spawn_document_agent` launches a sub-agent with isolated context and purpose-specific tools.
-- **Retrieval eval suite** — 60-question golden set, runner that exercises vector / keyword / hybrid against the real backend functions, recall@k / MRR / nDCG@5 metrics, optional generation + LLM-judge step. PR CI posts a delta-vs-`main` comment; nightly publishes snapshots to `docs/nightly/`.
+- **Retrieval eval suite** — 60-question golden set, runner that exercises vector / keyword / hybrid against the real backend functions, recall@k / MRR / nDCG@5 metrics, optional generation + LLM-judge step. PR CI posts a delta-vs-`main` comment; the weekly workflow publishes snapshots to `docs/nightly/`.
 - **RAGAS harness (scores not yet computed)** — the weekly workflow, gate algorithms, buyer-configurable bindings (`evals/gate/gate.yaml`), and publishing pipeline for the four canonical RAG-eval scores (Faithfulness, Answer Relevancy, Context Precision, Context Recall) are shipped, but `score_with_ragas()` is still the US-001 scaffold and returns no scores — the RAGAS table in `docs/ragas-weekly/` renders unmeasured until a later story lands the evaluation pipeline. The weekly page's retrieval metrics and cross-family Claude-judge scores are real measurements.
-- **Permissions scale benchmark** — Wikipedia 10k synthetic corpus, ef_search sweep across three permission selectivities, nightly workflow with regression alarm.
+- **Permissions scale benchmark** — Wikipedia 10k synthetic corpus, ef_search sweep across three permission selectivities, weekly workflow with regression alarm.
 
 ## Who should not use this
 
@@ -171,7 +171,7 @@ see no chunks) exits non-zero and deliberately leaves the git-tracked
 `evals/permissions_scale/summary.md` untouched, so the embedded table
 is never replaced by a failure notice you could commit by accident.
 Pass `--summary <path>` to capture that notice as an artifact instead -
-that is what the nightly workflow does.
+that is what the weekly workflow does.
 
 Found a security issue? Report it privately through GitHub's
 **Security** tab -> **Report a vulnerability**, not a public issue -
@@ -184,12 +184,12 @@ backend/                FastAPI service (Dockerfile, railway.toml, fly.toml)
 frontend/               React + Vite + Tailwind (vercel.json)
 supabase/               Migrations + local CLI config
 evals/retrieval/        60-question golden set + E7 escalation golden set + runners + CI workflow integration
-evals/permissions_scale/ Wikipedia 10k corpus benchmark + nightly workflow
+evals/permissions_scale/ Wikipedia 10k corpus benchmark + weekly workflow
 evals/structured_rag/   Text-to-SQL eval
 evals/gate/             Gate-class registry (US-101) + pinned-security loader/asserts (US-102): security outputs are pinned-fail, un-downgradable, silenced only by deleting the eval; buyer-authored gate.yaml declaration carries the RAGAS gates' project bindings (cells/thresholds/cross-family judge map, US-103) + a per-suite off|comment|fail verdict layer mapping severity to a CI action over the 3 quality suites (US-104) + the determinism-to-CI-placement rule (placement.py, US-105): a per_pr: section opts deterministic gates into per-PR merge-blocking and structurally rejects a per-PR fail on a non-deterministic (LLM-judged) gate
 db_seed/                Deterministic seeders for the eval corpora (+ generic_seed for your own/production corpus)
 docs/                   Long-form writeups (evals, structured RAG, permissions-aware RAG)
-.github/workflows/      PR + nightly eval workflows
+.github/workflows/      PR + scheduled eval workflows
 .claude/                Agent task specs (not needed to run the app)
 ```
 
@@ -414,8 +414,8 @@ The CI workflows wrap the eval runners:
 - **`.github/workflows/ship-green.yml`** — runs on PRs and on `push: main` that touch the green-determining surface (the shipped `db_seed/corpus/` + seeder, the golden set + runner, the gate + E4 security assert, the production chunk/embed/retrieval paths, or the migrations), plus manual `workflow_dispatch`. This is the **"kit ships green out of the box"** guarantee (US-111): a clean `python -m db_seed.corpus_seed` → `python -m evals.retrieval.runner --viewers all` on the shipped artifacts with zero buyer authoring, then a hard assert that the `security_no_access` table is **1.000** across every `no_access` cell (reusing the same pinned `evals/gate/security.py` invariant, with an `e4_structurally_blind` guard that refuses a vacuous pass). Unlike `retrieval-eval.yml` (an advisory *delta-vs-main* comment) this is an **absolute** green assertion, and by also running on `push: main` it catches a demo corpus that rots directly on main. E4-only by design — E6 is already the per-PR hard gate and the LLM-judged legs are scheduled-only (US-105).
 - **`.github/workflows/escalation-eval-weekly.yml`** — Sundays 06:00 UTC + manual `workflow_dispatch`. Runs the **full** E7 deflection sweep including the LLM-judged P2/P3 legs + the knob sweep; publishes to `docs/escalation-weekly/<DATE>.md` + `.json`. A measured false-resolve rate above the buyer's ceiling (the pinned safety number) fails the *scheduled* workflow and files an issue — it never blocks a merge (a judge wobble must not red-bar a PR; US-059). A run that produces **no snapshot at all** (a bad `ANTHROPIC_API_KEY`, a seed failure, a job that dies before the runner) is a third state - **UNMEASURED**, not green and not red: it files its own deduped `e7-weekly-harness-failure` issue saying the safety invariants went unevaluated, fails the job, and is deliberately kept out of the gate-finding path so a crash is never captioned "a pinned safety invariant fired". The harness-failure issue auto-closes on the next run that does produce a snapshot. A separate `Alarm on stranded eval publish` step covers the *other* failure mode - a snapshot produced but not published to `main` (a failed mint of the eval-publish GitHub App token, e.g. missing/invalid `EVAL_PUBLISH_APP_ID` / `EVAL_PUBLISH_APP_PRIVATE_KEY` secrets; the App token, re-minted each run, replaces the old expiring PAT whose lapse stranded 17 nights of receipts from 2026-08-12) - filing a deduped, auto-closing `e7-weekly-publish-failure` issue under the default `GITHUB_TOKEN` so it fires even when the publish App credentials are what is missing.
 - **`.github/workflows/retrieval-eval-ragas-weekly.yml`** — Sundays 04:00 UTC + manual `workflow_dispatch`. Runs the weekly RAGAS harness (the four canonical RAGAS scores are **not yet computed** - `score_with_ragas()` is still the US-001 scaffold, so the published RAGAS table renders unmeasured; see "What else is in the box" above); publishes to `docs/ragas-weekly/<DATE>.md`; files an issue on a red gate finding. Same three-state contract as the escalation weekly above: a run that produces **no snapshot** is **UNMEASURED**, files a deduped `ragas-weekly-harness-failure` issue (naming that the newest published snapshot is now stale and must not be read as current), and fails the job rather than reporting a gate verdict it never computed. A snapshot that is produced but cannot be published to `main` (e.g. a failed mint of the eval-publish GitHub App token from the `EVAL_PUBLISH_APP_ID` / `EVAL_PUBLISH_APP_PRIVATE_KEY` secrets) is caught by the shared `Alarm on stranded eval publish` step, which files a deduped, auto-closing `ragas-weekly-publish-failure` issue.
-- **`.github/workflows/retrieval-eval-nightly.yml`** — daily 02:00 UTC. Publishes snapshots to `docs/nightly/<DATE>.md` + `.json`, plus a `hybrid+llm` reranker observability run to `docs/nightly/<DATE>-rerank-llm.json` (US-117) in an isolated `continue-on-error` step after the baseline publish, so a reranker failure never blocks the baseline snapshot. Either publish step failing (typically a failed mint of the eval-publish GitHub App token from the `EVAL_PUBLISH_APP_ID` / `EVAL_PUBLISH_APP_PRIVATE_KEY` secrets) is caught by an `Alarm on stranded eval publish` step that files a deduped, auto-closing `retrieval-nightly-publish-failure` issue naming the stranded branch(es); the workflow carries `issues: write` for it. Reranker methodology + recommendation: `docs/reranker-bakeoff.md`.
-- **`.github/workflows/permissions-scale-eval.yml`** — daily 03:00 UTC + manual `workflow_dispatch`. Runs the Wikipedia 10k seed + ef_search sweep; publishes `docs/permissions-scale-nightly/<DATE>.md` + `.json` as a pair that always describes the *same* run (the runner writes both to scratch paths, so a job that dies before the eval publishes neither and leaves any earlier artifact for that date untouched). **Fails the workflow if the configured recall floor is breached** — this is the regression alarm for the day the planner flips to HNSW for some workload. It also fails, with a different meaning, when the run produced no signal to score: the published `<DATE>.md` then carries a `DEGENERATE RUN` heading (the harness refused to score, naming the viewer / question / `ef_search` that went dark) or a `RUN FAILED` heading (the measurement phase crashed), and no `.json`. Triage off the notice heading, not off a red job alone - only a real recall@5 table means the floor alarm fired. A snapshot that scores but cannot be published to `main` (e.g. a failed mint of the eval-publish GitHub App token from the `EVAL_PUBLISH_APP_ID` / `EVAL_PUBLISH_APP_PRIVATE_KEY` secrets) is caught by an `Alarm on stranded eval publish` step that files a deduped, auto-closing `permissions-scale-publish-failure` issue; the workflow carries `issues: write` for it. See [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md) §5b.
+- **`.github/workflows/retrieval-eval-nightly.yml`** — Wednesdays 02:00 UTC + manual `workflow_dispatch`. Publishes snapshots to `docs/nightly/<DATE>.md` + `.json`, plus a `hybrid+llm` reranker observability run to `docs/nightly/<DATE>-rerank-llm.json` (US-117) in an isolated `continue-on-error` step after the baseline publish, so a reranker failure never blocks the baseline snapshot. Either publish step failing (typically a failed mint of the eval-publish GitHub App token from the `EVAL_PUBLISH_APP_ID` / `EVAL_PUBLISH_APP_PRIVATE_KEY` secrets) is caught by an `Alarm on stranded eval publish` step that files a deduped, auto-closing `retrieval-nightly-publish-failure` issue naming the stranded branch(es); the workflow carries `issues: write` for it. Reranker methodology + recommendation: `docs/reranker-bakeoff.md`.
+- **`.github/workflows/permissions-scale-eval.yml`** — Wednesdays 03:00 UTC + manual `workflow_dispatch`. Runs the Wikipedia 10k seed + ef_search sweep; publishes `docs/permissions-scale-nightly/<DATE>.md` + `.json` as a pair that always describes the *same* run (the runner writes both to scratch paths, so a job that dies before the eval publishes neither and leaves any earlier artifact for that date untouched). **Fails the workflow if the configured recall floor is breached** — this is the regression alarm for the day the planner flips to HNSW for some workload. It also fails, with a different meaning, when the run produced no signal to score: the published `<DATE>.md` then carries a `DEGENERATE RUN` heading (the harness refused to score, naming the viewer / question / `ef_search` that went dark) or a `RUN FAILED` heading (the measurement phase crashed), and no `.json`. Triage off the notice heading, not off a red job alone - only a real recall@5 table means the floor alarm fired. A snapshot that scores but cannot be published to `main` (e.g. a failed mint of the eval-publish GitHub App token from the `EVAL_PUBLISH_APP_ID` / `EVAL_PUBLISH_APP_PRIVATE_KEY` secrets) is caught by an `Alarm on stranded eval publish` step that files a deduped, auto-closing `permissions-scale-publish-failure` issue; the workflow carries `issues: write` for it. See [`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md) §5b.
 
 To run the eval locally:
 
@@ -511,5 +511,5 @@ acceptance criteria live in `.claude/agent/tasks/prd-agentic-rag.md`.
 | 7 | Additional tools — `query_database`, `web_search` |
 | 8 | Sub-agents — `spawn_document_agent` |
 | 9 | Structured RAG with semantic-layer-aware text-to-SQL |
-| 10 | Retrieval eval suite (golden set, metrics, PR CI delta, nightly) |
+| 10 | Retrieval eval suite (golden set, metrics, PR CI delta, weekly) |
 | 11 | Permission-aware retrieval (per-chunk ACLs, share dialog, granting-principal badges) |

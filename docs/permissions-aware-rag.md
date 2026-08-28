@@ -400,7 +400,7 @@ construction; the curve at 40 / 80 / 200 is what the table reports.
 > step - `python -m evals.permissions_scale.runner` with its DEFAULT
 > `--summary`, then `python -m docs._embed_eval_summaries`, then a commit -
 > which is exactly why the date stamp above and this pointer are the
-> operative instruction. The live per-night output is in
+> operative instruction. The live per-run output is in
 > [`permissions-scale-nightly/`](permissions-scale-nightly/); read that,
 > not this snapshot.
 
@@ -448,11 +448,11 @@ per query. A 100k+ corpus benchmark is the natural follow-up; v0 ships
 the eval infrastructure (10k seed, viewer ACL setup, ef_search sweep)
 and the `--enforce-floor` regression alarm so the day the planner *does*
 flip to HNSW for some workload, we'll see the curve in the table and
-the nightly will fail loudly. Today the floor is set at recall@5 ≥ 0.10
+the weekly run will fail loudly. Today the floor is set at recall@5 ≥ 0.10
 for `(viewer_1pct, ef_search=40)`; with the planner choosing exact NN
 the actual is 1.000.
 
-**Two ways this nightly goes red, and they mean opposite things.** The
+**Two ways this weekly run goes red, and they mean opposite things.** The
 first is the floor alarm above: a measured recall@5 dropped, which is
 the signal the eval exists to raise. The second is a *refusal* - the
 harness will not score a run that produced no signal. Gold here is not
@@ -465,7 +465,7 @@ nothing to score (also on an unseeded corpus, and on a viewer ×
 publishes a **`DEGENERATE RUN`** notice - naming the viewer, question
 id and `ef_search` that went dark - in place of the table. Any other
 crash on the measurement path publishes a **`RUN FAILED`** notice. So
-triage a red nightly off the heading in the published `<DATE>.md`:
+triage a red weekly run off the heading in the published `<DATE>.md`:
 only a real recall@5 table means the floor alarm fired. The refusal is
 deliberately scoped to the *gold* cell - a non-gold cell returning zero
 rows is a genuine measured recall collapse, exactly the phenomenon this
@@ -565,7 +565,7 @@ the file is git-tracked and holds the last good table, so a failed
 local run can never leave a `DEGENERATE RUN` notice staged for an
 accidental `git commit -a` and from there into this doc. Pass
 `--summary <scratch-path>` when you *want* the notice as an artifact;
-that is how the nightly publishes it (§5b). The refusal itself is
+that is how the weekly run publishes it (§5b). The refusal itself is
 pinned by `python -m evals.permissions_scale.test_degenerate_guard`,
 which runs fully offline - no database, no secrets, no network -
 deliberately, so it cannot pass merely because the local database

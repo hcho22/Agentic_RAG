@@ -69,6 +69,6 @@ Caveat: the local corpus is only 16 chunks, so many queries retrieve fewer than 
 3. **The latency cost is severe** (~1.2s median added per query) on an interactive assistant path, and the reranker is explicitly barred from the widget deflection path (raw-cosine escalation gate, E7-gated — PRD Non-Goals).
 4. **The matrix is incomplete** — Cohere/Voyage, the purpose-built cross-encoders that would be the real production candidates, were not measurable without API keys.
 
-**Observability going forward:** the nightly workflow (`.github/workflows/retrieval-eval-nightly.yml`) now publishes a `hybrid+llm` reranker run beside the baseline (`docs/nightly/<date>-rerank-llm.json`), so the reranker delta is tracked over time as the corpus and golden set evolve.
+**Observability going forward:** the weekly workflow (`.github/workflows/retrieval-eval-nightly.yml`) now publishes a `hybrid+llm` reranker run beside the baseline (`docs/nightly/<date>-rerank-llm.json`), so the reranker delta is tracked over time as the corpus and golden set evolve.
 
 **Before any default change:** rerun the bake-off with `COHERE_API_KEY` / `VOYAGE_API_KEY` to measure the hosted cross-encoders (lower latency, purpose-built for reranking). If one shows a large, uniform adversarial win at acceptable latency, that motivates a follow-up story to wire it into the **assistant** path only — the widget deflection path remains a separate, E7-gated decision.
