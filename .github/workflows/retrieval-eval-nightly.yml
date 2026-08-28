@@ -1,19 +1,23 @@
-# US-035: nightly retrieval-eval workflow. Runs the same 60-question
-# golden set the PR workflow does, on a schedule (02:00 UTC daily) and on
-# manual `workflow_dispatch`. Designed to grow into the "full sweep
-# including reranker modes" the PRD calls for — the reranker portion is a
-# documented TODO pending a runner extension (see notes inside the run
-# step). Today's nightly covers vector / keyword / hybrid against main,
+# US-035: weekly retrieval-eval workflow. Runs the same 60-question
+# golden set the PR workflow does, on a schedule (weekly, Wednesday 02:00
+# UTC) and on manual `workflow_dispatch`. Designed to grow into the "full
+# sweep including reranker modes" the PRD calls for — the reranker portion
+# is a documented TODO pending a runner extension (see notes inside the run
+# step). Today's sweep covers vector / keyword / hybrid against main,
 # publishing JSON + markdown snapshots under `docs/nightly/` so the
-# repo has a long-running historical record.
+# repo has a long-running historical record. (The inputs — a fixed
+# deterministic corpus and pinned models — don't change between runs and
+# per-PR CI already catches code regressions, so a weekly cadence suffices;
+# the `docs/nightly/` path is retained to keep the dated snapshot history.)
 
-name: Retrieval eval (nightly)
+name: Retrieval eval (weekly)
 
 on:
   schedule:
-    # 02:00 UTC daily — pick a quiet time so the run doesn't compete with
-    # PR CI on the same Supabase docker stack.
-    - cron: '0 2 * * *'
+    # Weekly, Wednesday 02:00 UTC — a quiet time so the run doesn't compete
+    # with PR CI on the same Supabase docker stack, and offset from the
+    # Sunday RAGAS/Escalation weeklies so the suite runs twice a week.
+    - cron: '0 2 * * 3'
   workflow_dispatch:
 
 permissions:
@@ -142,7 +146,7 @@ jobs:
             exit 1
           fi
           BODY=$(printf '%s\n' \
-            "Automated docs-only eval snapshot from the \`Retrieval eval (nightly)\` workflow (run ${GITHUB_RUN_ID})." \
+            "Automated docs-only eval snapshot from the \`Retrieval eval (weekly)\` workflow (run ${GITHUB_RUN_ID})." \
             '' \
             'Publishes the nightly retrieval receipts under `docs/nightly/` via an auto-merging PR instead of a direct `git push` to `main`, so the required security-gate checks on `main` are satisfied - a docs-only PR trips them as skipped=pass.' \
             '' \
@@ -212,7 +216,7 @@ jobs:
             exit 1
           fi
           BODY=$(printf '%s\n' \
-            "Automated docs-only reranker-observability snapshot from the \`Retrieval eval (nightly)\` workflow (run ${GITHUB_RUN_ID})." \
+            "Automated docs-only reranker-observability snapshot from the \`Retrieval eval (weekly)\` workflow (run ${GITHUB_RUN_ID})." \
             '' \
             'Publishes the nightly reranker receipt under `docs/nightly/` via an auto-merging PR instead of a direct `git push` to `main`, so the required security-gate checks on `main` are satisfied - a docs-only PR trips them as skipped=pass.' \
             '' \
@@ -272,7 +276,7 @@ jobs:
               gh issue create --label "${LABEL}" \
                 --title "Retrieval nightly: snapshot failed to publish to main" \
                 --body "$(printf '%s\n' \
-                  "A publish step in the \`Retrieval eval (nightly)\` workflow failed, so a snapshot was NOT published to \`main\`." \
+                  "A publish step in the \`Retrieval eval (weekly)\` workflow failed, so a snapshot was NOT published to \`main\`." \
                   "" \
                   "The most common cause is a failed mint of the eval-publish GitHub App token that \`gh pr create\` authenticates with - missing or invalid \`EVAL_PUBLISH_APP_ID\` / \`EVAL_PUBLISH_APP_PRIVATE_KEY\` repo secrets. Check the failing publish step's log for the \`::error::\` line naming the cause." \
                   "" \
@@ -341,7 +345,7 @@ jobs:
               gh issue create --label "${LABEL}" \
                 --title "Retrieval nightly: harness aborted before publishing a snapshot" \
                 --body "$(printf '%s\n' \
-                  "The \`Retrieval eval (nightly)\` job failed BEFORE either publish step ran, so no snapshot was produced and the 'Alarm on stranded eval publish' step never fired." \
+                  "The \`Retrieval eval (weekly)\` job failed BEFORE either publish step ran, so no snapshot was produced and the 'Alarm on stranded eval publish' step never fired." \
                   "" \
                   "The most common cause is a failed mint of the eval-publish GitHub App token - missing or invalid \`EVAL_PUBLISH_APP_ID\` / \`EVAL_PUBLISH_APP_PRIVATE_KEY\` repo secrets - but any setup abort (supabase start, pip install, the seed step, or the timeout kill) lands here too. Check the earliest failing step's log." \
                   "" \
