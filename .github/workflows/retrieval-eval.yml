@@ -223,7 +223,15 @@ jobs:
   # refuses a truncated/empty answer (a reasoning-budget cutoff) instead of
   # returning "" for the judge to score as a real low result.
   #
-  # All six are offline by construction - no DB, no secrets, no network, inputs
+  # The judge-SDK-compat guard (evals/retrieval/test_judge_sdk_compat.py) is a
+  # dependency-drift tripwire: the anthropic 1.0 major REMOVED the `temperature`
+  # kwarg from messages.create(), so a loose `anthropic>=...` in
+  # evals/retrieval/requirements.txt let CI resolve 1.2.0 and crash BOTH weeklies
+  # at the deterministic offline judge (issues #124/#125). It asserts the pin still
+  # excludes the temperature-less 1.x major - offline, no anthropic import needed,
+  # so it runs in this slim job and fails the PR that would re-open the crash.
+  #
+  # All seven are offline by construction - no DB, no secrets, no network, inputs
   # built in-process (the two gate modules drive fake judge clients, so there is
   # no network call to make) - which is what lets this job gate a PR without the
   # Supabase stack the two jobs below pay for. The rubric module's LIVE half
@@ -251,7 +259,7 @@ jobs:
 
       - name: Install Python deps
         run: |
-          # Same slim install as the eval job: all six guard modules import only
+          # Same slim install as the eval job: all seven guard modules import only
           # what requirements-ci.txt already covers (asyncpg / httpx / openai /
           # pyyaml / pyjwt), never the ML stack. The rubric guard reaches
           # backend/escalation.py -> retrieval -> embeddings, which stays inside
@@ -262,12 +270,13 @@ jobs:
           pip install -r evals/retrieval/requirements-ci.txt
 
       - name: Run the offline harness guards
-        # No `|| true`, no skip-on-unset-env: these six modules must always run
+        # No `|| true`, no skip-on-unset-env: these seven modules must always run
         # and a non-zero exit must block the merge. A guard that can go quiet is
         # the failure mode it exists to catch.
         run: |
           python -m evals.retrieval.test_empty_gold_guard
           python -m evals.retrieval.test_us120_generation_guard
+          python -m evals.retrieval.test_judge_sdk_compat
           python -m evals.permissions_scale.test_degenerate_guard
           python -m backend.test_answer_gate_rubric
           python -m backend.test_answer_gate
