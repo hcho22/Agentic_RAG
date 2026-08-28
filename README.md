@@ -128,8 +128,18 @@ selective filters. The full write-up is in
 - **Web search fallback** — `web_search` tool when local retrieval is insufficient.
 - **Sub-agents** — `spawn_document_agent` launches a sub-agent with isolated context and purpose-specific tools.
 - **Retrieval eval suite** — 60-question golden set, runner that exercises vector / keyword / hybrid against the real backend functions, recall@k / MRR / nDCG@5 metrics, optional generation + LLM-judge step. PR CI posts a delta-vs-`main` comment; nightly publishes snapshots to `docs/nightly/`.
-- **RAGAS metrics** — the four canonical RAG-eval scores (Faithfulness, Answer Relevancy, Context Precision, Context Recall) computed weekly alongside the custom Claude judge and published to `docs/ragas-weekly/`.
+- **RAGAS harness (scores not yet computed)** — the weekly workflow, gate algorithms, buyer-configurable bindings (`evals/gate/gate.yaml`), and publishing pipeline for the four canonical RAG-eval scores (Faithfulness, Answer Relevancy, Context Precision, Context Recall) are shipped, but `score_with_ragas()` is still the US-001 scaffold and returns no scores — the RAGAS table in `docs/ragas-weekly/` renders unmeasured until a later story lands the evaluation pipeline. The weekly page's retrieval metrics and cross-family Claude-judge scores are real measurements.
 - **Permissions scale benchmark** — Wikipedia 10k synthetic corpus, ef_search sweep across three permission selectivities, nightly workflow with regression alarm.
+
+## Who should not use this
+
+Stated here so you find it from us, not from a post-mortem:
+
+- **You need owner/editor/viewer role tiers.** Every grant is read access; there is no write-permission hierarchy ([`docs/permissions-aware-rag.md`](docs/permissions-aware-rag.md) §6).
+- **You need nested group membership.** Groups are flat in v0; a group cannot contain a group (same doc, §6).
+- **You need demonstrated recall at 100k+ visible chunks per query.** The scale benchmark runs at 10k chunks, where the planner sidesteps HNSW and every cell reads a trivially-perfect 1.000; the instrumentation and regression alarm for the day that flips are shipped, the curve itself is unmeasured.
+- **You want internal search across Slack / Drive / Confluence.** There are no SaaS connectors here; this is the retrieval layer inside a product you are building.
+- **You expect the shipped golden set to survive your corpus.** It will fail loud by design — replacing the corpus and authoring your own golden set are the same step ([`docs/demo-corpora.md`](docs/demo-corpora.md)).
 
 ## Documentation
 
