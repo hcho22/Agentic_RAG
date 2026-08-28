@@ -183,6 +183,7 @@ The kit's default configuration judges quality with **two independent judges fro
 
 The generator is OpenAI (`gpt-5.6-luna`) and the RAGAS judge is the same family - a judge can be systematically lenient toward outputs from its own family.
 The kit corroborates every RAGAS Faithfulness / Answer Relevancy drop against an independent **cross-family Claude judge** (a different vendor, a different model, a different prompting technique), and only escalates to a red alert when *both* judges see the same drop in the same cell.
+(Honesty note: the RAGAS scores themselves are not yet computed - `score_with_ragas()` is still the US-001 scaffold - so the corroboration gate is shipped but inert until a later story lands the evaluation pipeline; the cross-family Claude-judge scores are real today. See `docs/evals.md` §"RAGAS comparison".)
 
 In moat terms: cross-family corroboration is **one extra judge pass on the weekly sweep, cents of spend**, and it turns "a number moved" into "**two independent judges from different families agree the number moved**."
 That is the difference between a metric you tune internally and a result you can defend to a client.
