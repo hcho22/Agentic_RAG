@@ -5,6 +5,11 @@
 # own concurrency group and snapshot directory so it never tangles with the
 # daily nightly retrieval workflow.
 #
+# NOTE: the RAGAS scores themselves are not yet computed - `score_with_ragas()`
+# is still the US-001 scaffold returning no scores, so the published RAGAS
+# table renders unmeasured until a later story lands the evaluation pipeline.
+# The page's retrieval metrics and cross-family Claude-judge scores are real.
+#
 # Snapshots land under `docs/ragas-weekly/<DATE>.{json,md}` — the rolling
 # history the diagnostic / score-regression gates (US-006 / US-007) compare
 # against. A red gate finding (US-005 operational, or a US-007 corroborated
